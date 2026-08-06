@@ -18,8 +18,6 @@ var (
 	mu  sync.RWMutex
 )
 
-const minJWTSecretLength = 32
-
 // CoreConfig 顶层配置结构，包含 main 和 logger 两个模块。
 type CoreConfig struct {
 	MainConf MainConfig `yaml:"main"`
@@ -42,9 +40,7 @@ type MainConfig struct {
 	App           string            `yaml:"app"`
 	HttpAddr      string            `yaml:"http_addr"`
 	DatabaseConns map[string]string `yaml:"database_conns"`
-	Redis         RedisConfig       `yaml:"redis"`
 	CORS          CORSConfig        `yaml:"cors"`
-	JWT           JwtConfig         `yaml:"jwt"`
 	Env           string            `yaml:"env"`
 }
 
@@ -130,15 +126,6 @@ func (c *CoreConfig) Validate() error {
 	parsedDSN, err := url.Parse(coreDSN)
 	if err != nil || parsedDSN.Scheme == "" {
 		return fmt.Errorf("main.database_conns.core is invalid")
-	}
-	if len(c.MainConf.JWT.Secret) < minJWTSecretLength {
-		return fmt.Errorf("main.jwt.secret must contain at least %d bytes", minJWTSecretLength)
-	}
-	if c.MainConf.JWT.Expire <= 0 {
-		return fmt.Errorf("main.jwt.expire must be positive")
-	}
-	if c.MainConf.Redis.DB < 0 {
-		return fmt.Errorf("main.redis.db cannot be negative")
 	}
 	return nil
 }

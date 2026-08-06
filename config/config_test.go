@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 const validConfigYAML = `
@@ -15,13 +14,6 @@ main:
   http_addr: 127.0.0.1:18080
   database_conns:
     core: "sqlite:///:memory:"
-  redis:
-    addr: 127.0.0.1:6379
-    password: ""
-    db: 0
-  jwt:
-    secret: 0123456789abcdef0123456789abcdef
-    expire: 24h
 logger: {}
 `
 
@@ -50,6 +42,25 @@ func TestLoadYamlReaderRejectsMultipleDocuments(t *testing.T) {
 	}
 }
 
+func TestLoadYamlReaderRejectsDatabaseBackedRuntimeSettings(t *testing.T) {
+	t.Parallel()
+
+	for _, field := range []string{"redis", "jwt"} {
+		t.Run(field, func(t *testing.T) {
+			configYAML := strings.Replace(
+				validConfigYAML,
+				"logger: {}",
+				"  "+field+": {}\nlogger: {}",
+				1,
+			)
+			var cfg CoreConfig
+			if err := LoadYamlReader(strings.NewReader(configYAML), &cfg); err == nil {
+				t.Fatalf("expected main.%s to be rejected; use core_settings", field)
+			}
+		})
+	}
+}
+
 func TestCoreConfigValidate(t *testing.T) {
 	t.Parallel()
 
@@ -58,10 +69,6 @@ func TestCoreConfigValidate(t *testing.T) {
 		Env:           "test",
 		HttpAddr:      "127.0.0.1:18080",
 		DatabaseConns: map[string]string{"core": "sqlite:///:memory:"},
-		JWT: JwtConfig{
-			Secret: strings.Repeat("a", 32),
-			Expire: time.Hour,
-		},
 	}}
 
 	tests := []struct {
@@ -73,9 +80,6 @@ func TestCoreConfigValidate(t *testing.T) {
 		{name: "invalid http address", mutate: func(cfg *CoreConfig) { cfg.MainConf.HttpAddr = "18080" }},
 		{name: "missing core database", mutate: func(cfg *CoreConfig) { cfg.MainConf.DatabaseConns = nil }},
 		{name: "invalid core database", mutate: func(cfg *CoreConfig) { cfg.MainConf.DatabaseConns["core"] = "://" }},
-		{name: "short jwt secret", mutate: func(cfg *CoreConfig) { cfg.MainConf.JWT.Secret = "short" }},
-		{name: "invalid jwt expiration", mutate: func(cfg *CoreConfig) { cfg.MainConf.JWT.Expire = 0 }},
-		{name: "negative redis database", mutate: func(cfg *CoreConfig) { cfg.MainConf.Redis.DB = -1 }},
 	}
 
 	if err := valid.Validate(); err != nil {
