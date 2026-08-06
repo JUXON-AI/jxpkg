@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"reflect"
 
@@ -14,6 +15,8 @@ import (
 	"github.com/JUXON-AI/jxpkg/logs"
 	"github.com/gin-gonic/gin"
 )
+
+const maxJSONBodySize = 1 << 20
 
 func transAPI(hdr interface{}) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
@@ -35,10 +38,10 @@ func transAPI(hdr interface{}) gin.HandlerFunc {
 			outVal := reflect.New(hdrType.In(2).Elem())
 			{
 				in := inVal.Interface()
-				err := json.NewDecoder(ctx.Request.Body).Decode(in)
+				err := decodeRequest(ctx, in)
 				if err != nil {
-					logs.Errorf("decode request failed, %s", err)
-					grt.BadRequest(ctx, fmt.Sprintf("decode request failed, %s", err))
+					logs.Warnw("decode request failed", "error", err)
+					grt.BadRequest(ctx, "invalid request body")
 					return
 				}
 			}
@@ -59,7 +62,7 @@ func transAPI(hdr interface{}) gin.HandlerFunc {
 					}
 					if err != nil {
 						logs.Errorf("handler return error: %s", err)
-						grt.InternalError(ctx, fmt.Sprintf("handler return error %T %s", retVal, err))
+						grt.InternalError(ctx, "internal server error")
 						return
 					}
 				}
@@ -79,6 +82,28 @@ func transAPI(hdr interface{}) gin.HandlerFunc {
 			return
 		}
 	}
+}
+
+func decodeRequest(ctx *gin.Context, destination interface{}) error {
+	if ctx.Request == nil || ctx.Request.Body == nil || ctx.Request.ContentLength == 0 {
+		return nil
+	}
+	ctx.Request.Body = http.MaxBytesReader(ctx.Writer, ctx.Request.Body, maxJSONBodySize)
+	decoder := json.NewDecoder(ctx.Request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		if err == io.EOF {
+			return nil
+		}
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values are not allowed")
+		}
+		return err
+	}
+	return nil
 }
 
 func transHttp(hdr http.HandlerFunc) gin.HandlerFunc {

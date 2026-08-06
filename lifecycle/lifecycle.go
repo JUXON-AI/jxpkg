@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/signal"
@@ -81,6 +82,7 @@ func (l *LifeCycle) CancelContext() {
 func (l *LifeCycle) WaitExit() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, l.listenSigs...)
+	defer signal.Stop(sigChan)
 	for {
 		select {
 		case sig := <-sigChan:
@@ -88,50 +90,57 @@ func (l *LifeCycle) WaitExit() {
 			for _, lisSig := range l.listenSigs {
 				if lisSig == sig {
 					logs.Warnf("^C exit.")
-					l.exit()
+					if err := l.Shutdown(context.Background()); err != nil {
+						logs.Errorf("shutdown failed: %v", err)
+					}
 					return
 				}
 			}
 		case <-l.chExit:
 			logs.Warnf("others exit.")
-			l.exit()
+			if err := l.Shutdown(context.Background()); err != nil {
+				logs.Errorf("shutdown failed: %v", err)
+			}
 			return
 		}
 	}
 }
 
-func (l *LifeCycle) exit() {
-	if l.exitTimeout < time.Microsecond {
-		logs.Warnf("Forced exit.")
-		os.Exit(0)
-	}
-	go func() {
-		timer := time.NewTimer(l.exitTimeout)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			logs.Warnf("Timeout. Forced exit.")
-			os.Exit(1)
-		}
-	}()
-	l.cancle()
+// Shutdown cancels the lifecycle context and closes registered resources.
+func (l *LifeCycle) Shutdown(ctx context.Context) error {
+	l.CancelContext()
 	l.closerMu.Lock()
 	closers := make([]io.Closer, len(l.preExitRun))
 	copy(closers, l.preExitRun)
 	l.closerMu.Unlock()
-	var wg sync.WaitGroup
-	wg.Add(len(closers))
-	for _, v := range closers {
-		go func(clr io.Closer) {
-			defer wg.Done()
-			if clr != nil {
-				clr.Close()
-			}
-		}(v)
+
+	timeout := l.exitTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
 	}
-	wg.Wait()
-	time.Sleep(time.Second)
-	os.Exit(0)
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		var errs []error
+		for i := len(closers) - 1; i >= 0; i-- {
+			if closers[i] == nil {
+				continue
+			}
+			if err := closers[i].Close(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		done <- errors.Join(errs...)
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-timeoutCtx.Done():
+		return timeoutCtx.Err()
+	}
 }
 
 func closeCh(ch chan struct{}) {

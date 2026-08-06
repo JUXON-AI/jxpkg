@@ -17,13 +17,28 @@ type UserClaims struct {
 	LoginWay  LoginWay `json:"l,omitempty"`
 }
 
-// Valid 校验 JWT 是否在有效期内。
-func (c UserClaims) Valid() error {
+// Validate checks the application-specific claims required for a user token.
+func (c UserClaims) Validate() error {
 	now := time.Now().Unix()
+	if c.Uin == 0 {
+		return fmt.Errorf("token user is required")
+	}
+	if c.Issuer == "" {
+		return fmt.Errorf("token issuer is required")
+	}
+	if c.Audience == "" {
+		return fmt.Errorf("token audience is required")
+	}
+	if c.IssuedAt <= 0 {
+		return fmt.Errorf("token issued at is required")
+	}
+	if c.ExpiresAt <= 0 {
+		return fmt.Errorf("token expiration is required")
+	}
 	if c.IssuedAt > now {
 		return fmt.Errorf("token used before issued")
 	}
-	if c.ExpiresAt < now {
+	if c.ExpiresAt <= now {
 		return fmt.Errorf("token is expired")
 	}
 	return nil

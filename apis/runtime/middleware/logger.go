@@ -1,10 +1,7 @@
 package middleware
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
@@ -13,8 +10,6 @@ import (
 	"github.com/JUXON-AI/jxpkg/logs"
 	"github.com/gin-gonic/gin"
 )
-
-const reqBodyMaxSize = 128
 
 // Logger 请求日志中间件，记录方法和响应码等信息。
 // whitelist 中可指定不记录日志的路径后缀（如健康检查接口）。
@@ -31,14 +26,6 @@ func Logger(whitelist ...string) gin.HandlerFunc {
 			}
 		}
 
-		reqBody, getBodyErr := getReqBody(ctx)
-		if getBodyErr != nil {
-			ctx.Error(getBodyErr)
-		}
-		if len(reqBody) > reqBodyMaxSize {
-			reqBody = reqBody[:reqBodyMaxSize]
-		}
-
 		start := time.Now()
 		ctx.Next()
 		cost := time.Since(start)
@@ -46,8 +33,7 @@ func Logger(whitelist ...string) gin.HandlerFunc {
 		if ctx.Writer.Status() >= 500 {
 			logs.LoggerFromContext(ctx).Errorw(fmt.Sprint(ctx.Writer.Status()),
 				"method", ctx.Request.Method,
-				"uri", ctx.Request.RequestURI,
-				"reqbody", reqBody,
+				"uri", requestLogURI(ctx),
 				"latency", fmt.Sprintf("%.3f", cost.Seconds()),
 				"clientip", grt.GetRealIP(ctx.Request),
 			)
@@ -55,8 +41,7 @@ func Logger(whitelist ...string) gin.HandlerFunc {
 			code := ctx.GetInt(constants.CtxKeyCode)
 			logs.LoggerFromContext(ctx).Infow(fmt.Sprint(code),
 				"method", ctx.Request.Method,
-				"uri", ctx.Request.RequestURI,
-				"reqbody", reqBody,
+				"uri", requestLogURI(ctx),
 				"latency", fmt.Sprintf("%.3f", cost.Seconds()),
 				"clientip", grt.GetRealIP(ctx.Request),
 			)
@@ -64,22 +49,12 @@ func Logger(whitelist ...string) gin.HandlerFunc {
 	}
 }
 
-func getReqBody(ctx *gin.Context) (string, error) {
-	if ctx.Request.Body == nil {
-		return "", nil
+func requestLogURI(ctx *gin.Context) string {
+	if route := ctx.FullPath(); route != "" {
+		return route
 	}
-	byteBody, err := ctx.GetRawData()
-	if err != nil {
-		return "", err
+	if ctx.Request == nil || ctx.Request.URL == nil {
+		return ""
 	}
-	ctx.Request.Body = io.NopCloser(bytes.NewBuffer(byteBody))
-
-	var compacted bytes.Buffer
-	if json.Valid(byteBody) {
-		err := json.Compact(&compacted, byteBody)
-		if err == nil {
-			return compacted.String(), nil
-		}
-	}
-	return string(byteBody), nil
+	return ctx.Request.URL.Path
 }

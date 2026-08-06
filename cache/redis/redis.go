@@ -10,8 +10,9 @@ import (
 
 // Redis 基于 go-redis 的缓存实现。
 type Redis struct {
-	ctx  context.Context
-	conn *goredis.Client
+	ctx    context.Context
+	conn   *goredis.Client
+	prefix string
 }
 
 // NewCache 创建使用指定 Redis 客户端的缓存实例。
@@ -19,9 +20,14 @@ func NewCache(rds *goredis.Client) *Redis {
 	return &Redis{conn: rds, ctx: context.Background()}
 }
 
+// NewCacheWithPrefix creates a Redis cache with a service-specific key prefix.
+func NewCacheWithPrefix(rds *goredis.Client, prefix string) *Redis {
+	return &Redis{conn: rds, ctx: context.Background(), prefix: prefix}
+}
+
 // Get 从 Redis 读取 key 对应的值并反序列化到 val 中。
 func (r *Redis) Get(key string, val interface{}) error {
-	data, err := r.conn.Get(r.ctx, key).Result()
+	data, err := r.conn.Get(r.ctx, r.key(key)).Result()
 	if err != nil {
 		return err
 	}
@@ -34,18 +40,20 @@ func (r *Redis) Set(key string, val interface{}, timeout time.Duration) error {
 	if err != nil {
 		return err
 	}
-	_, err = r.conn.Set(r.ctx, key, data, timeout).Result()
+	_, err = r.conn.Set(r.ctx, r.key(key), data, timeout).Result()
 	return err
 }
 
 // IsExist 判断 key 在 Redis 中是否存在。
 func (r *Redis) IsExist(key string) bool {
-	n, err := r.conn.Exists(r.ctx, key).Result()
+	n, err := r.conn.Exists(r.ctx, r.key(key)).Result()
 	return err == nil && n > 0
 }
 
 // Delete 删除 Redis 中的指定 key。
 func (r *Redis) Delete(key string) error {
-	_, err := r.conn.Del(r.ctx, key).Result()
+	_, err := r.conn.Del(r.ctx, r.key(key)).Result()
 	return err
 }
+
+func (r *Redis) key(key string) string { return r.prefix + key }

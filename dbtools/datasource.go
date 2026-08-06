@@ -1,6 +1,7 @@
 package dbtools
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -30,7 +31,7 @@ const (
 func InitDBConn(name, dburl string) (*gorm.DB, error) {
 	dsn, err := url.Parse(dburl)
 	if err != nil {
-		logs.Errorf("[init-db] parse dburl(%s) failed, %s", dburl, err)
+		logs.Errorf("[init-db] parse db connection(%s) failed: %s", name, err)
 		return nil, err
 	}
 	var db *gorm.DB
@@ -81,15 +82,58 @@ func InitDBConn(name, dburl string) (*gorm.DB, error) {
 
 // InitMutilDBConn 批量初始化多个数据库连接并为每个连接设置 GORM 日志。
 func InitMutilDBConn(dburls map[string]string) error {
+	initialized := make([]string, 0, len(dburls))
 	for name, dburl := range dburls {
-		logs.Infof("[init-db] init db(%s) %s", name, dburl)
+		logs.Infof("[init-db] init db(%s)", name)
 		db, err := InitDBConn(name, dburl)
 		if err != nil {
+			for _, initializedName := range initialized {
+				_ = CloseDB(initializedName)
+			}
 			return err
 		}
+		initialized = append(initialized, name)
 		db.Logger = logs.GetGorm("gorm")
 	}
 	return nil
+}
+
+// CloseDB closes and unregisters a database connection.
+func CloseDB(name string) error {
+	if name == "" {
+		name = "default"
+	}
+	dbsLocker.Lock()
+	db, ok := dbs[name]
+	if ok {
+		delete(dbs, name)
+	}
+	dbsLocker.Unlock()
+	if !ok {
+		return nil
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
+}
+
+// CloseAllDB closes and unregisters all database connections.
+func CloseAllDB() error {
+	dbsLocker.RLock()
+	names := make([]string, 0, len(dbs))
+	for name := range dbs {
+		names = append(names, name)
+	}
+	dbsLocker.RUnlock()
+	var errs []error
+	for _, name := range names {
+		if err := CloseDB(name); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // RegistryDB 将已有的 *gorm.DB 实例注册到连接池。重复注册会打印错误但不 panic。

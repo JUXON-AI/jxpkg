@@ -1,10 +1,13 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/JUXON-AI/jxpkg/apis/runtime/auth"
 	"github.com/JUXON-AI/jxpkg/apis/runtime/middleware"
@@ -30,6 +33,7 @@ type MethodFunc func(relativePath string, handlers ...gin.HandlerFunc) gin.IRout
 type Router struct {
 	eng      *gin.Engine
 	l        net.Listener
+	http     *http.Server
 	lc       *lifecycle.LifeCycle
 	Prefix   string
 	prefixes []string
@@ -110,14 +114,34 @@ func NewRouter(apiPrefix string, opts ...RouterOption) *Router {
 
 // Run 在指定 Listener 上启动 HTTP 服务，goroutine 中运行。
 func (svr *Router) Run(l net.Listener) error {
+	if l == nil {
+		return fmt.Errorf("listener is nil")
+	}
 	svr.l = l
+	svr.http = &http.Server{
+		Handler:           svr.eng,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	svr.lc.AddCloser(svr)
 	go func() {
-		if err := http.Serve(l, svr.eng); err != nil {
-			logs.Errorf("http.Serve error: %v", err)
+		if err := svr.http.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logs.Errorf("http server error: %v", err)
+			svr.lc.Exit()
 		}
-		svr.lc.Exit()
 	}()
 	return nil
+}
+
+// Close gracefully stops the HTTP server.
+func (svr *Router) Close() error {
+	if svr.http == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return svr.http.Shutdown(ctx)
 }
 
 // GinEngine 返回内部的 Gin 引擎。

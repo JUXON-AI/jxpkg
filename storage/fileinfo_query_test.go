@@ -12,7 +12,7 @@ import (
 func TestFileQuery_First(t *testing.T) {
 
 	dbConfigStr := ""
-	error := dbtools.InitMutilMySQL(map[string]string{
+	error := dbtools.InitMutilDBConn(map[string]string{
 		"core": dbConfigStr,
 	})
 	if error != nil {
