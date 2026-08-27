@@ -3,7 +3,7 @@ GO ?= go
 .PHONY: fmt-check vet compile test vendor-check
 
 fmt-check:
-	@test -z "$$(gofmt -l $$(git ls-files '*.go'))"
+	@test -z "$$(gofmt -l $$(git ls-files '*.go' ':!vendor/**'))"
 
 vet:
 	$(GO) vet ./...
