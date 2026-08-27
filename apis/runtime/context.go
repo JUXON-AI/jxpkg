@@ -7,13 +7,29 @@ import (
 
 	"github.com/JUXON-AI/jxpkg/apis/constants"
 	"github.com/JUXON-AI/jxpkg/apis/runtime/auth"
-	"github.com/JUXON-AI/jxpkg/config"
 	"github.com/gin-gonic/gin"
+
+	"github.com/JUXON-AI/jxpkg/config"
 )
 
-// Uin 从 Gin Context 中获取当前登录用户 ID。
-func Uin(ctx *gin.Context) uint {
-	return ctx.GetUint(constants.CtxKeyUin)
+// UserID 从 Gin Context 中获取当前登录用户 ID。
+func UserID(ctx *gin.Context) uint {
+	return ctx.GetUint(constants.CtxKeyUserID)
+}
+
+// UIN 从 Gin Context 中获取当前公司身份 ID。
+func UIN(ctx *gin.Context) uint {
+	return ctx.GetUint(constants.CtxKeyUIN)
+}
+
+// CompanyID 从 Gin Context 中获取当前公司 ID。
+func CompanyID(ctx *gin.Context) uint {
+	return ctx.GetUint(constants.CtxKeyCompanyID)
+}
+
+// MembershipEpoch 从 Gin Context 中获取当前成员身份代次。
+func MembershipEpoch(ctx *gin.Context) uint64 {
+	return ctx.GetUint64(constants.CtxKeyMembershipEpoch)
 }
 
 // LoginStatus 从 Gin Context 中获取当前请求的登录状态。

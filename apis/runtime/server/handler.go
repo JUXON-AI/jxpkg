@@ -3,7 +3,6 @@ package server
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"reflect"
 
@@ -16,9 +15,36 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const maxJSONBodySize = 1 << 20
+const maxRequestBodyBytes int64 = 1 << 20
 
-func transAPI(hdr interface{}) gin.HandlerFunc {
+type apiOptions struct {
+	maxRequestBodyBytes int64
+}
+
+// APIOption 配置 API handler。
+type APIOption func(*apiOptions)
+
+// WithMaxRequestBodyBytes 设置单个 API 的请求体上限。
+func WithMaxRequestBodyBytes(size int64) APIOption {
+	return func(options *apiOptions) {
+		if size > 0 {
+			options.maxRequestBodyBytes = size
+		}
+	}
+}
+
+// API 将反射式 API handler 转换为支持独立配置的 Gin handler。
+func API(hdr interface{}, opts ...APIOption) gin.HandlerFunc {
+	return transAPI(hdr, opts...)
+}
+
+func transAPI(hdr interface{}, opts ...APIOption) gin.HandlerFunc {
+	options := apiOptions{maxRequestBodyBytes: maxRequestBodyBytes}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
 	return func(ctx *gin.Context) {
 		hdrType := reflect.TypeOf(hdr)
 		switch hdrType.Kind() {
@@ -38,10 +64,11 @@ func transAPI(hdr interface{}) gin.HandlerFunc {
 			outVal := reflect.New(hdrType.In(2).Elem())
 			{
 				in := inVal.Interface()
-				err := decodeRequest(ctx, in)
+				ctx.Request.Body = http.MaxBytesReader(ctx.Writer, ctx.Request.Body, options.maxRequestBodyBytes)
+				err := json.NewDecoder(ctx.Request.Body).Decode(in)
 				if err != nil {
-					logs.Warnw("decode request failed", "error", err)
-					grt.BadRequest(ctx, "invalid request body")
+					logs.Errorf("decode request failed, %s", err)
+					grt.BadRequest(ctx, fmt.Sprintf("decode request failed, %s", err))
 					return
 				}
 			}
@@ -62,7 +89,7 @@ func transAPI(hdr interface{}) gin.HandlerFunc {
 					}
 					if err != nil {
 						logs.Errorf("handler return error: %s", err)
-						grt.InternalError(ctx, "internal server error")
+						grt.InternalError(ctx, fmt.Sprintf("handler return error %T %s", retVal, err))
 						return
 					}
 				}
@@ -82,28 +109,6 @@ func transAPI(hdr interface{}) gin.HandlerFunc {
 			return
 		}
 	}
-}
-
-func decodeRequest(ctx *gin.Context, destination interface{}) error {
-	if ctx.Request == nil || ctx.Request.Body == nil || ctx.Request.ContentLength == 0 {
-		return nil
-	}
-	ctx.Request.Body = http.MaxBytesReader(ctx.Writer, ctx.Request.Body, maxJSONBodySize)
-	decoder := json.NewDecoder(ctx.Request.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
-		if err == io.EOF {
-			return nil
-		}
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		if err == nil {
-			return fmt.Errorf("multiple JSON values are not allowed")
-		}
-		return err
-	}
-	return nil
 }
 
 func transHttp(hdr http.HandlerFunc) gin.HandlerFunc {

@@ -2,7 +2,6 @@ package lifecycle
 
 import (
 	"context"
-	"errors"
 	"io"
 	"os"
 	"os/signal"
@@ -15,45 +14,56 @@ import (
 
 var std *LifeCycle
 
-// LifeCycle 应用生命周期管理器，支持信号监听、优雅退出和资源清理。
+// LifeCycle 应用程序生命周期
 type LifeCycle struct {
-	ctx         context.Context
-	cancle      context.CancelFunc
-	chExit      chan struct{}
+	ctx    context.Context
+	cancle context.CancelFunc
+	chExit chan struct{}
+
+	// exitTimeout 退出过期时间
 	exitTimeout time.Duration
-	listenSigs  []os.Signal
-	preExitRun  []io.Closer
-	closerMu    sync.Mutex
+	// listenSigs 监听的信号量
+	listenSigs []os.Signal
+
+	preExitRun []io.Closer
 }
 
-// New 创建生命周期实例，默认监听 SIGTERM 和 os.Interrupt，退出超时 15 秒。
+// New .
 func New() *LifeCycle {
 	ctx, cancle := context.WithCancel(context.Background())
-	return &LifeCycle{
+	lc := &LifeCycle{
 		ctx:         ctx,
 		cancle:      cancle,
 		chExit:      make(chan struct{}),
 		exitTimeout: time.Second * 15,
 		listenSigs:  []os.Signal{syscall.SIGTERM, os.Interrupt},
 	}
+
+	return lc
 }
 
-// SetSignals 设置需要监听的退出信号。
-func (l *LifeCycle) SetSignals(sigs ...os.Signal) { l.listenSigs = sigs }
+// SetSignals 设置监听的信号量
+func (l *LifeCycle) SetSignals(sigs ...os.Signal) {
+	l.listenSigs = sigs
+}
 
-// Context 返回生命周期上下文，取消时表示应用正在退出。
-func (l *LifeCycle) Context() context.Context { return l.ctx }
+// Context 上下文
+func (l *LifeCycle) Context() context.Context {
+	return l.ctx
+}
 
-// C 返回一个 channel，退出时关闭。
-func (l *LifeCycle) C() <-chan struct{} { return l.chExit }
+// C .
+func (l *LifeCycle) C() <-chan struct{} {
+	return l.chExit
+}
 
-// AddCloseFunc 注册退出时执行的清理函数。
-func (l *LifeCycle) AddCloseFunc(f func() error) { l.AddCloser(newCloserFunc(f)) }
+// AddCloseFunc 添加退出任务
+func (l *LifeCycle) AddCloseFunc(f func() error) {
+	l.AddCloser(newCloserFunc(f))
+}
 
-// AddCloser 注册退出时需关闭的资源。
+// AddCloser 添加退出任务
 func (l *LifeCycle) AddCloser(clr io.Closer) {
-	l.closerMu.Lock()
-	defer l.closerMu.Unlock()
 	if l.preExitRun == nil {
 		l.preExitRun = []io.Closer{clr}
 		return
@@ -61,13 +71,17 @@ func (l *LifeCycle) AddCloser(clr io.Closer) {
 	l.preExitRun = append(l.preExitRun, clr)
 }
 
-// SetTimeout 设置优雅退出的超时时间。
-func (l *LifeCycle) SetTimeout(d time.Duration) { l.exitTimeout = d }
+// SetTimeout 退出超时时间
+func (l *LifeCycle) SetTimeout(d time.Duration) {
+	l.exitTimeout = d
+}
 
-// Exit 主动触发退出流程（关闭 chExit channel）。
-func (l *LifeCycle) Exit() { closeCh(l.chExit) }
+// Exit 强制退出
+func (l *LifeCycle) Exit() {
+	closeCh(l.chExit)
+}
 
-// CancelContext 取消生命周期上下文，但不会触发退出。
+// CancelContext 预退出
 func (l *LifeCycle) CancelContext() {
 	if l.cancle != nil {
 		select {
@@ -78,11 +92,11 @@ func (l *LifeCycle) CancelContext() {
 	}
 }
 
-// WaitExit 阻塞等待退出信号或 Exit 调用，然后执行资源清理。
+// WaitExit .
 func (l *LifeCycle) WaitExit() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, l.listenSigs...)
-	defer signal.Stop(sigChan)
+
 	for {
 		select {
 		case sig := <-sigChan:
@@ -90,57 +104,46 @@ func (l *LifeCycle) WaitExit() {
 			for _, lisSig := range l.listenSigs {
 				if lisSig == sig {
 					logs.Warnf("^C exit.")
-					if err := l.Shutdown(context.Background()); err != nil {
-						logs.Errorf("shutdown failed: %v", err)
-					}
+					l.exit()
 					return
 				}
 			}
+
 		case <-l.chExit:
 			logs.Warnf("others exit.")
-			if err := l.Shutdown(context.Background()); err != nil {
-				logs.Errorf("shutdown failed: %v", err)
-			}
+			l.exit()
 			return
 		}
 	}
 }
 
-// Shutdown cancels the lifecycle context and closes registered resources.
-func (l *LifeCycle) Shutdown(ctx context.Context) error {
-	l.CancelContext()
-	l.closerMu.Lock()
-	closers := make([]io.Closer, len(l.preExitRun))
-	copy(closers, l.preExitRun)
-	l.closerMu.Unlock()
-
-	timeout := l.exitTimeout
-	if timeout <= 0 {
-		timeout = 15 * time.Second
+func (l *LifeCycle) exit() {
+	if l.exitTimeout < time.Microsecond {
+		logs.Warnf("Forced exit.")
+		os.Exit(0)
 	}
-	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	done := make(chan error, 1)
 	go func() {
-		var errs []error
-		for i := len(closers) - 1; i >= 0; i-- {
-			if closers[i] == nil {
-				continue
-			}
-			if err := closers[i].Close(); err != nil {
-				errs = append(errs, err)
-			}
+		select {
+		case <-time.Tick(l.exitTimeout):
+			logs.Warnf("Timeout. Forced exit.")
+			os.Exit(1)
 		}
-		done <- errors.Join(errs...)
 	}()
 
-	select {
-	case err := <-done:
-		return err
-	case <-timeoutCtx.Done():
-		return timeoutCtx.Err()
+	l.cancle()
+	var wg sync.WaitGroup
+	wg.Add(len(l.preExitRun))
+	for _, v := range l.preExitRun {
+		go func(clr io.Closer) {
+			defer wg.Done()
+			if clr != nil {
+				clr.Close()
+			}
+		}(v)
 	}
+	wg.Wait()
+	time.Sleep(time.Second)
+	os.Exit(0)
 }
 
 func closeCh(ch chan struct{}) {
@@ -151,12 +154,17 @@ func closeCh(ch chan struct{}) {
 	}
 }
 
-type closerFunc struct{ f func() error }
+type closerFunc struct {
+	f func() error
+}
 
 func newCloserFunc(f func() error) io.Closer { return &closerFunc{f: f} }
-func (c *closerFunc) Close() error           { return c.f() }
 
-// Std 返回全局生命周期实例，未初始化时自动创建。
+func (c *closerFunc) Close() error {
+	return c.f()
+}
+
+// Std ..
 func Std() *LifeCycle {
 	if std == nil {
 		std = New()

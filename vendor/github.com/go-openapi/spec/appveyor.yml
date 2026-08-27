@@ -20,13 +20,3 @@ test_script:
   - go test -v -timeout 20m ./...
 
 deploy: off
-
-notifications:
-  - provider: Slack
-    incoming_webhook:
-    auth_token:
-      secure:
-    channel: bots
-    on_build_success: false
-    on_build_failure: true
-    on_build_status_changed: true

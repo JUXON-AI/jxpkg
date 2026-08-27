@@ -6,23 +6,17 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type authInjectors struct {
-	injectors       map[string]auth.InjectorFunc
-	defaultInjector auth.InjectorFunc
+type authInjector struct {
+	injector auth.InjectorFunc
 }
 
-// AuthInject 为指定 issuer 注册认证注入函数。
-func (ai *authInjectors) AuthInject(issuer string, injector auth.InjectorFunc) {
-	ai.injectors[issuer] = injector
+// AuthInject 注册认证通过后的用户校验函数。
+func (ai *authInjector) AuthInject(injector auth.InjectorFunc) {
+	ai.injector = injector
 }
 
-// Default 设置默认认证注入函数（issuer 未匹配时使用）。
-func (ai *authInjectors) Default(injector auth.InjectorFunc) {
-	ai.defaultInjector = injector
-}
-
-// Inject 根据请求的登录态执行对应的认证注入。
-func (ai *authInjectors) Inject(ctx *gin.Context) {
+// Inject 校验业务用户，并在成功后发布用户 ID。
+func (ai *authInjector) Inject(ctx *gin.Context) {
 	val, ok := ctx.Get(constants.CtxKeyLoginStatus)
 	if !ok {
 		ctx.Next()
@@ -34,20 +28,34 @@ func (ai *authInjectors) Inject(ctx *gin.Context) {
 		return
 	}
 
-	var injector auth.InjectorFunc
-	if ls.Claim != nil && ls.Claim.Issuer != "" {
-		injector = ai.injectors[ls.Claim.Issuer]
+	ctx.Set(constants.CtxKeyUserID, uint(0))
+	ctx.Set(constants.CtxKeyUIN, uint(0))
+	ctx.Set(constants.CtxKeyCompanyID, uint(0))
+	ctx.Set(constants.CtxKeyMembershipEpoch, uint64(0))
+	if ls.Claim == nil || ls.Claim.UserID == 0 || ls.Claim.UIN == 0 || ls.Claim.CompanyID == 0 {
+		ls.State = auth.StateFailed
+		ls.Err = auth.ErrInvalidPrincipal
+		ctx.Set(constants.CtxKeyLoginStatus, ls)
+		ctx.Next()
+		return
 	}
-	if injector == nil {
-		injector = ai.defaultInjector
+	if ai.injector == nil {
+		ls.State = auth.StateFailed
+		ls.Err = auth.ErrAuthBackendUnavailable
+		ctx.Set(constants.CtxKeyLoginStatus, ls)
+		ctx.Next()
+		return
 	}
-	if injector != nil {
-		err := injector(ctx, ls)
-		if err != nil {
-			ls.State = auth.StateFailed
-			ls.Err = err
-			ctx.Set(constants.CtxKeyLoginStatus, ls)
-		}
+	if err := ai.injector(ctx, ls); err != nil {
+		ls.State = auth.StateFailed
+		ls.Err = err
+		ctx.Set(constants.CtxKeyLoginStatus, ls)
+		ctx.Next()
+		return
 	}
+
+	ctx.Set(constants.CtxKeyUserID, ls.Claim.UserID)
+	ctx.Set(constants.CtxKeyUIN, ls.Claim.UIN)
+	ctx.Set(constants.CtxKeyCompanyID, ls.Claim.CompanyID)
 	ctx.Next()
 }

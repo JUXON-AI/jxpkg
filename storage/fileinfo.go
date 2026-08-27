@@ -1,117 +1,66 @@
 package storage
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"time"
 
-	"github.com/JUXON-AI/jxpkg/config"
+	"github.com/JUXON-AI/jxpkg/dbtools"
 	"github.com/JUXON-AI/jxpkg/logs"
 	"github.com/JUXON-AI/jxpkg/random"
-	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
-// FileStatus 文件状态
-type FileStatus string
-
 const (
-	// FileStatusUnknown 未知
-	FileStatusUnknown FileStatus = "unknown"
-	// FileStatusInit 初始化
-	FileStatusInit FileStatus = "init"
-	// FileStatusUploading 上传中
-	FileStatusUploading FileStatus = "uploading"
-	// FileStatusNormal 正常，完成
-	FileStatusNormal FileStatus = "normal"
-	// FileStatusDeleted 已删除
-	FileStatusDeleted FileStatus = "deleted"
-	// FileStatusFailed 上传失败
-	FileStatusFailed FileStatus = "failed"
-	// FileStatusAborted 取消上传
-	FileStatusAborted FileStatus = "aborted"
-
-	// FileStatusUploadWaitComp 上传等待完成
-	FileStatusUploadWaitComp FileStatus = "upload_wait_comp"
-	// FileStatusUploadSuccess 上传成功
-	FileStatusUploadSuccess FileStatus = "upload_success"
+	TableNameFileInfo = "core_upload_files"
 )
 
-// FileInfo .
-type FileInfo struct {
+// CoreFileInfo .
+type CoreFileInfo struct {
 	gorm.Model
 
-	// CompanyID 公司ID
-	CompanyID uint `gorm:"column:company_id" json:"company_id"`
-	// Uin 用户ID
-	Uin uint `gorm:"column:uin" json:"uin"`
+	// CompanyID 表示文件所属的公司 ID。
+	CompanyID uint `gorm:"column:company_id;type:bigint unsigned;not null;index:idx_core_upload_files_company_uin,priority:1;comment:文件所属公司ID" json:"company_id"`
+
+	// UIN 表示文件所属的账户身份 ID。
+	UIN uint `gorm:"column:uin;type:bigint unsigned;not null;index:idx_core_upload_files_company_uin,priority:2;comment:文件所属账户身份ID" json:"uin"`
 
 	// Purpose 用途分类
-	Purpose config.FilePurpose `gorm:"column:purpose;type:varchar(32)" json:"purpose"`
+	Purpose string `gorm:"column:purpose;type:varchar(32);comment:用途分类" json:"purpose"`
 	// Filename 原始文件名
-	Filename string `gorm:"column:filename;type:varchar(128)" json:"filename"`
+	Filename string `gorm:"column:filename;type:varchar(128);comment:原始文件名" json:"filename"`
 	// FileExt 文件扩展名
-	FileExt string `gorm:"column:file_ext;type:varchar(8)" json:"file_ext"`
+	FileExt string `gorm:"column:file_ext;type:varchar(8);comment:文件扩展名" json:"file_ext"`
 	// MIMEType MIME类型
-	MIMEType string `gorm:"column:mime_type" json:"mime_type"`
+	MIMEType string `gorm:"column:mime_type;type:varchar(128);comment:MIME类型" json:"mime_type"`
 	// Size 文件大小
-	Size int64 `gorm:"column:size" json:"size"`
+	Size int64 `gorm:"column:size;type:bigint;comment:文件大小" json:"size"`
 	// Hash 文件hash hashMethod:hashValue
-	Hash string `gorm:"column:hash;type:varchar(256);index" json:"hash"`
-	// ChunkHash is the hash of the chunk of the file.
-	ChunkHash string `gorm:"column:chunk_hash;type:varchar(64)" json:"chunk_hash"`
+	Hash string `gorm:"column:hash;type:varchar(256);comment:文件hash ;index" json:"hash"`
 	// StoragePath 存储的相对路径
-	StoragePath string `gorm:"column:path;type:varchar(128)" json:"-"`
+	StoragePath string `gorm:"column:storage_path;type:varchar(255)" json:"storage_path"`
 	// PublicURL 公网访问地址，如果为空，则表示只能通过预签名URL访问
-	PublicURL string `gorm:"column:public_url;type:varchar(256);index" json:"-"`
-
-	// CopyNumber 文件副本数量
-	CopyNumber       int             `gorm:"column:copy_number;type:int;default:1" json:"-"`
-	UploadChunkSize  int64           `gorm:"column:upload_chunk_size;type:int;comment:分片大小（字节）"`
-	UploadChunkTotal int             `gorm:"column:upload_chunk_total;type:int;comment:分片总数"`
-	Status           FileStatus      `gorm:"column:status;type:varchar(32);not null;default:'normal';comment:文件状态，init：初始化，uploading：上传中，normal：已完成，aborted：已取消，failed：上传失败"`
-	UploadedChunks   []UploadedChunk `gorm:"column:uploaded_chunks;type:json;serializer:json;comment:已上传分片列表，例如 [{\"partNumber\":1,\"etag\":\"xxx\"}]"`
-	Progress         float64         `gorm:"column:progress;type:decimal(5,2);not null;default:0.00;comment:上传进度（%）"`
-	Exists           bool            `gorm:"column:exists;type:boolean;not null;default:false;comment:是否命中秒传"`
-	UploadS3ID       string          `gorm:"column:upload_s3_id;type:varchar(128);default:'';comment:S3 MultipartUpload ID"`
-	RenewCount       int             `gorm:"column:renew_count;type:int;not null;default:0;comment:预签名 URL 续签次数"`
-	AbortAt          *time.Time      `gorm:"column:abort_at;type:datetime;comment:用户取消上传时间"`
-	CompletedAt      *time.Time      `gorm:"column:completed_at;type:datetime;comment:文件上传完成时间"`
-	Extra            datatypes.JSON  `gorm:"column:extra;type:json;comment:通用扩展属性，存储自定义元数据，额外业务信息"`
+	PublicURL string `gorm:"column:public_url;type:varchar(256);index" json:"public_url"`
 }
 
 // TableName table name
-func (*FileInfo) TableName() string { return TableNameFileInfo }
-
-type UploadedChunk struct {
-	PartNumber int    `json:"partNumber"`
-	Etag       string `json:"etag"`
+func (*CoreFileInfo) TableName() string {
+	return TableNameFileInfo
 }
 
-// GetFileByChunkHash 通过hash获取文件信息
-func GetFileByChunkHash(db *gorm.DB, hashstr string, size int64) (*FileInfo, error) {
-	fi := &FileInfo{}
-	sql := db.Model(fi).
-		Where("size = ?", size).
-		Where("chunk_hash = ?", hashstr)
-
-	err := sql.First(fi).Error
-	if err != nil {
-		if err != gorm.ErrRecordNotFound {
-			logs.Errorf("get file by hash failed, %v, %d error: %v", hashstr, size, err)
-		}
-		return nil, err
-	}
-	if fi.ID == 0 {
-		return nil, gorm.ErrRecordNotFound
-	}
-	return fi, nil
+// InitDB .
+func InitDB() error {
+	return dbtools.InitModel(
+		dbtools.Core(), &CoreFileInfo{},
+	)
 }
 
-// GetFileByHash 通过hash获取文件信息
-func GetFileByHash(db *gorm.DB, hashstr string) (*FileInfo, error) {
-	fi := &FileInfo{}
+// GetFileByHash 按公司、UIN 和内容哈希获取文件信息。
+func GetFileByHash(db *gorm.DB, companyID, uin uint, hashstr string) (*CoreFileInfo, error) {
+	fi := &CoreFileInfo{}
 	sql := db.Model(fi).
-		Where("hash = ?", hashstr)
+		Where("company_id = ? AND uin = ? AND hash = ?", companyID, uin, hashstr)
 
 	err := sql.First(fi).Error
 	if err != nil {
@@ -126,11 +75,11 @@ func GetFileByHash(db *gorm.DB, hashstr string) (*FileInfo, error) {
 	return fi, nil
 }
 
-// GetFileByPublicURL 通过publicURL获取文件信息
-func GetFileByPublicURL(db *gorm.DB, publicURL string) (*FileInfo, error) {
-	fi := &FileInfo{}
+// GetFileByPublicURL 按公司、UIN 和公网地址获取文件信息。
+func GetFileByPublicURL(db *gorm.DB, companyID, uin uint, publicURL string) (*CoreFileInfo, error) {
+	fi := &CoreFileInfo{}
 	sql := db.Model(fi).
-		Where("public_url = ?", publicURL)
+		Where("company_id = ? AND uin = ? AND public_url = ?", companyID, uin, publicURL)
 
 	err := sql.First(fi).Error
 	if err != nil {
@@ -145,58 +94,14 @@ func GetFileByPublicURL(db *gorm.DB, publicURL string) (*FileInfo, error) {
 	return fi, nil
 }
 
-// SaveCopyFile 保存文件副本
-func SaveCopyFile(db *gorm.DB, fi *FileInfo) error {
-	tErr := db.Transaction(func(tx *gorm.DB) error {
-		err := tx.Create(fi).Error
-		if err != nil {
-			logs.Errorf("create file info failed, %v", err)
-			return err
-		}
-		err = tx.Table(TableNameFileInfo).
-			Where("`hash` = ? AND size = ?", fi.Hash, fi.Size).
-			Update("copy_number", fi.CopyNumber).Error
-		if err != nil {
-			logs.Errorf("update copy number failed, %v", err)
-			return err
-		}
-		return nil
-	})
-	if tErr != nil {
-		logs.Errorf("save copy file failed, %v", tErr)
-		return tErr
-	}
-	return nil
-}
-
-// GetCompanyFileByID 通过id获取文件信息
-func GetCompanyFileByID(db *gorm.DB, companyID, id uint) (*FileInfo, error) {
-	if id == 0 {
+// GetFileByID 按公司、UIN 和文件 ID 获取文件信息。
+func GetFileByID(db *gorm.DB, companyID, uin, id uint) (*CoreFileInfo, error) {
+	if companyID == 0 || uin == 0 || id == 0 {
 		return nil, gorm.ErrRecordNotFound
 	}
-	fi := &FileInfo{}
+	fi := &CoreFileInfo{}
 	sql := db.Model(fi).
-		Where("company_id = ?", companyID).
-		Where("id = ?", id)
-	err := sql.First(fi).Error
-	if err != nil {
-		if err != gorm.ErrRecordNotFound {
-			logs.Errorf("get file by id failed, company_id = %v,id = %v,error: %v", companyID, id, err)
-		}
-		return nil, err
-	}
-
-	return fi, nil
-}
-
-// GetFileByID 通过id获取文件信息
-func GetFileByID(db *gorm.DB, id uint) (*FileInfo, error) {
-	if id == 0 {
-		return nil, gorm.ErrRecordNotFound
-	}
-	fi := &FileInfo{}
-	sql := db.Model(fi).
-		Where("id = ?", id)
+		Where("company_id = ? AND uin = ? AND id = ?", companyID, uin, id)
 	err := sql.First(fi).Error
 	if err != nil {
 		if err != gorm.ErrRecordNotFound {
@@ -206,13 +111,6 @@ func GetFileByID(db *gorm.DB, id uint) (*FileInfo, error) {
 	}
 
 	return fi, nil
-}
-
-func UpdateByID(db *gorm.DB, id uint, updateMap map[string]interface{}) error {
-	if err := db.Model(&FileInfo{}).Where("id = ?", id).Updates(updateMap).Error; err != nil {
-		return err
-	}
-	return nil
 }
 
 // GenerateFileStoragePath 生成文件存储路径
@@ -227,4 +125,10 @@ func GenerateFileStoragePathWithName(purpose string, owner uint, fileName string
 	storagePath := fmt.Sprintf("%s/%s/%d-%s/%s",
 		purpose, time.Now().Format("20060102"), owner, random.String(9), fileName)
 	return storagePath
+}
+
+// GenerateFileHashByContent 根据文件内容生成文件hash
+func GenerateFileHashByContent(content []byte) string {
+	sum := md5.Sum(content)
+	return "md5:" + hex.EncodeToString(sum[:])
 }

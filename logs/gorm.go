@@ -2,56 +2,92 @@ package logs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"go.uber.org/zap"
-	glogger "gorm.io/gorm/logger"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
-// GetGorm 返回适配 GORM 日志接口的 logger，名称对应日志配置中的 logger 名。
-func GetGorm(lgrName string) glogger.Interface {
-	lw := Get(lgrName)
-	return &gormLogger{l: lw.Desugar().WithOptions(zap.AddCallerSkip(2)).Sugar()}
+const defaultSlowThreshold = 200 * time.Millisecond
+
+// GetGorm 返回实现 GORM logger.Interface 的日志器。
+func GetGorm(name string) gormlogger.Interface {
+	return &gormLogger{
+		logger:        Get(name),
+		level:         gormlogger.Info,
+		slowThreshold: defaultSlowThreshold,
+	}
 }
 
-var _ glogger.Interface = (*gormLogger)(nil)
+var _ gormlogger.Interface = (*gormLogger)(nil)
+var _ gorm.ParamsFilter = (*gormLogger)(nil)
 
 type gormLogger struct {
-	l *zap.SugaredLogger
+	logger                    *zap.SugaredLogger
+	level                     gormlogger.LogLevel
+	slowThreshold             time.Duration
+	ignoreRecordNotFoundError bool
 }
 
-func (g *gormLogger) LogMode(level glogger.LogLevel) glogger.Interface { return g }
+// ParamsFilter 保留 SQL 占位符，避免参数中的密码和令牌进入日志。
+func (g *gormLogger) ParamsFilter(_ context.Context, sql string, _ ...interface{}) (string, []interface{}) {
+	return sql, nil
+}
 
-func (g *gormLogger) Info(_ context.Context, msg string, data ...interface{}) {
-	Infof(msg, data...)
+func (g *gormLogger) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
+	clone := *g
+	clone.level = level
+	return &clone
 }
-func (g *gormLogger) Warn(_ context.Context, msg string, data ...interface{}) {
-	Warnf(msg, data...)
+
+func (g *gormLogger) Info(ctx context.Context, msg string, data ...interface{}) {
+	if g.level >= gormlogger.Info {
+		g.contextLogger(ctx).Infof(msg, data...)
+	}
 }
-func (g *gormLogger) Error(_ context.Context, msg string, data ...interface{}) {
-	Errorf(msg, data...)
+
+func (g *gormLogger) Warn(ctx context.Context, msg string, data ...interface{}) {
+	if g.level >= gormlogger.Warn {
+		g.contextLogger(ctx).Warnf(msg, data...)
+	}
+}
+
+func (g *gormLogger) Error(ctx context.Context, msg string, data ...interface{}) {
+	if g.level >= gormlogger.Error {
+		g.contextLogger(ctx).Errorf(msg, data...)
+	}
 }
 
 func (g *gormLogger) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
-	reqID, ok := ctx.Value(string(contextKeyRequestID)).(string)
-	if !ok {
-		reqID = ""
+	if g.level == gormlogger.Silent {
+		return
 	}
+
 	elapsed := time.Since(begin)
-	_, rows := fc()
-	if err != nil {
-		g.l.With(
-			zap.String(string(contextKeyRequestID), reqID),
-			zap.String("elapsed", fmt.Sprintf("%vms", elapsed.Nanoseconds()/1e6)),
-			zap.Int64("rows", rows),
-			zap.Error(err),
-		).Warn("database query failed")
-	} else {
-		g.l.With(
-			zap.String(string(contextKeyRequestID), reqID),
-			zap.String("elapsed", fmt.Sprintf("%vms", elapsed.Nanoseconds()/1e6)),
-			zap.Int64("rows", rows),
-		).Debug("database query completed")
+	sql, rows := fc()
+	fields := []interface{}{
+		"elapsed", fmt.Sprintf("%.3fms", float64(elapsed.Nanoseconds())/1e6),
+		"rows", rows,
 	}
+	l := g.contextLogger(ctx)
+
+	switch {
+	case err != nil && g.level >= gormlogger.Error &&
+		(!g.ignoreRecordNotFoundError || !errors.Is(err, gorm.ErrRecordNotFound)):
+		l.Errorw(sql, append(fields, "error", err)...)
+	case g.slowThreshold > 0 && elapsed > g.slowThreshold && g.level >= gormlogger.Warn:
+		l.Warnw(sql, append(fields, "slow", true)...)
+	case g.level >= gormlogger.Info:
+		l.Infow(sql, fields...)
+	}
+}
+
+func (g *gormLogger) contextLogger(ctx context.Context) *zap.SugaredLogger {
+	return loggerForContext(ctx, g.logger).
+		Desugar().
+		WithOptions(zap.AddCallerSkip(2)).
+		Sugar()
 }

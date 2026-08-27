@@ -4,90 +4,143 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/JUXON-AI/jxpkg/settings"
+	"github.com/golang-jwt/jwt/v5"
 )
 
-const minJWTSecretLength = 32
+const (
+	// jwtSettingGroup 是 JWT 配置所在的 settings 分组。
+	jwtSettingGroup = "core"
 
-// JWTIssuerConfig defines the verification contract for tokens from an issuer.
-type JWTIssuerConfig struct {
-	Issuer   string
-	Audience string
-	Secret   string
-}
+	// jwtSettingKey 是 JWT 签名配置的 settings 键。
+	jwtSettingKey = "jwt-secret"
 
-type jwtIssuer struct {
-	audience string
-	secret   []byte
-}
-
-var (
-	jwtIssuers   = map[string]jwtIssuer{}
-	jwtIssuersMu sync.RWMutex
+	// minimumJWTSecretBytes 是 HS256 签名密钥允许的最小字节数。
+	minimumJWTSecretBytes = 32
 )
 
-// RegisterJWTIssuer registers an HMAC-SHA256 token issuer.
-func RegisterJWTIssuer(cfg JWTIssuerConfig) error {
-	cfg.Issuer = strings.TrimSpace(cfg.Issuer)
-	cfg.Audience = strings.TrimSpace(cfg.Audience)
-	if cfg.Issuer == "" {
-		return fmt.Errorf("jwt issuer is required")
+// JWTConfig JWT 签名配置。
+type JWTConfig struct {
+	// Secret 表示 HS256 签名密钥，至少需要 32 字节。
+	Secret string `yaml:"secret"`
+
+	// Expire 表示访问令牌有效期。
+	Expire time.Duration `yaml:"expire"`
+}
+
+var jwtConfig struct {
+	sync.RWMutex
+	value JWTConfig
+}
+
+// LoadJWTConfig 从 settings 加载 JWT 签名密钥和有效期。
+func LoadJWTConfig() error {
+	config := JWTConfig{}
+	if err := settings.GetYaml(jwtSettingGroup, jwtSettingKey, &config); err != nil {
+		return fmt.Errorf("%w: load %s/%s: %w", ErrAuthBackendUnavailable, jwtSettingGroup, jwtSettingKey, err)
 	}
-	if cfg.Audience == "" {
-		return fmt.Errorf("jwt audience is required")
-	}
-	if len(cfg.Secret) < minJWTSecretLength {
-		return fmt.Errorf("jwt secret must contain at least %d bytes", minJWTSecretLength)
+	if err := validateJWTConfig(config); err != nil {
+		return err
 	}
 
-	jwtIssuersMu.Lock()
-	jwtIssuers[cfg.Issuer] = jwtIssuer{
-		audience: cfg.Audience,
-		secret:   []byte(cfg.Secret),
-	}
-	jwtIssuersMu.Unlock()
+	setJWTConfig(config)
 	return nil
 }
 
-// RegisterJwtSecret registers an issuer using the issuer itself as audience.
-// Deprecated: use RegisterJWTIssuer so registration errors are handled.
-func RegisterJwtSecret(issuer string, secret string) error {
-	return RegisterJWTIssuer(JWTIssuerConfig{
-		Issuer:   issuer,
-		Audience: issuer,
-		Secret:   secret,
-	})
+func validateJWTConfig(config JWTConfig) error {
+	if strings.TrimSpace(config.Secret) == "" {
+		return fmt.Errorf("%w: %s/%s is empty", ErrAuthBackendUnavailable, jwtSettingGroup, jwtSettingKey)
+	}
+	if len(config.Secret) < minimumJWTSecretBytes {
+		return fmt.Errorf("%w: %s/%s must be at least %d bytes", ErrAuthBackendUnavailable, jwtSettingGroup, jwtSettingKey, minimumJWTSecretBytes)
+	}
+	if config.Expire <= 0 {
+		return fmt.Errorf("%w: %s/%s expire must be positive", ErrAuthBackendUnavailable, jwtSettingGroup, jwtSettingKey)
+	}
+	return nil
 }
 
-// GetJwtSecret returns the key for an explicitly registered issuer.
-func GetJwtSecret(issuer string) ([]byte, error) {
-	registered, err := getJWTIssuer(issuer)
+// IssueIdentityToken 为用户选择的公司身份签发 JWT。
+func IssueIdentityToken(userID, uin, companyID uint, membershipEpoch uint64, loginWay LoginWay) (string, int64, error) {
+	if uin == 0 || companyID == 0 {
+		return "", 0, ErrInvalidPrincipal
+	}
+	return issueToken(userID, uin, companyID, membershipEpoch, loginWay)
+}
+
+func issueToken(userID, uin, companyID uint, membershipEpoch uint64, loginWay LoginWay) (string, int64, error) {
+	if userID == 0 {
+		return "", 0, ErrInvalidPrincipal
+	}
+	if loginWay == LoginWayUnknown {
+		return "", 0, ErrInvalidLoginWay
+	}
+
+	config, err := getJWTConfig()
+	if err != nil {
+		return "", 0, err
+	}
+	now := time.Now()
+	expiresAt := now.Add(config.Expire).Unix()
+	claims := &UserClaims{
+		UserID:          userID,
+		UIN:             uin,
+		CompanyID:       companyID,
+		MembershipEpoch: membershipEpoch,
+		IssuedAt:        now.Unix(),
+		ExpiresAt:       expiresAt,
+		LoginWay:        loginWay,
+	}
+	rawToken, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(config.Secret))
+	if err != nil {
+		return "", 0, fmt.Errorf("sign jwt: %w", err)
+	}
+	return rawToken, expiresAt, nil
+}
+
+// ParseToken 使用已加载的单一密钥验证 JWT。
+func ParseToken(rawToken string) (*UserClaims, error) {
+	config, err := getJWTConfig()
 	if err != nil {
 		return nil, err
 	}
-	return append([]byte(nil), registered.secret...), nil
-}
 
-// GetJWTVerification returns the key and expected audience for an issuer.
-func GetJWTVerification(issuer string) ([]byte, string, error) {
-	registered, err := getJWTIssuer(issuer)
+	claims := new(UserClaims)
+	token, err := jwt.ParseWithClaims(
+		rawToken,
+		claims,
+		func(token *jwt.Token) (interface{}, error) {
+			if token.Method != jwt.SigningMethodHS256 {
+				return nil, fmt.Errorf("unexpected signing method %s", token.Method.Alg())
+			}
+			return []byte(config.Secret), nil
+		},
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithExpirationRequired(),
+		jwt.WithIssuedAt(),
+	)
 	if err != nil {
-		return nil, "", err
+		return nil, fmt.Errorf("%w: %v", ErrInvalidCredential, err)
 	}
-	return registered.secret, registered.audience, nil
+	if !token.Valid || claims.UserID == 0 || claims.UIN == 0 || claims.CompanyID == 0 || claims.IssuedAt == 0 {
+		return nil, ErrInvalidCredential
+	}
+	return claims, nil
 }
 
-func getJWTIssuer(issuer string) (jwtIssuer, error) {
-	issuer = strings.TrimSpace(issuer)
-	if issuer == "" {
-		return jwtIssuer{}, fmt.Errorf("jwt issuer is required")
-	}
+func setJWTConfig(config JWTConfig) {
+	jwtConfig.Lock()
+	defer jwtConfig.Unlock()
+	jwtConfig.value = config
+}
 
-	jwtIssuersMu.RLock()
-	registered, ok := jwtIssuers[issuer]
-	jwtIssuersMu.RUnlock()
-	if !ok {
-		return jwtIssuer{}, fmt.Errorf("jwt issuer %q is not registered", issuer)
+func getJWTConfig() (JWTConfig, error) {
+	jwtConfig.RLock()
+	defer jwtConfig.RUnlock()
+	if strings.TrimSpace(jwtConfig.value.Secret) == "" || jwtConfig.value.Expire <= 0 {
+		return JWTConfig{}, fmt.Errorf("%w: jwt config is not loaded", ErrAuthBackendUnavailable)
 	}
-	registered.secret = append([]byte(nil), registered.secret...)
-	return registered, nil
+	return jwtConfig.value, nil
 }

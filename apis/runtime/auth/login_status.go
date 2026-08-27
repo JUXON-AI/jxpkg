@@ -1,14 +1,20 @@
 package auth
 
 import (
+	"errors"
+
 	"github.com/gin-gonic/gin"
 )
 
 const (
-	// AuthBearer Bearer Token 前缀。
-	AuthBearer       = "Bearer "
-	// AuthAPIKeyPrefix API Key 前缀。
-	AuthAPIKeyPrefix = "goar-"
+	// AuthBearer Bearer Token 认证方案。
+	AuthBearer = "Bearer"
+)
+
+var (
+	ErrInvalidCredential      = errors.New("invalid credential")
+	ErrInvalidPrincipal       = errors.New("invalid principal")
+	ErrAuthBackendUnavailable = errors.New("auth backend unavailable")
 )
 
 // InjectorFunc 登录状态注入函数，可在认证通过后补充用户信息。
@@ -35,12 +41,11 @@ const (
 
 // LoginStatus 请求的登录态信息。
 type LoginStatus struct {
-	Token  string
-	Claim  *UserClaims
-	Err    error
-	Role   Role
-	State  State
-	idmap  map[string]uint
+	Claim *UserClaims
+	Err   error
+	Role  Role
+	State State
+	idmap map[string]uint
 }
 
 // SetID 存储额外 ID（如 company_id、employee_id）。

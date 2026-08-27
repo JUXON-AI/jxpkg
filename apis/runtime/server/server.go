@@ -1,15 +1,11 @@
 package server
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"strings"
-	"time"
 
-	"github.com/JUXON-AI/jxpkg/apis/runtime/auth"
 	"github.com/JUXON-AI/jxpkg/apis/runtime/middleware"
 	"github.com/JUXON-AI/jxpkg/config"
 	"github.com/JUXON-AI/jxpkg/lifecycle"
@@ -33,7 +29,6 @@ type MethodFunc func(relativePath string, handlers ...gin.HandlerFunc) gin.IRout
 type Router struct {
 	eng      *gin.Engine
 	l        net.Listener
-	http     *http.Server
 	lc       *lifecycle.LifeCycle
 	Prefix   string
 	prefixes []string
@@ -42,7 +37,7 @@ type Router struct {
 	routerMap   map[string]interface{}
 	routeGroups map[string]*gin.RouterGroup
 
-	*authInjectors
+	*authInjector
 }
 
 // RouterOption Router 配置选项。
@@ -83,17 +78,12 @@ func NewRouter(apiPrefix string, opts ...RouterOption) *Router {
 		apiPrefix = PrefixAPIDefault
 	}
 	svr := &Router{
-		eng:         gin.New(),
-		lc:          lifecycle.Std(),
-		Prefix:      apiPrefix,
-		routerMap:   map[string]interface{}{},
-		routeGroups: map[string]*gin.RouterGroup{},
-		authInjectors: &authInjectors{
-			injectors: map[string]auth.InjectorFunc{},
-			defaultInjector: func(ctx *gin.Context, ls *auth.LoginStatus) error {
-				return nil
-			},
-		},
+		eng:          gin.New(),
+		lc:           lifecycle.Std(),
+		Prefix:       apiPrefix,
+		routerMap:    map[string]interface{}{},
+		routeGroups:  map[string]*gin.RouterGroup{},
+		authInjector: &authInjector{},
 	}
 	svr.router()
 	for _, opt := range opts {
@@ -114,34 +104,14 @@ func NewRouter(apiPrefix string, opts ...RouterOption) *Router {
 
 // Run 在指定 Listener 上启动 HTTP 服务，goroutine 中运行。
 func (svr *Router) Run(l net.Listener) error {
-	if l == nil {
-		return fmt.Errorf("listener is nil")
-	}
 	svr.l = l
-	svr.http = &http.Server{
-		Handler:           svr.eng,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
-	svr.lc.AddCloser(svr)
 	go func() {
-		if err := svr.http.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logs.Errorf("http server error: %v", err)
-			svr.lc.Exit()
+		if err := http.Serve(l, svr.eng); err != nil {
+			logs.Errorf("http.Serve error: %v", err)
 		}
+		svr.lc.Exit()
 	}()
 	return nil
-}
-
-// Close gracefully stops the HTTP server.
-func (svr *Router) Close() error {
-	if svr.http == nil {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	return svr.http.Shutdown(ctx)
 }
 
 // GinEngine 返回内部的 Gin 引擎。
@@ -153,7 +123,6 @@ func (svr *Router) router() {
 	svr.eng.Use(middleware.Logger(".Ping"))
 	svr.eng.Use(middleware.Recovery())
 	svr.eng.Use(middleware.LoginStatus())
-	svr.eng.Use(middleware.AcceptLanguage())
 	svr.eng.Use(svr.Inject)
 	svr.eng.NoRoute(func(c *gin.Context) {
 		c.String(http.StatusNotFound, "The incorrect API route.")
