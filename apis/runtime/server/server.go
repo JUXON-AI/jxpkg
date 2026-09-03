@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/JUXON-AI/jxpkg/apis/constants"
+	"github.com/JUXON-AI/jxpkg/apis/runtime/auth"
 	"github.com/JUXON-AI/jxpkg/apis/runtime/middleware"
 	"github.com/JUXON-AI/jxpkg/config"
 	"github.com/JUXON-AI/jxpkg/lifecycle"
@@ -27,16 +29,43 @@ type MethodFunc func(relativePath string, handlers ...gin.HandlerFunc) gin.IRout
 
 // Router 封装 Gin 路由引擎，支持多前缀注册和认证注入。
 type Router struct {
-	eng      *gin.Engine
-	l        net.Listener
-	lc       *lifecycle.LifeCycle
-	Prefix   string
-	prefixes []string
-	pgr      *gin.RouterGroup
+	// eng 保存内部 Gin 路由引擎。
+	eng *gin.Engine
 
-	routerMap   map[string]interface{}
+	// l 保存服务当前使用的网络监听器。
+	l net.Listener
+
+	// lc 保存服务生命周期控制器。
+	lc *lifecycle.LifeCycle
+
+	// Prefix 保存主 API 路由前缀。
+	Prefix string
+
+	// prefixes 保存去重后的全部 API 路由前缀。
+	prefixes []string
+
+	// pgr 保存主 API 前缀对应的路由组。
+	pgr *gin.RouterGroup
+
+	// routerMap 保存已注册的 Action。
+	routerMap map[string]interface{}
+
+	// routeGroups 保存每个 API 前缀对应的路由组。
 	routeGroups map[string]*gin.RouterGroup
 
+	// browserSessionMiddleware 保存浏览器会话解析中间件。
+	browserSessionMiddleware gin.HandlerFunc
+
+	// browserCSRFMiddleware 保存浏览器会话 CSRF 中间件。
+	browserCSRFMiddleware gin.HandlerFunc
+
+	// browserSessionCookieName 保存 Bearer 路由必须拒绝的 Session Cookie 名称。
+	browserSessionCookieName string
+
+	// browserSessionErr 保存浏览器会话中间件的静态配置错误。
+	browserSessionErr error
+
+	// authInjector 保存业务认证主体注入器。
 	*authInjector
 }
 
@@ -69,6 +98,18 @@ func WithPrefixes(prefixes []string) RouterOption {
 func WithMiddleware(middleware ...gin.HandlerFunc) RouterOption {
 	return func(svr *Router) {
 		svr.eng.Use(middleware...)
+	}
+}
+
+// WithBrowserSession 配置显式浏览器 Cookie Session 路由链。
+func WithBrowserSession(options middleware.BrowserSessionOptions) RouterOption {
+	return func(svr *Router) {
+		svr.browserSessionCookieName = options.CookieName
+		svr.browserSessionMiddleware, svr.browserSessionErr = middleware.NewBrowserSessionMiddleware(options)
+		if svr.browserSessionErr != nil {
+			return
+		}
+		svr.browserCSRFMiddleware, svr.browserSessionErr = middleware.NewCSRFMiddleware(options)
 	}
 }
 
@@ -122,8 +163,6 @@ func (svr *Router) router() {
 	svr.eng.Use(middleware.CustomerHeader())
 	svr.eng.Use(middleware.Logger(".Ping"))
 	svr.eng.Use(middleware.Recovery())
-	svr.eng.Use(middleware.LoginStatus())
-	svr.eng.Use(svr.Inject)
 	svr.eng.NoRoute(func(c *gin.Context) {
 		c.String(http.StatusNotFound, "The incorrect API route.")
 	})
@@ -158,23 +197,75 @@ func (svr *Router) G(action string, hdrs ...interface{}) {
 	}
 }
 
-// PRequireLogin 注册需要登录的 POST 路由。
-func (svr *Router) PRequireLogin(action string, hdrs ...interface{}) {
-	newhdrs := append([]interface{}{middleware.AuthMiddleWare}, hdrs...)
+// PRequireBrowserSession 注册仅接受浏览器 Cookie Session 的 POST 路由。
+func (svr *Router) PRequireBrowserSession(action string, hdrs ...interface{}) {
+	parser, csrf := svr.browserSessionHandlers()
+	newhdrs := append([]interface{}{parser, svr.Inject, middleware.AuthMiddleWare, csrf}, hdrs...)
 	svr.Post(action, newhdrs...)
 }
 
-// PRequireEmployee 注册需要员工权限的 POST 路由。
-func (svr *Router) PRequireEmployee(action string, hdrs ...interface{}) {
-	newhdrs := append([]interface{}{middleware.AuthMiddleWareEmployee}, hdrs...)
-	svr.Post(action, newhdrs...)
-}
-
-// GRequireLogin 注册需要登录的 GET 路由。
-func (svr *Router) GRequireLogin(action string, hdrs ...interface{}) {
-	newhdrs := append([]interface{}{middleware.AuthMiddleWare}, hdrs...)
+// GRequireBrowserSession 注册仅接受浏览器 Cookie Session 的 GET 路由。
+func (svr *Router) GRequireBrowserSession(action string, hdrs ...interface{}) {
+	parser, csrf := svr.browserSessionHandlers()
+	newhdrs := append([]interface{}{parser, svr.Inject, middleware.AuthMiddleWare, csrf}, hdrs...)
 	svr.G(action, newhdrs...)
 }
+
+// PRequireBearer 注册仅接受 Bearer Token 的 POST 路由。
+func (svr *Router) PRequireBearer(action string, hdrs ...interface{}) {
+	parser := middleware.BearerLoginStatusMiddleware(svr.browserSessionCookieName)
+	newhdrs := append([]interface{}{parser, svr.Inject, middleware.AuthMiddleWare}, hdrs...)
+	svr.Post(action, newhdrs...)
+}
+
+// GRequireBearer 注册仅接受 Bearer Token 的 GET 路由。
+func (svr *Router) GRequireBearer(action string, hdrs ...interface{}) {
+	parser := middleware.BearerLoginStatusMiddleware(svr.browserSessionCookieName)
+	newhdrs := append([]interface{}{parser, svr.Inject, middleware.AuthMiddleWare}, hdrs...)
+	svr.G(action, newhdrs...)
+}
+
+// PRequireLogin 注册保持旧版 Bearer 语义的 POST 路由。
+// Deprecated: 请显式使用 PRequireBearer 或 PRequireBrowserSession。
+func (svr *Router) PRequireLogin(action string, hdrs ...interface{}) {
+	svr.PRequireBearer(action, hdrs...)
+}
+
+// PRequireEmployee 注册需要员工权限且仅接受 Bearer Token 的 POST 路由。
+func (svr *Router) PRequireEmployee(action string, hdrs ...interface{}) {
+	parser := middleware.BearerLoginStatusMiddleware(svr.browserSessionCookieName)
+	newhdrs := append([]interface{}{parser, svr.Inject, middleware.AuthMiddleWareEmployee}, hdrs...)
+	svr.Post(action, newhdrs...)
+}
+
+// GRequireLogin 注册保持旧版 Bearer 语义的 GET 路由。
+// Deprecated: 请显式使用 GRequireBearer 或 GRequireBrowserSession。
+func (svr *Router) GRequireLogin(action string, hdrs ...interface{}) {
+	svr.GRequireBearer(action, hdrs...)
+}
+
+func (svr *Router) browserSessionHandlers() (gin.HandlerFunc, gin.HandlerFunc) {
+	if svr.browserSessionErr != nil {
+		return unavailableLoginStatus(auth.AuthModeBrowserSession, svr.browserSessionErr), emptyMiddleware
+	}
+	if svr.browserSessionMiddleware == nil || svr.browserCSRFMiddleware == nil {
+		err := fmt.Errorf("%w: browser session middleware is not configured", auth.ErrAuthBackendUnavailable)
+		return unavailableLoginStatus(auth.AuthModeBrowserSession, err), emptyMiddleware
+	}
+	return svr.browserSessionMiddleware, svr.browserCSRFMiddleware
+}
+
+func unavailableLoginStatus(mode auth.AuthMode, err error) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		ctx.Set(constants.CtxKeyLoginStatus, &auth.LoginStatus{
+			Err:      err,
+			State:    auth.StateFailed,
+			AuthMode: mode,
+		})
+	}
+}
+
+func emptyMiddleware(*gin.Context) {}
 
 func registerRoute(mf MethodFunc, action string, hdrs ...interface{}) {
 	ginhdrs := make([]gin.HandlerFunc, 0, len(hdrs))

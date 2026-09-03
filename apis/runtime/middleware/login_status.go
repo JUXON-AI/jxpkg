@@ -7,40 +7,14 @@ import (
 	"strings"
 
 	"github.com/JUXON-AI/jxpkg/apis/constants"
-	"github.com/JUXON-AI/jxpkg/apis/errcode"
 	"github.com/JUXON-AI/jxpkg/apis/runtime/auth"
 	"github.com/gin-gonic/gin"
 )
 
+// LoginStatus 创建旧版 Bearer 登录态解析中间件。
+// Deprecated: 新路由应通过 server.PRequireBearer 或 server.GRequireBearer 显式选择认证模式。
 func LoginStatus() gin.HandlerFunc {
-	return func(ctx *gin.Context) {
-		var (
-			authstr = ctx.Request.Header.Get("Authorization")
-			ls      = &auth.LoginStatus{}
-		)
-		defer func() {
-			ctx.Set(constants.CtxKeyLoginStatus, ls)
-		}()
-		if authstr == "" {
-			return
-		}
-
-		token, err := bearerToken(authstr)
-		if err != nil {
-			ls.Err = err
-			ls.State = auth.StateFailed
-			return
-		}
-
-		claims, err := auth.ParseToken(token)
-		if err != nil {
-			ls.Err = err
-			ls.State = auth.StateFailed
-			return
-		}
-		ls.State = auth.StateSucc
-		ls.Claim = claims
-	}
+	return BearerLoginStatusMiddleware("")
 }
 
 func bearerToken(header string) (string, error) {
@@ -51,13 +25,14 @@ func bearerToken(header string) (string, error) {
 	return parts[1], nil
 }
 
+// AuthMiddleWare 要求上游认证解析和业务注入均成功。
 func AuthMiddleWare(ctx *gin.Context) {
-	val, ok := ctx.Get(constants.CtxKeyLoginStatus)
+	value, ok := ctx.Get(constants.CtxKeyLoginStatus)
 	if !ok {
 		abortAuth(ctx, nil)
 		return
 	}
-	ls, ok := val.(*auth.LoginStatus)
+	ls, ok := value.(*auth.LoginStatus)
 	if !ok || ls.State != auth.StateSucc {
 		abortAuth(ctx, ls)
 		return
@@ -76,15 +51,16 @@ func abortAuth(ctx *gin.Context, ls *auth.LoginStatus) {
 	ctx.AbortWithStatusJSON(status, gin.H{"code": status, "message": message})
 }
 
+// AuthMiddleWareEmployee 要求上游认证、业务注入和员工角色校验均成功。
 func AuthMiddleWareEmployee(ctx *gin.Context) {
-	val, ok := ctx.Get(constants.CtxKeyLoginStatus)
+	value, ok := ctx.Get(constants.CtxKeyLoginStatus)
 	if !ok {
-		ctx.AbortWithStatusJSON(errcode.ErrCode_Unauthorized, gin.H{"code": errcode.ErrCode_Unauthorized, "message": "unauthorized"})
+		abortAuth(ctx, nil)
 		return
 	}
-	ls, ok := val.(*auth.LoginStatus)
+	ls, ok := value.(*auth.LoginStatus)
 	if !ok || ls.State != auth.StateSucc || ls.Role != auth.RoleEmployee {
-		ctx.AbortWithStatusJSON(errcode.ErrCode_Unauthorized, gin.H{"code": errcode.ErrCode_Unauthorized, "message": "unauthorized"})
+		abortAuth(ctx, ls)
 		return
 	}
 	ctx.Next()

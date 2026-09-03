@@ -30,6 +30,17 @@ verification/  一次性验证码
 
 数据库迁移由应用显式调用，不会因为导入本包自动执行。数据库连接、Redis、S3 和 SMTP 等配置由应用提供。
 
+## HTTP 认证模式
+
+`apis/runtime/server.Router` 按路由显式选择唯一认证模式：
+
+- `Post`、`G`：匿名路由，不解析或校验请求中的认证凭据；
+- `PRequireBrowserSession`、`GRequireBrowserSession`：仅接受通过 `WithBrowserSession` 配置的 Host-only Cookie Session；
+- `PRequireBearer`、`GRequireBearer`：仅接受 Bearer Token，并拒绝已配置的浏览器 Session Cookie；
+- `PRequireLogin`、`GRequireLogin`：兼容旧代码的 Bearer 别名，新代码应使用显式方法。
+
+浏览器会话路由固定按 Session Resolve、业务身份注入、登录要求、unsafe method CSRF、业务 Handler 的顺序执行。Cookie 和 Bearer 不会互相回退。
+
 ## 集成测试
 
 默认测试不会连接外部资源。需要执行集成测试时设置对应环境变量：
