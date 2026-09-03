@@ -21,9 +21,9 @@ const (
 	minimumJWTSecretBytes = 32
 )
 
-// JWTConfig JWT 签名配置。
+// JWTConfig 是仅供迁移期旧版 HS256 API 使用的签名配置。
 type JWTConfig struct {
-	// Secret 表示 HS256 签名密钥，至少需要 32 字节。
+	// Secret 表示旧版 HS256 签名密钥，至少需要 32 字节。
 	Secret string `yaml:"secret"`
 
 	// Expire 表示访问令牌有效期。
@@ -35,7 +35,7 @@ var jwtConfig struct {
 	value JWTConfig
 }
 
-// LoadJWTConfig 从 settings 加载 JWT 签名密钥和有效期。
+// LoadJWTConfig 从 settings 加载仅供旧版 HS256 API 使用的签名密钥和有效期。
 func LoadJWTConfig() error {
 	config := JWTConfig{}
 	if err := settings.GetYaml(jwtSettingGroup, jwtSettingKey, &config); err != nil {
@@ -62,7 +62,7 @@ func validateJWTConfig(config JWTConfig) error {
 	return nil
 }
 
-// IssueIdentityToken 为用户选择的公司身份签发 JWT。
+// IssueIdentityToken 使用旧版 HS256 迁移路径为公司身份签发 JWT；浏览器会话不得调用。
 func IssueIdentityToken(userID, uin, companyID uint, membershipEpoch uint64, loginWay LoginWay) (string, int64, error) {
 	if uin == 0 || companyID == 0 {
 		return "", 0, ErrInvalidPrincipal
@@ -100,14 +100,14 @@ func issueToken(userID, uin, companyID uint, membershipEpoch uint64, loginWay Lo
 	return rawToken, expiresAt, nil
 }
 
-// ParseToken 使用已加载的单一密钥验证 JWT。
+// ParseToken 使用旧版 HS256 迁移路径验证 JWT；浏览器会话不得调用。
 func ParseToken(rawToken string) (*UserClaims, error) {
 	config, err := getJWTConfig()
 	if err != nil {
 		return nil, err
 	}
 
-	claims := new(UserClaims)
+	claims := new(legacyUserClaims)
 	token, err := jwt.ParseWithClaims(
 		rawToken,
 		claims,
@@ -127,7 +127,44 @@ func ParseToken(rawToken string) (*UserClaims, error) {
 	if !token.Valid || claims.UserID == 0 || claims.UIN == 0 || claims.CompanyID == 0 || claims.IssuedAt == 0 {
 		return nil, ErrInvalidCredential
 	}
-	return claims, nil
+	parsedClaims := UserClaims(*claims)
+	return &parsedClaims, nil
+}
+
+// legacyUserClaims 保持旧版 HS256 解析只读取短字段 t、e 和 a。
+type legacyUserClaims UserClaims
+
+// GetExpirationTime 返回旧版短字段过期时间。
+func (c *legacyUserClaims) GetExpirationTime() (*jwt.NumericDate, error) {
+	if c.ExpiresAt == 0 {
+		return nil, nil
+	}
+	return jwt.NewNumericDate(time.Unix(c.ExpiresAt, 0)), nil
+}
+
+// GetIssuedAt 返回旧版短字段签发时间。
+func (c *legacyUserClaims) GetIssuedAt() (*jwt.NumericDate, error) {
+	if c.IssuedAt == 0 {
+		return nil, nil
+	}
+	return jwt.NewNumericDate(time.Unix(c.IssuedAt, 0)), nil
+}
+
+// GetNotBefore 保持旧版不校验 nbf 的行为。
+func (c *legacyUserClaims) GetNotBefore() (*jwt.NumericDate, error) { return nil, nil }
+
+// GetIssuer 保持旧版不读取 iss 的行为。
+func (c *legacyUserClaims) GetIssuer() (string, error) { return "", nil }
+
+// GetSubject 保持旧版不读取 sub 的行为。
+func (c *legacyUserClaims) GetSubject() (string, error) { return "", nil }
+
+// GetAudience 返回旧版短字段受众。
+func (c *legacyUserClaims) GetAudience() (jwt.ClaimStrings, error) {
+	if c.Audience == "" {
+		return nil, nil
+	}
+	return jwt.ClaimStrings{c.Audience}, nil
 }
 
 func setJWTConfig(config JWTConfig) {

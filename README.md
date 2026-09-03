@@ -41,6 +41,40 @@ verification/  一次性验证码
 
 浏览器会话路由固定按 Session Resolve、业务身份注入、登录要求、unsafe method CSRF、业务 Handler 的顺序执行。Cookie 和 Bearer 不会互相回退。
 
+## 非对称 JWT API
+
+`apis/runtime/auth` 的新 JWT API 只接受 Ed25519/EdDSA。签发器持有一个活动私钥，验证器可同时持有当前和旧公钥，以便在密钥轮换期间保留验证重叠窗口。密钥集合由调用方在本地提供；该包不会通过 `jku`、`x5u` 或远程 JWKS 自动刷新密钥。
+
+```go
+signer, publicKey, err := auth.GenerateTokenSigner("2026-09")
+if err != nil {
+    return err
+}
+verifier, err := auth.NewTokenVerifier([]auth.VerificationKey{publicKey})
+if err != nil {
+    return err
+}
+
+claims := &auth.UserClaims{
+    RegisteredClaims: jwt.RegisteredClaims{
+        Issuer:    "https://issuer.example.com",
+        Subject:   "user-42",
+        Audience:  jwt.ClaimStrings{"orders-api"},
+        IssuedAt:  jwt.NewNumericDate(now),
+        ExpiresAt: jwt.NewNumericDate(now.Add(15 * time.Minute)),
+        ID:        "unique-token-id",
+    },
+}
+raw, keyID, err := signer.Sign(ctx, claims)
+verified, err := verifier.Verify(ctx, raw, "https://issuer.example.com", "orders-api")
+```
+
+`TokenVerifier.Verify` 固定要求 `typ=JWT`、非空且已知的 `kid`、`alg=EdDSA`，并校验 `iss`、`aud`、`sub`、`iat`、可选 `nbf`、`exp` 和 `jti`。多受众令牌还必须提供与预期受众相等的 `azp`。`VerificationKey.Algorithm` 应设置为 `auth.JWTAlgorithmEdDSA`。
+
+`TokenVerifier.JWKS`（或 `auth.PublicJWKS`）按 `kid` 确定性输出仅含 `kty=OKP`、`crv=Ed25519`、`x`、`kid`、`alg=EdDSA`、`use=sig` 的公开 JWKS，不包含私钥材料。
+
+`JWTConfig`、`LoadJWTConfig`、`IssueIdentityToken` 和 `ParseToken` 保持为迁移期旧版 HS256 API，仅用于兼容现有 Bearer 调用。浏览器 Session 流程不得调用这些旧 API，新代码应使用 `TokenSigner` 和 `TokenVerifier`。
+
 ## 集成测试
 
 默认测试不会连接外部资源。需要执行集成测试时设置对应环境变量：

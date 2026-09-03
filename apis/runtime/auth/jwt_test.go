@@ -32,6 +32,19 @@ func TestParseToken(t *testing.T) {
 			wantID: 42,
 		},
 		{
+			name:   "legacy short times take precedence over standard claims",
+			method: jwt.SigningMethodHS256,
+			claims: UserClaims{
+				RegisteredClaims: jwt.RegisteredClaims{
+					IssuedAt:  jwt.NewNumericDate(now.Add(time.Hour)),
+					ExpiresAt: jwt.NewNumericDate(now.Add(-time.Hour)),
+				},
+				UserID: 42, CompanyID: 126, UIN: 84,
+				IssuedAt: now.Add(-time.Minute).Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
+			},
+			wantID: 42,
+		},
+		{
 			name:   "wrong signing method",
 			method: jwt.SigningMethodHS384,
 			claims: UserClaims{UserID: 42, UIN: 84, CompanyID: 126, IssuedAt: now.Add(-time.Minute).Unix(), ExpiresAt: now.Add(time.Hour).Unix()},
