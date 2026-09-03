@@ -243,3 +243,79 @@ type sessionResolverFunc func(context.Context, auth.SessionResolveRequest) (*aut
 func (resolver sessionResolverFunc) Resolve(ctx context.Context, request auth.SessionResolveRequest) (*auth.SessionPrincipal, error) {
 	return resolver(ctx, request)
 }
+
+func TestRouterWithCORSWiresConfiguredOrigin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	corsMiddleware, err := middleware.NewCORS(middleware.CORSOptions{
+		AllowedOrigins: []string{"https://ui.example.com"},
+	})
+	if err != nil {
+		t.Fatalf("NewCORS() error = %v", err)
+	}
+	router := NewRouter("/v1/", WithCORS(corsMiddleware))
+	router.G("resource", gin.HandlerFunc(func(ctx *gin.Context) {
+		ctx.Status(http.StatusNoContent)
+	}))
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "https://api.example.com/v1/resource", nil)
+	request.Header.Set("Origin", "https://ui.example.com")
+	router.GinEngine().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNoContent)
+	}
+	if got := recorder.Header().Get("Access-Control-Allow-Origin"); got != "https://ui.example.com" {
+		t.Fatalf("Access-Control-Allow-Origin = %q", got)
+	}
+}
+
+func TestRouterWithCORSPreservesCustomMiddlewareOrder(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	order := make([]string, 0, 8)
+	strictCORS, err := middleware.NewCORS(middleware.CORSOptions{
+		AllowedOrigins: []string{"https://ui.example.com"},
+	})
+	if err != nil {
+		t.Fatalf("NewCORS() error = %v", err)
+	}
+	corsMiddleware := func(ctx *gin.Context) {
+		order = append(order, "cors before")
+		strictCORS(ctx)
+		order = append(order, "cors after")
+	}
+	orderedMiddleware := func(name string) gin.HandlerFunc {
+		return func(ctx *gin.Context) {
+			order = append(order, name+" before")
+			ctx.Next()
+			order = append(order, name+" after")
+		}
+	}
+	router := NewRouter("/v1/",
+		WithCORS(corsMiddleware),
+		WithMiddleware(orderedMiddleware("first")),
+		WithMiddleware(orderedMiddleware("second")),
+	)
+	router.G("resource", gin.HandlerFunc(func(ctx *gin.Context) {
+		order = append(order, "handler")
+		ctx.Status(http.StatusNoContent)
+	}))
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "https://api.example.com/v1/resource", nil)
+	request.Header.Set("Origin", "https://ui.example.com")
+	router.GinEngine().ServeHTTP(recorder, request)
+
+	wantOrder := []string{
+		"cors before",
+		"first before",
+		"second before",
+		"handler",
+		"second after",
+		"first after",
+		"cors after",
+	}
+	if !reflect.DeepEqual(order, wantOrder) {
+		t.Fatalf("order = %v, want %v", order, wantOrder)
+	}
+}

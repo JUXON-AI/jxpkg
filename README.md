@@ -41,6 +41,25 @@ verification/  一次性验证码
 
 浏览器会话路由固定按 Session Resolve、业务身份注入、登录要求、unsafe method CSRF、业务 Handler 的顺序执行。Cookie 和 Bearer 不会互相回退。
 
+## CORS 配置
+
+`server.NewRouter` 的默认 CORS 策略只放行无 `Origin` 请求和由请求 TLS 状态及 `Host` 确定的精确同源请求，不再组合 `AllowAllOrigins` 与凭据。跨源浏览器客户端必须配置完整且精确的 HTTP(S) Origin：
+
+```go
+corsMiddleware, err := middleware.NewCORS(middleware.CORSOptions{
+    AllowedOrigins: []string{"https://app.example.com"},
+    ExternalOrigin: "https://api.example.com",
+})
+if err != nil {
+    return err
+}
+router := server.NewRouter("/v1/", server.WithCORS(corsMiddleware))
+```
+
+`AllowedOrigins` 不接受通配符、域名后缀、路径或请求值反射。服务位于可信反向代理之后时，可用 `ExternalOrigin` 声明应用确认的外部同源 Origin；中间件不会信任 `X-Forwarded-Host` 或 `X-Forwarded-Proto`。预检只返回本次请求且配置允许的方法与请求头。
+
+CORS 只控制浏览器能否读取跨源响应，不是 CSRF 防护。使用 Cookie Session 的副作用请求仍必须配置浏览器 Session 路由并通过 Origin 和 CSRF Token 校验。
+
 ## 非对称 JWT API
 
 `apis/runtime/auth` 的新 JWT API 只接受 Ed25519/EdDSA。签发器持有一个活动私钥，验证器可同时持有当前和旧公钥，以便在密钥轮换期间保留验证重叠窗口。密钥集合由调用方在本地提供；该包不会通过 `jku`、`x5u` 或远程 JWKS 自动刷新密钥。

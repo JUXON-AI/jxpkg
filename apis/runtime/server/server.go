@@ -53,6 +53,9 @@ type Router struct {
 	// routeGroups 保存每个 API 前缀对应的路由组。
 	routeGroups map[string]*gin.RouterGroup
 
+	// corsMiddleware 保存默认链首部调用的 CORS 中间件。
+	corsMiddleware gin.HandlerFunc
+
 	// browserSessionMiddleware 保存浏览器会话解析中间件。
 	browserSessionMiddleware gin.HandlerFunc
 
@@ -101,6 +104,16 @@ func WithMiddleware(middleware ...gin.HandlerFunc) RouterOption {
 	}
 }
 
+// WithCORS 替换 Router 默认使用的 CORS 中间件。
+func WithCORS(corsMiddleware gin.HandlerFunc) RouterOption {
+	return func(svr *Router) {
+		if svr == nil || corsMiddleware == nil {
+			return
+		}
+		svr.corsMiddleware = corsMiddleware
+	}
+}
+
 // WithBrowserSession 配置显式浏览器 Cookie Session 路由链。
 func WithBrowserSession(options middleware.BrowserSessionOptions) RouterOption {
 	return func(svr *Router) {
@@ -119,12 +132,13 @@ func NewRouter(apiPrefix string, opts ...RouterOption) *Router {
 		apiPrefix = PrefixAPIDefault
 	}
 	svr := &Router{
-		eng:          gin.New(),
-		lc:           lifecycle.Std(),
-		Prefix:       apiPrefix,
-		routerMap:    map[string]interface{}{},
-		routeGroups:  map[string]*gin.RouterGroup{},
-		authInjector: &authInjector{},
+		eng:            gin.New(),
+		lc:             lifecycle.Std(),
+		Prefix:         apiPrefix,
+		routerMap:      map[string]interface{}{},
+		routeGroups:    map[string]*gin.RouterGroup{},
+		authInjector:   &authInjector{},
+		corsMiddleware: middleware.CORS(),
 	}
 	svr.router()
 	for _, opt := range opts {
@@ -159,7 +173,10 @@ func (svr *Router) Run(l net.Listener) error {
 func (svr *Router) GinEngine() *gin.Engine { return svr.eng }
 
 func (svr *Router) router() {
-	svr.eng.Use(middleware.CORS())
+	// 通过稳定的链首包装器延后读取选项，避免改变后续自定义中间件顺序。
+	svr.eng.Use(func(ctx *gin.Context) {
+		svr.corsMiddleware(ctx)
+	})
 	svr.eng.Use(middleware.CustomerHeader())
 	svr.eng.Use(middleware.Logger(".Ping"))
 	svr.eng.Use(middleware.Recovery())
