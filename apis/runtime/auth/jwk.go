@@ -75,7 +75,7 @@ func PublicJWKS(keys []VerificationKey) (JSONWebKeySet, error) {
 }
 
 // JWKS 返回验证器当前轮换重叠集合的确定性公钥投影。
-func (v *TokenVerifier) JWKS() (JSONWebKeySet, error) {
+func (v *Ed25519TokenVerifier) JWKS() (JSONWebKeySet, error) {
 	if v == nil || len(v.keys) == 0 {
 		return JSONWebKeySet{}, fmt.Errorf("%w: token verifier is not configured", ErrAuthBackendUnavailable)
 	}

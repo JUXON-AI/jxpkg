@@ -69,11 +69,11 @@ raw, keyID, err := signer.Sign(ctx, claims)
 verified, err := verifier.Verify(ctx, raw, "https://issuer.example.com", "orders-api")
 ```
 
-`TokenVerifier.Verify` 固定要求 `typ=JWT`、非空且已知的 `kid`、`alg=EdDSA`，并校验 `iss`、`aud`、`sub`、`iat`、可选 `nbf`、`exp` 和 `jti`。多受众令牌还必须提供与预期受众相等的 `azp`。`VerificationKey.Algorithm` 应设置为 `auth.JWTAlgorithmEdDSA`。
+`TokenVerifier` 是仅包含 `Verify` 的依赖接口，`NewTokenVerifier` 返回支持密钥轮换和 `JWKS` 的 `*Ed25519TokenVerifier`。验证固定要求 `typ=JWT`、非空且已知的 `kid`、`alg=EdDSA`，并校验 `iss`、`aud`、`sub`、`iat`、可选 `nbf`、`exp` 和 `jti`。多受众令牌还必须提供与预期受众相等的 `azp`。受保护 JOSE 头和声明必须是大小与深度受限、且任何层级都无重复成员的 JSON 对象。`VerificationKey.Algorithm` 应设置为 `auth.JWTAlgorithmEdDSA`。
 
-`TokenVerifier.JWKS`（或 `auth.PublicJWKS`）按 `kid` 确定性输出仅含 `kty=OKP`、`crv=Ed25519`、`x`、`kid`、`alg=EdDSA`、`use=sig` 的公开 JWKS，不包含私钥材料。
+`Ed25519TokenVerifier.JWKS`（或 `auth.PublicJWKS`）按 `kid` 确定性输出仅含 `kty=OKP`、`crv=Ed25519`、`x`、`kid`、`alg=EdDSA`、`use=sig` 的公开 JWKS，不包含私钥材料。`TokenSigner` 同样是可替换接口，构造器返回保留 `VerificationKey` 能力的 `*Ed25519TokenSigner`。
 
-`JWTConfig`、`LoadJWTConfig`、`IssueIdentityToken` 和 `ParseToken` 保持为迁移期旧版 HS256 API，仅用于兼容现有 Bearer 调用。浏览器 Session 流程不得调用这些旧 API，新代码应使用 `TokenSigner` 和 `TokenVerifier`。
+`JWTConfig`、`LoadJWTConfig`、`IssueIdentityToken` 和明确命名的 `ParseLegacyToken` 是迁移期旧版 HS256 API，仅用于兼容现有 Bearer 调用。`ParseToken` 已弃用并仅委托给 `ParseLegacyToken` 保持源码兼容。浏览器 Session 流程只接受不透明 Cookie Session，且不得调用这些旧 API；新代码必须使用 `TokenSigner` 和 `TokenVerifier`。
 
 ## 集成测试
 

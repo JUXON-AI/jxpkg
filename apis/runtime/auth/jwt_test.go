@@ -113,6 +113,30 @@ func TestParseToken(t *testing.T) {
 	}
 }
 
+func TestParseTokenDelegatesToParseLegacyToken(t *testing.T) {
+	setJWTConfig(JWTConfig{Secret: strings.Repeat("s", minimumJWTSecretBytes), Expire: time.Hour})
+	t.Cleanup(func() { setJWTConfig(JWTConfig{}) })
+
+	rawToken, _, err := IssueIdentityToken(42, 84, 126, 7, LoginWayEmail)
+	if err != nil {
+		t.Fatalf("IssueIdentityToken: %v", err)
+	}
+	legacyClaims, err := ParseLegacyToken(rawToken)
+	if err != nil {
+		t.Fatalf("ParseLegacyToken: %v", err)
+	}
+	compatibilityClaims, err := ParseToken(rawToken)
+	if err != nil {
+		t.Fatalf("ParseToken: %v", err)
+	}
+	if legacyClaims.UserID != compatibilityClaims.UserID || legacyClaims.UIN != compatibilityClaims.UIN ||
+		legacyClaims.CompanyID != compatibilityClaims.CompanyID || legacyClaims.MembershipEpoch != compatibilityClaims.MembershipEpoch ||
+		legacyClaims.IssuedAt != compatibilityClaims.IssuedAt || legacyClaims.ExpiresAt != compatibilityClaims.ExpiresAt ||
+		legacyClaims.LoginWay != compatibilityClaims.LoginWay {
+		t.Fatalf("ParseToken claims = %+v, ParseLegacyToken claims = %+v", compatibilityClaims, legacyClaims)
+	}
+}
+
 func TestParseTokenRequiresLoadedSecret(t *testing.T) {
 	setJWTConfig(JWTConfig{})
 	_, err := ParseToken("token")

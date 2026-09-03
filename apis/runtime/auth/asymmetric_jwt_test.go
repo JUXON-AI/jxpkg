@@ -7,11 +7,19 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+)
+
+var (
+	_ TokenSigner   = (*Ed25519TokenSigner)(nil)
+	_ TokenSigner   = fakeTokenSigner{}
+	_ TokenVerifier = (*Ed25519TokenVerifier)(nil)
+	_ TokenVerifier = fakeTokenVerifier{}
 )
 
 const (
@@ -21,6 +29,130 @@ const (
 	// testAudience 表示测试令牌的固定受众。
 	testAudience = "api.example.com"
 )
+
+func TestTokenInterfacesAcceptMethodCompatibleFakes(t *testing.T) {
+	claims := validAsymmetricClaims(time.Now())
+	var signer TokenSigner = fakeTokenSigner{raw: "signed", keyID: "fake-key"}
+	raw, keyID, err := signer.Sign(context.Background(), claims)
+	if err != nil || raw != "signed" || keyID != "fake-key" {
+		t.Fatalf("fake signer result = %q, %q, %v", raw, keyID, err)
+	}
+
+	var verifier TokenVerifier = fakeTokenVerifier{claims: claims}
+	got, err := verifier.Verify(context.Background(), raw, testIssuer, testAudience)
+	if err != nil || got != claims {
+		t.Fatalf("fake verifier result = %p, %v, want %p", got, err, claims)
+	}
+}
+
+func TestTokenVerifierRejectsSignedDuplicateJSONMembers(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	verifier, err := NewTokenVerifier([]VerificationKey{{KeyID: "key-1", Algorithm: JWTAlgorithmEdDSA, PublicKey: privateKey.Public()}})
+	if err != nil {
+		t.Fatalf("NewTokenVerifier: %v", err)
+	}
+	now := time.Now()
+	validHeader := `{"alg":"EdDSA","typ":"JWT","kid":"key-1"}`
+	tests := []struct {
+		// name 表示重复 JSON 成员测试用例名称。
+		name string
+
+		// header 表示被签名的原始受保护 JOSE 头。
+		header string
+
+		// payload 表示被签名的原始 JWT 声明。
+		payload string
+	}{
+		{name: "duplicate kid", header: `{"kid":"wrong","kid":"key-1","alg":"EdDSA","typ":"JWT"}`, payload: validSignedPayload(now, "")},
+		{name: "duplicate alg", header: `{"alg":"HS256","alg":"EdDSA","typ":"JWT","kid":"key-1"}`, payload: validSignedPayload(now, "")},
+		{name: "duplicate typ", header: `{"typ":"at+jwt","typ":"JWT","alg":"EdDSA","kid":"key-1"}`, payload: validSignedPayload(now, "")},
+		{name: "duplicate iss", header: validHeader, payload: validSignedPayload(now, `"iss":"https://wrong.example.com",`)},
+		{name: "duplicate aud", header: validHeader, payload: validSignedPayload(now, `"aud":["wrong-api"],`)},
+		{name: "duplicate exp", header: validHeader, payload: validSignedPayload(now, `"exp":0,`)},
+		{name: "duplicate sub", header: validHeader, payload: validSignedPayload(now, `"sub":"wrong-user",`)},
+		{name: "duplicate jti", header: validHeader, payload: validSignedPayload(now, `"jti":"wrong-token",`)},
+		{name: "duplicate azp", header: validHeader, payload: validSignedPayload(now, `"azp":"wrong-client","azp":"final-client",`)},
+		{name: "nested duplicate", header: validHeader, payload: validSignedPayload(now, `"metadata":{"role":"old","role":"new"},`)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := signRawEdDSA(t, privateKey, tt.header, tt.payload)
+			if _, err := verifier.Verify(context.Background(), raw, testIssuer, testAudience); !errors.Is(err, ErrInvalidCredential) {
+				t.Fatalf("Verify error = %v, want ErrInvalidCredential", err)
+			}
+		})
+	}
+}
+
+func TestTokenVerifierRejectsSignedInvalidJSONEnvelopes(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	verifier, err := NewTokenVerifier([]VerificationKey{{KeyID: "key-1", Algorithm: JWTAlgorithmEdDSA, PublicKey: privateKey.Public()}})
+	if err != nil {
+		t.Fatalf("NewTokenVerifier: %v", err)
+	}
+	now := time.Now()
+	validHeader := `{"alg":"EdDSA","typ":"JWT","kid":"key-1"}`
+	deepHeader := `{"nested":` + strings.Repeat("[", maximumJSONNestingDepth) + "0" + strings.Repeat("]", maximumJSONNestingDepth) + `,"alg":"EdDSA","typ":"JWT","kid":"key-1"}`
+	deepPayload := `{"nested":` + strings.Repeat("[", maximumJSONNestingDepth) + "0" + strings.Repeat("]", maximumJSONNestingDepth) + `,` + strings.TrimPrefix(validSignedPayload(now, ""), "{")
+	largeHeader := `{"padding":"` + strings.Repeat("x", maximumJOSEHeaderBytes) + `"}`
+	largePayload := `{"padding":"` + strings.Repeat("x", maximumJWTClaimsBytes) + `"}`
+	tests := []struct {
+		// name 表示无效 JSON 信封测试用例名称。
+		name string
+
+		// header 表示被签名的原始受保护 JOSE 头。
+		header string
+
+		// payload 表示被签名的原始 JWT 声明。
+		payload string
+	}{
+		{name: "header is not object", header: `[]`, payload: validSignedPayload(now, "")},
+		{name: "payload is not object", header: validHeader, payload: `[]`},
+		{name: "malformed header", header: `{"alg":`, payload: validSignedPayload(now, "")},
+		{name: "malformed payload", header: validHeader, payload: `{"iss":`},
+		{name: "invalid UTF-8 payload", header: validHeader, payload: string([]byte{0xff})},
+		{name: "excessive header nesting", header: deepHeader, payload: validSignedPayload(now, "")},
+		{name: "excessive payload nesting", header: validHeader, payload: deepPayload},
+		{name: "excessive header size", header: largeHeader, payload: validSignedPayload(now, "")},
+		{name: "excessive payload size", header: validHeader, payload: largePayload},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := signRawEdDSA(t, privateKey, tt.header, tt.payload)
+			if _, err := verifier.Verify(context.Background(), raw, testIssuer, testAudience); !errors.Is(err, ErrInvalidCredential) {
+				t.Fatalf("Verify error = %v, want ErrInvalidCredential", err)
+			}
+		})
+	}
+}
+
+func TestTokenVerifierRejectsLegacyHS256(t *testing.T) {
+	secret := strings.Repeat("s", minimumJWTSecretBytes)
+	setJWTConfig(JWTConfig{Secret: secret, Expire: time.Hour})
+	t.Cleanup(func() { setJWTConfig(JWTConfig{}) })
+	legacyRaw, _, err := IssueIdentityToken(42, 84, 126, 7, LoginWayEmail)
+	if err != nil {
+		t.Fatalf("IssueIdentityToken: %v", err)
+	}
+
+	_, verificationKey, err := GenerateTokenSigner("key-1")
+	if err != nil {
+		t.Fatalf("GenerateTokenSigner: %v", err)
+	}
+	verifier, err := NewTokenVerifier([]VerificationKey{verificationKey})
+	if err != nil {
+		t.Fatalf("NewTokenVerifier: %v", err)
+	}
+	if _, err := verifier.Verify(context.Background(), legacyRaw, testIssuer, testAudience); !errors.Is(err, ErrInvalidCredential) {
+		t.Fatalf("Verify legacy HS256 error = %v, want ErrInvalidCredential", err)
+	}
+}
 
 func TestTokenSignerAndVerifier(t *testing.T) {
 	signer, verificationKey, err := GenerateTokenSigner("active-2026-09")
@@ -72,7 +204,7 @@ func TestTokenVerifierRotationOverlap(t *testing.T) {
 		t.Fatalf("NewTokenVerifier: %v", err)
 	}
 
-	for _, signer := range []*TokenSigner{oldSigner, activeSigner} {
+	for _, signer := range []*Ed25519TokenSigner{oldSigner, activeSigner} {
 		raw, keyID, signErr := signer.Sign(context.Background(), validAsymmetricClaims(time.Now()))
 		if signErr != nil {
 			t.Fatalf("Sign(%q): %v", keyID, signErr)
@@ -419,4 +551,45 @@ func validAsymmetricClaims(now time.Time) *UserClaims {
 func mutateClaims(claims *UserClaims, mutate func(*UserClaims)) *UserClaims {
 	mutate(claims)
 	return claims
+}
+
+type fakeTokenSigner struct {
+	// raw 保存测试替身返回的原始令牌。
+	raw string
+
+	// keyID 保存测试替身返回的密钥标识。
+	keyID string
+}
+
+func (signer fakeTokenSigner) Sign(context.Context, jwt.Claims) (string, string, error) {
+	return signer.raw, signer.keyID, nil
+}
+
+type fakeTokenVerifier struct {
+	// claims 保存测试替身返回的声明。
+	claims *UserClaims
+}
+
+func (verifier fakeTokenVerifier) Verify(context.Context, string, string, string) (*UserClaims, error) {
+	return verifier.claims, nil
+}
+
+func validSignedPayload(now time.Time, prefix string) string {
+	return fmt.Sprintf(
+		`{%s"iss":%q,"sub":"user-42","aud":[%q],"exp":%d,"iat":%d,"jti":"token-123","c":42,"u":84,"o":126,"m":7,"l":2}`,
+		prefix,
+		testIssuer,
+		testAudience,
+		now.Add(time.Hour).Unix(),
+		now.Add(-time.Minute).Unix(),
+	)
+}
+
+func signRawEdDSA(t *testing.T, privateKey ed25519.PrivateKey, header, payload string) string {
+	t.Helper()
+	encodedHeader := base64.RawURLEncoding.EncodeToString([]byte(header))
+	encodedPayload := base64.RawURLEncoding.EncodeToString([]byte(payload))
+	signingInput := encodedHeader + "." + encodedPayload
+	signature := ed25519.Sign(privateKey, []byte(signingInput))
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature)
 }

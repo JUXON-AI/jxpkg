@@ -22,14 +22,19 @@ type VerificationKey struct {
 	PublicKey crypto.PublicKey
 }
 
-// TokenVerifier 使用本地固定公钥集合验证 EdDSA 令牌。
-type TokenVerifier struct {
+// TokenVerifier 定义新代码使用的非对称 JWT 验证边界。
+type TokenVerifier interface {
+	Verify(ctx context.Context, raw, expectedIssuer, expectedAudience string) (*UserClaims, error)
+}
+
+// Ed25519TokenVerifier 使用本地固定公钥集合验证 EdDSA 令牌。
+type Ed25519TokenVerifier struct {
 	// keys 保存按 kid 索引的不可变验证密钥副本。
 	keys map[string]VerificationKey
 }
 
 // NewTokenVerifier 创建支持密钥轮换重叠窗口的本地验证器。
-func NewTokenVerifier(keys []VerificationKey) (*TokenVerifier, error) {
+func NewTokenVerifier(keys []VerificationKey) (*Ed25519TokenVerifier, error) {
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("%w: verification keys are empty", ErrAuthBackendUnavailable)
 	}
@@ -44,11 +49,11 @@ func NewTokenVerifier(keys []VerificationKey) (*TokenVerifier, error) {
 		}
 		indexed[normalized.KeyID] = normalized
 	}
-	return &TokenVerifier{keys: indexed}, nil
+	return &Ed25519TokenVerifier{keys: indexed}, nil
 }
 
 // Verify 严格验证 EdDSA 令牌、标准声明和预期签发方及受众。
-func (v *TokenVerifier) Verify(ctx context.Context, raw, expectedIssuer, expectedAudience string) (*UserClaims, error) {
+func (v *Ed25519TokenVerifier) Verify(ctx context.Context, raw, expectedIssuer, expectedAudience string) (*UserClaims, error) {
 	if err := contextError(ctx); err != nil {
 		return nil, err
 	}
@@ -57,6 +62,9 @@ func (v *TokenVerifier) Verify(ctx context.Context, raw, expectedIssuer, expecte
 	}
 	if strings.TrimSpace(raw) == "" || strings.TrimSpace(expectedIssuer) == "" || strings.TrimSpace(expectedAudience) == "" {
 		return nil, ErrInvalidCredential
+	}
+	if err := validateCompactJSONObjects(raw); err != nil {
+		return nil, invalidCredential("verify jwt", err)
 	}
 
 	claims := new(UserClaims)
@@ -84,7 +92,7 @@ func (v *TokenVerifier) Verify(ctx context.Context, raw, expectedIssuer, expecte
 	return claims, nil
 }
 
-func (v *TokenVerifier) verificationKey(token *jwt.Token) (any, error) {
+func (v *Ed25519TokenVerifier) verificationKey(token *jwt.Token) (any, error) {
 	if token == nil || token.Method != jwt.SigningMethodEdDSA || token.Method.Alg() != JWTAlgorithmEdDSA {
 		return nil, fmt.Errorf("unexpected signing method")
 	}

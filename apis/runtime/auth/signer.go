@@ -20,8 +20,13 @@ const (
 	tokenTypeJWT = "JWT"
 )
 
-// TokenSigner 使用一个当前活动的 Ed25519 私钥签发令牌。
-type TokenSigner struct {
+// TokenSigner 定义新代码使用的非对称 JWT 签发边界。
+type TokenSigner interface {
+	Sign(context.Context, jwt.Claims) (raw, keyID string, err error)
+}
+
+// Ed25519TokenSigner 使用一个当前活动的 Ed25519 私钥签发令牌。
+type Ed25519TokenSigner struct {
 	// keyID 保存写入 JWT kid 头的活动密钥标识。
 	keyID string
 
@@ -30,7 +35,7 @@ type TokenSigner struct {
 }
 
 // NewTokenSigner 使用活动 Ed25519 私钥创建签发器。
-func NewTokenSigner(keyID string, privateKey ed25519.PrivateKey) (*TokenSigner, error) {
+func NewTokenSigner(keyID string, privateKey ed25519.PrivateKey) (*Ed25519TokenSigner, error) {
 	if strings.TrimSpace(keyID) == "" || keyID != strings.TrimSpace(keyID) {
 		return nil, fmt.Errorf("%w: signing key id must be a non-empty canonical value", ErrAuthBackendUnavailable)
 	}
@@ -41,14 +46,14 @@ func NewTokenSigner(keyID string, privateKey ed25519.PrivateKey) (*TokenSigner, 
 	if subtle.ConstantTimeCompare(privateKey, canonicalKey) != 1 {
 		return nil, fmt.Errorf("%w: signing key %q has an inconsistent Ed25519 public component", ErrAuthBackendUnavailable, keyID)
 	}
-	return &TokenSigner{
+	return &Ed25519TokenSigner{
 		keyID:      keyID,
 		privateKey: append(ed25519.PrivateKey(nil), privateKey...),
 	}, nil
 }
 
 // GenerateTokenSigner 使用 crypto/rand 生成新的活动 Ed25519 密钥对。
-func GenerateTokenSigner(keyID string) (*TokenSigner, VerificationKey, error) {
+func GenerateTokenSigner(keyID string) (*Ed25519TokenSigner, VerificationKey, error) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, VerificationKey{}, fmt.Errorf("generate Ed25519 key: %w", err)
@@ -65,7 +70,7 @@ func GenerateTokenSigner(keyID string) (*TokenSigner, VerificationKey, error) {
 }
 
 // VerificationKey 返回与活动私钥对应的公钥副本。
-func (s *TokenSigner) VerificationKey() VerificationKey {
+func (s *Ed25519TokenSigner) VerificationKey() VerificationKey {
 	if s == nil || len(s.privateKey) != ed25519.PrivateKeySize {
 		return VerificationKey{}
 	}
@@ -78,7 +83,7 @@ func (s *TokenSigner) VerificationKey() VerificationKey {
 }
 
 // Sign 使用 EdDSA 签发 claims，并返回原始令牌和活动 kid。
-func (s *TokenSigner) Sign(ctx context.Context, claims jwt.Claims) (raw, keyID string, err error) {
+func (s *Ed25519TokenSigner) Sign(ctx context.Context, claims jwt.Claims) (raw, keyID string, err error) {
 	if err := contextError(ctx); err != nil {
 		return "", "", err
 	}

@@ -100,8 +100,15 @@ func issueToken(userID, uin, companyID uint, membershipEpoch uint64, loginWay Lo
 	return rawToken, expiresAt, nil
 }
 
-// ParseToken 使用旧版 HS256 迁移路径验证 JWT；浏览器会话不得调用。
+// ParseToken 为现有调用保留旧版 HS256 验证入口。
+//
+// Deprecated: 仅迁移代码可调用 ParseLegacyToken；新代码必须依赖 TokenVerifier。
 func ParseToken(rawToken string) (*UserClaims, error) {
+	return ParseLegacyToken(rawToken)
+}
+
+// ParseLegacyToken 使用旧版 HS256 迁移路径验证 JWT；浏览器会话不得调用。
+func ParseLegacyToken(rawToken string) (*UserClaims, error) {
 	config, err := getJWTConfig()
 	if err != nil {
 		return nil, err
