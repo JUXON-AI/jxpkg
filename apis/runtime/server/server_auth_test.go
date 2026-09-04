@@ -319,3 +319,94 @@ func TestRouterWithCORSPreservesCustomMiddlewareOrder(t *testing.T) {
 		t.Fatalf("order = %v, want %v", order, wantOrder)
 	}
 }
+
+func TestRouterCORSAndCSRFShareAuthoritativeExternalOrigin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Unix(2_000_000, 0)
+	hash := sha256.Sum256([]byte("csrf-token"))
+	principal := &auth.SessionPrincipal{
+		Claims: auth.UserClaims{
+			UserID:    1,
+			UIN:       2,
+			CompanyID: 3,
+		},
+		Host:              "app.example.com",
+		ClientID:          "browser-client",
+		SessionVersion:    1,
+		AuthenticatedAt:   now.Add(-time.Hour).Unix(),
+		IdleExpiresAt:     now.Add(time.Hour).Unix(),
+		AbsoluteExpiresAt: now.Add(2 * time.Hour).Unix(),
+		CSRFTokenHash:     hash[:],
+	}
+
+	tests := []struct {
+		// name 表示测试用例名称。
+		name string
+
+		// csrfExternalOrigin 表示浏览器会话 CSRF 使用的外部 Origin。
+		csrfExternalOrigin string
+
+		// wantStatus 表示期望的响应状态码。
+		wantStatus int
+
+		// wantHandlerCalls 表示期望的业务处理器调用次数。
+		wantHandlerCalls int
+	}{
+		{name: "matching configuration", csrfExternalOrigin: "https://app.example.com", wantStatus: http.StatusNoContent, wantHandlerCalls: 1},
+		{name: "mismatched configuration", csrfExternalOrigin: "https://other.example.com", wantStatus: http.StatusUnauthorized},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			const corsExternalOrigin = "https://app.example.com"
+			corsMiddleware, err := middleware.NewCORS(middleware.CORSOptions{ExternalOrigin: corsExternalOrigin})
+			if err != nil {
+				t.Fatalf("NewCORS() error = %v", err)
+			}
+			resolver := sessionResolverFunc(func(_ context.Context, _ auth.SessionResolveRequest) (*auth.SessionPrincipal, error) {
+				copy := *principal
+				copy.CSRFTokenHash = append([]byte(nil), principal.CSRFTokenHash...)
+				return &copy, nil
+			})
+			router := NewRouter("/v1/",
+				WithCORS(corsMiddleware),
+				WithBrowserSession(middleware.BrowserSessionOptions{
+					Service:    "service",
+					CookieName: "__Host-app_session",
+					AllowedHosts: map[string]struct{}{
+						"app.example.com":   {},
+						"other.example.com": {},
+					},
+					ExternalOrigin: test.csrfExternalOrigin,
+					Resolver:       resolver,
+					Clock:          func() time.Time { return now },
+				}),
+			)
+			router.AuthInject(func(_ *gin.Context, _ *auth.LoginStatus) error { return nil })
+			handlerCalls := 0
+			router.PRequireBrowserSession("resource", gin.HandlerFunc(func(ctx *gin.Context) {
+				handlerCalls++
+				ctx.Status(http.StatusNoContent)
+			}))
+
+			request := httptest.NewRequest(http.MethodPost, "http://app.example.com/v1/resource", nil)
+			request.Header.Set("Origin", corsExternalOrigin)
+			request.Header.Set("Cookie", "__Host-app_session=sid")
+			request.Header.Set(middleware.DefaultCSRFHeader, "csrf-token")
+			request.Header.Set("X-Forwarded-Host", "attacker.example.com")
+			request.Header.Set("X-Forwarded-Proto", "http")
+			recorder := httptest.NewRecorder()
+			router.GinEngine().ServeHTTP(recorder, request)
+
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, test.wantStatus, recorder.Body.String())
+			}
+			if handlerCalls != test.wantHandlerCalls {
+				t.Fatalf("handler calls = %d, want %d", handlerCalls, test.wantHandlerCalls)
+			}
+			if got := recorder.Header().Get("Access-Control-Allow-Origin"); got != corsExternalOrigin {
+				t.Fatalf("Access-Control-Allow-Origin = %q, want %q", got, corsExternalOrigin)
+			}
+		})
+	}
+}

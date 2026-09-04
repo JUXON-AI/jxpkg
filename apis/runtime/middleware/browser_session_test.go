@@ -202,6 +202,12 @@ func TestBrowserSessionOptionsValidation(t *testing.T) {
 		{name: "noncanonical allowed host", mutate: func(options *BrowserSessionOptions) {
 			options.AllowedHosts = map[string]struct{}{"App.example.com": {}}
 		}},
+		{name: "noncanonical external origin", mutate: func(options *BrowserSessionOptions) {
+			options.ExternalOrigin = "https://App.example.com"
+		}},
+		{name: "external origin host mismatch", mutate: func(options *BrowserSessionOptions) {
+			options.ExternalOrigin = "https://other.example.com"
+		}},
 		{name: "nil resolver", mutate: func(options *BrowserSessionOptions) { options.Resolver = nil }},
 		{name: "invalid csrf header", mutate: func(options *BrowserSessionOptions) { options.CSRFHeader = "bad header" }},
 		{name: "lowercase unsafe method", mutate: func(options *BrowserSessionOptions) { options.UnsafeMethods = map[string]struct{}{"post": {}} }},

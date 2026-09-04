@@ -46,19 +46,29 @@ verification/  一次性验证码
 `server.NewRouter` 的默认 CORS 策略只放行无 `Origin` 请求和由请求 TLS 状态及 `Host` 确定的精确同源请求，不再组合 `AllowAllOrigins` 与凭据。跨源浏览器客户端必须配置完整且精确的 HTTP(S) Origin：
 
 ```go
+externalOrigin := "https://api.example.com"
 corsMiddleware, err := middleware.NewCORS(middleware.CORSOptions{
     AllowedOrigins: []string{"https://app.example.com"},
-    ExternalOrigin: "https://api.example.com",
+    ExternalOrigin: externalOrigin,
 })
 if err != nil {
     return err
 }
-router := server.NewRouter("/v1/", server.WithCORS(corsMiddleware))
+router := server.NewRouter("/v1/",
+    server.WithCORS(corsMiddleware),
+    server.WithBrowserSession(middleware.BrowserSessionOptions{
+        Service:        "api",
+        CookieName:     "__Host-api_session",
+        AllowedHosts:   map[string]struct{}{"api.example.com": {}},
+        ExternalOrigin: externalOrigin,
+        Resolver:       sessionResolver,
+    }),
+)
 ```
 
-`AllowedOrigins` 不接受通配符、域名后缀、路径或请求值反射。服务位于可信反向代理之后时，可用 `ExternalOrigin` 声明应用确认的外部同源 Origin；中间件不会信任 `X-Forwarded-Host` 或 `X-Forwarded-Proto`。预检只返回本次请求且配置允许的方法与请求头。
+`AllowedOrigins` 不接受通配符、域名后缀、路径或请求值反射。服务位于可信反向代理之后时，应把同一个 `ExternalOrigin` 同时传给 CORS 和浏览器 Session/CSRF；该值必须是规范的完整 HTTP(S) Origin，且 Host 必须存在于 `AllowedHosts`。两套中间件都不会信任 `X-Forwarded-Host` 或 `X-Forwarded-Proto`。预检只返回本次请求且配置允许的方法与请求头，默认方法包含 `HEAD`，`OPTIONS` 仍需由预检策略明确处理。所有可能因 Origin 改变的响应都会合并 `Vary: Origin`，包括没有 `Origin` 的可缓存请求。
 
-CORS 只控制浏览器能否读取跨源响应，不是 CSRF 防护。使用 Cookie Session 的副作用请求仍必须配置浏览器 Session 路由并通过 Origin 和 CSRF Token 校验。
+CORS 只控制浏览器能否读取跨源响应，不是 CSRF 防护。使用 Cookie Session 的副作用请求仍必须配置浏览器 Session 路由并通过同一权威 Origin 和 CSRF Token 校验；CORS 与 CSRF 必须配置相同的 `ExternalOrigin`，请求会分别接受两层校验。
 
 ## 非对称 JWT API
 

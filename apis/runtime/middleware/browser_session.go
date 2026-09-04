@@ -31,6 +31,9 @@ type BrowserSessionOptions struct {
 	// AllowedHosts 表示该服务精确允许的规范 Host 集合。
 	AllowedHosts map[string]struct{}
 
+	// ExternalOrigin 表示应用确认的外部同源 Origin；为空时根据 TLS 和 Request.Host 判定。
+	ExternalOrigin string
+
 	// Resolver 表示受信任的会话主体解析器。
 	Resolver auth.SessionResolver
 
@@ -53,6 +56,9 @@ type normalizedBrowserSessionOptions struct {
 
 	// allowedHosts 保存调用方无法再修改的 Host Allowlist 副本。
 	allowedHosts map[string]struct{}
+
+	// externalOrigin 保存应用确认的规范外部同源 Origin。
+	externalOrigin string
 
 	// resolver 保存受信任的会话主体解析器。
 	resolver auth.SessionResolver
@@ -137,6 +143,21 @@ func normalizeBrowserSessionOptions(options BrowserSessionOptions, requireResolv
 		}
 		allowedHosts[host] = struct{}{}
 	}
+	externalOrigin := ""
+	if options.ExternalOrigin != "" {
+		var err error
+		externalOrigin, err = canonicalOrigin(options.ExternalOrigin)
+		if err != nil {
+			return normalizedBrowserSessionOptions{}, fmt.Errorf("%w: invalid external origin", auth.ErrAuthBackendUnavailable)
+		}
+		parsed, err := url.Parse(externalOrigin)
+		if err != nil {
+			return normalizedBrowserSessionOptions{}, fmt.Errorf("%w: invalid external origin", auth.ErrAuthBackendUnavailable)
+		}
+		if _, ok := allowedHosts[parsed.Host]; !ok {
+			return normalizedBrowserSessionOptions{}, fmt.Errorf("%w: external origin host is not allowed", auth.ErrAuthBackendUnavailable)
+		}
+	}
 	if requireResolver && options.Resolver == nil {
 		return normalizedBrowserSessionOptions{}, fmt.Errorf("%w: session resolver is nil", auth.ErrAuthBackendUnavailable)
 	}
@@ -167,13 +188,14 @@ func normalizeBrowserSessionOptions(options BrowserSessionOptions, requireResolv
 	}
 
 	return normalizedBrowserSessionOptions{
-		service:       service,
-		cookieName:    options.CookieName,
-		allowedHosts:  allowedHosts,
-		resolver:      options.Resolver,
-		clock:         clock,
-		csrfHeader:    csrfHeader,
-		unsafeMethods: unsafeMethods,
+		service:        service,
+		cookieName:     options.CookieName,
+		allowedHosts:   allowedHosts,
+		externalOrigin: externalOrigin,
+		resolver:       options.Resolver,
+		clock:          clock,
+		csrfHeader:     csrfHeader,
+		unsafeMethods:  unsafeMethods,
 	}, nil
 }
 

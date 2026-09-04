@@ -3,6 +3,7 @@ package middleware
 import (
 	"crypto/sha256"
 	"crypto/tls"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -98,6 +99,147 @@ func TestCSRFMiddleware(t *testing.T) {
 			}
 			if test.wantStatus == http.StatusUnauthorized && !ctx.IsAborted() {
 				t.Fatal("CSRF rejection did not abort context")
+			}
+		})
+	}
+}
+
+func TestCSRFMiddlewareUsesAuthoritativeExternalOrigin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	hash := sha256.Sum256([]byte("csrf-token"))
+	principal := auth.SessionPrincipal{
+		Host:           "app.example.com",
+		ClientID:       "browser-client",
+		SessionVersion: 1,
+		CSRFTokenHash:  hash[:],
+	}
+
+	tests := []struct {
+		// name 表示测试用例名称。
+		name string
+
+		// externalOrigin 表示 CSRF 中间件的可信外部 Origin。
+		externalOrigin string
+
+		// allowedHosts 表示浏览器会话允许的 Host 集合。
+		allowedHosts map[string]struct{}
+
+		// origin 表示请求携带的 Origin。
+		origin string
+
+		// forwardedHost 表示不受信任的转发 Host。
+		forwardedHost string
+
+		// forwardedProto 表示不受信任的转发协议。
+		forwardedProto string
+
+		// wantStatus 表示期望的响应状态码。
+		wantStatus int
+
+		// wantHandlerCalls 表示期望的业务处理器调用次数。
+		wantHandlerCalls int
+	}{
+		{
+			name:             "configured https origin with nil request tls",
+			externalOrigin:   "https://app.example.com",
+			allowedHosts:     map[string]struct{}{"app.example.com": {}},
+			origin:           "https://app.example.com",
+			forwardedHost:    "attacker.example.com",
+			forwardedProto:   "http",
+			wantStatus:       http.StatusNoContent,
+			wantHandlerCalls: 1,
+		},
+		{
+			name:           "forwarded headers are not authoritative",
+			allowedHosts:   map[string]struct{}{"app.example.com": {}},
+			origin:         "https://app.example.com",
+			forwardedHost:  "app.example.com",
+			forwardedProto: "https",
+			wantStatus:     http.StatusUnauthorized,
+		},
+		{
+			name:           "configured origin mismatch",
+			externalOrigin: "https://other.example.com",
+			allowedHosts: map[string]struct{}{
+				"app.example.com":   {},
+				"other.example.com": {},
+			},
+			origin:     "https://app.example.com",
+			wantStatus: http.StatusUnauthorized,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			csrf, err := NewCSRFMiddleware(BrowserSessionOptions{
+				Service:        "service",
+				CookieName:     "__Host-session",
+				AllowedHosts:   test.allowedHosts,
+				ExternalOrigin: test.externalOrigin,
+			})
+			if err != nil {
+				t.Fatalf("NewCSRFMiddleware() error = %v", err)
+			}
+			handlerCalls := 0
+			engine := gin.New()
+			engine.Use(func(ctx *gin.Context) {
+				ctx.Set(constants.CtxKeyLoginStatus, auth.NewBrowserSessionLoginStatus(principal))
+			})
+			engine.Use(csrf)
+			engine.POST("/resource", func(ctx *gin.Context) {
+				handlerCalls++
+				ctx.Status(http.StatusNoContent)
+			})
+
+			request := httptest.NewRequest(http.MethodPost, "http://app.example.com/resource", nil)
+			request.Header.Set("Origin", test.origin)
+			request.Header.Set(DefaultCSRFHeader, "csrf-token")
+			if test.forwardedHost != "" {
+				request.Header.Set("X-Forwarded-Host", test.forwardedHost)
+			}
+			if test.forwardedProto != "" {
+				request.Header.Set("X-Forwarded-Proto", test.forwardedProto)
+			}
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, request)
+
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, test.wantStatus, recorder.Body.String())
+			}
+			if handlerCalls != test.wantHandlerCalls {
+				t.Fatalf("handler calls = %d, want %d", handlerCalls, test.wantHandlerCalls)
+			}
+		})
+	}
+}
+
+func TestNewCSRFMiddlewareRejectsInvalidExternalOrigin(t *testing.T) {
+	tests := []struct {
+		// name 表示测试用例名称。
+		name string
+
+		// externalOrigin 表示待拒绝的外部 Origin 配置。
+		externalOrigin string
+
+		// allowedHosts 表示浏览器会话允许的 Host 集合。
+		allowedHosts map[string]struct{}
+	}{
+		{name: "wildcard", externalOrigin: "https://*.example.com", allowedHosts: map[string]struct{}{"app.example.com": {}}},
+		{name: "noncanonical", externalOrigin: "https://App.example.com", allowedHosts: map[string]struct{}{"app.example.com": {}}},
+		{name: "path", externalOrigin: "https://app.example.com/", allowedHosts: map[string]struct{}{"app.example.com": {}}},
+		{name: "host mismatch", externalOrigin: "https://other.example.com", allowedHosts: map[string]struct{}{"app.example.com": {}}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := NewCSRFMiddleware(BrowserSessionOptions{
+				Service:        "service",
+				CookieName:     "__Host-session",
+				AllowedHosts:   test.allowedHosts,
+				ExternalOrigin: test.externalOrigin,
+			})
+			if !errors.Is(err, auth.ErrAuthBackendUnavailable) {
+				t.Fatalf("error = %v, want ErrAuthBackendUnavailable", err)
 			}
 		})
 	}

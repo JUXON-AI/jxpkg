@@ -3,7 +3,6 @@ package middleware
 import (
 	"crypto/sha256"
 	"crypto/subtle"
-	"net/url"
 	"strings"
 
 	"github.com/JUXON-AI/jxpkg/apis/constants"
@@ -34,7 +33,7 @@ func NewCSRFMiddleware(options BrowserSessionOptions) (gin.HandlerFunc, error) {
 			abortAuth(ctx, ls)
 			return
 		}
-		if !validRequestOrigin(ctx) {
+		if !validRequestOrigin(ctx, normalized.externalOrigin) {
 			failLoginStatus(ls, auth.ErrInvalidCredential)
 			abortAuth(ctx, ls)
 			return
@@ -55,22 +54,22 @@ func NewCSRFMiddleware(options BrowserSessionOptions) (gin.HandlerFunc, error) {
 	}, nil
 }
 
-func validRequestOrigin(ctx *gin.Context) bool {
+func validRequestOrigin(ctx *gin.Context, externalOrigin string) bool {
 	origins := ctx.Request.Header.Values("Origin")
-	if len(origins) != 1 || origins[0] == "" || origins[0] == "null" {
+	if len(origins) != 1 {
 		return false
 	}
-	origin, err := url.Parse(origins[0])
-	if err != nil || origin.Opaque != "" || origin.User != nil || origin.Host == "" ||
-		origin.Path != "" || origin.RawPath != "" || origin.RawQuery != "" || origin.ForceQuery || origin.Fragment != "" {
+	origin, err := canonicalOrigin(origins[0])
+	if err != nil {
 		return false
 	}
-	if err := validateCanonicalHost(origin.Host); err != nil {
-		return false
+	target := externalOrigin
+	if target == "" {
+		scheme := "http"
+		if ctx.Request.TLS != nil {
+			scheme = "https"
+		}
+		target = scheme + "://" + ctx.Request.Host
 	}
-	scheme := "http"
-	if ctx.Request.TLS != nil {
-		scheme = "https"
-	}
-	return origin.Scheme == scheme && origin.Host == ctx.Request.Host
+	return origin == target
 }

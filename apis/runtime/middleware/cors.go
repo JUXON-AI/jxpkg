@@ -18,7 +18,7 @@ const (
 
 var (
 	// defaultCORSMethods 是默认允许跨源调用的 HTTP 方法集合。
-	defaultCORSMethods = []string{"GET", "POST", "PUT", "DELETE", "PATCH"}
+	defaultCORSMethods = []string{"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"}
 
 	// defaultCORSHeaders 是默认允许跨源调用显式发送的请求头集合。
 	defaultCORSHeaders = []string{"Accept", "Authorization", "Content-Type", "Env", DefaultCSRFHeader}
@@ -79,8 +79,13 @@ func NewCORS(options CORSOptions) (gin.HandlerFunc, error) {
 	}
 
 	return func(ctx *gin.Context) {
+		writer := &corsResponseWriter{ResponseWriter: ctx.Writer}
+		ctx.Writer = writer
+
 		origins := ctx.Request.Header.Values("Origin")
 		if len(origins) == 0 {
+			ctx.Next()
+			writer.ensureHeaders()
 			return
 		}
 		if len(origins) != 1 {
@@ -105,7 +110,7 @@ func NewCORS(options CORSOptions) (gin.HandlerFunc, error) {
 				ctx.AbortWithStatus(http.StatusForbidden)
 				return
 			}
-			setAllowedCORSHeaders(ctx.Writer.Header(), origin, normalized.exposedHeaders)
+			writer.allow(origin, normalized.exposedHeaders)
 			addVary(ctx.Writer.Header(), "Access-Control-Request-Method", "Access-Control-Request-Headers")
 			ctx.Header("Access-Control-Allow-Methods", method)
 			if len(headers) != 0 {
@@ -122,13 +127,7 @@ func NewCORS(options CORSOptions) (gin.HandlerFunc, error) {
 				return
 			}
 		}
-		writer := &corsResponseWriter{
-			ResponseWriter: ctx.Writer,
-			origin:         origin,
-			exposedHeaders: normalized.exposedHeaders,
-		}
-		ctx.Writer = writer
-		writer.ensureHeaders()
+		writer.allow(origin, normalized.exposedHeaders)
 		ctx.Next()
 		writer.ensureHeaders()
 	}, nil
@@ -147,8 +146,22 @@ type corsResponseWriter struct {
 
 var _ gin.ResponseWriter = (*corsResponseWriter)(nil)
 
+func (writer *corsResponseWriter) allow(origin string, exposedHeaders []string) {
+	writer.origin = origin
+	writer.exposedHeaders = exposedHeaders
+	writer.ensureHeaders()
+}
+
 func (writer *corsResponseWriter) ensureHeaders() {
-	setAllowedCORSHeaders(writer.Header(), writer.origin, writer.exposedHeaders)
+	headers := writer.Header()
+	addVary(headers, "Origin")
+	if writer.origin == "" {
+		headers.Del("Access-Control-Allow-Origin")
+		headers.Del("Access-Control-Allow-Credentials")
+		headers.Del("Access-Control-Expose-Headers")
+		return
+	}
+	setAllowedCORSHeaders(headers, writer.origin, writer.exposedHeaders)
 }
 
 func (writer *corsResponseWriter) WriteHeader(statusCode int) {
