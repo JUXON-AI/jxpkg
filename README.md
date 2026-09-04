@@ -104,6 +104,21 @@ verified, err := verifier.Verify(ctx, raw, "https://issuer.example.com", "orders
 
 `JWTConfig`、`LoadJWTConfig`、`IssueIdentityToken` 和明确命名的 `ParseLegacyToken` 是迁移期旧版 HS256 API，仅用于兼容现有 Bearer 调用。`ParseToken` 已弃用并仅委托给 `ParseLegacyToken` 保持源码兼容。浏览器 Session 流程只接受不透明 Cookie Session，且不得调用这些旧 API；新代码必须使用 `TokenSigner` 和 `TokenVerifier`。
 
+## 内部 Session Resolve 客户端
+
+`auth.NewInternalSessionResolverClient` 实现 `auth.SessionResolver`，供业务服务通过 Account 的固定内部接口解析 Host-only Browser Session。OIDC Provider、Account Session Store 和 Redis 均不属于 jxpkg。
+
+```go
+resolver, err := auth.NewInternalSessionResolverClient(auth.SessionResolverClientOptions{
+    Endpoint:  "https://account.internal/internal/session/resolve",
+    Service:   "juxonone",
+    Transport: workloadAuthenticatedTransport,
+    Timeout:   750 * time.Millisecond,
+})
+```
+
+调用方必须注入已经配置 mTLS 或等价工作负载认证的 `http.RoundTripper`；构造器不会回退到环境代理或匿名默认 Transport。客户端只向固定 HTTPS 路径发送配置中的 Service 与当前 Host/SID，不跟随重定向、不缓存、不重试，严格限制 JSON Content-Type、结构和响应大小。Account 返回 401/404 时映射为 `ErrInvalidCredential`；Transport、超时、限流、调用方认证错误、未知状态及畸形响应均 Fail Closed 为 `ErrAuthBackendUnavailable`。
+
 ## 集成测试
 
 默认测试不会连接外部资源。需要执行集成测试时设置对应环境变量：
