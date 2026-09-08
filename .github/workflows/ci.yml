@@ -30,14 +30,15 @@ jobs:
       - id: classify
         env:
           EVENT_NAME: ${{ github.event_name }}
-          EVENT_ACTOR: ${{ github.actor }}
           EVENT_REF: ${{ github.sha }}
           INPUT_REF: ${{ inputs.ref }}
-          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-          BASE_REPOSITORY: ${{ github.repository }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           trusted=false
-          if [[ "$EVENT_NAME" != "pull_request" || "$HEAD_REPOSITORY" == "$BASE_REPOSITORY" || "$EVENT_ACTOR" == "ZoeImport" ]]; then
+          # jxpkg is public. Pull requests always stay on GitHub-hosted runners,
+          # including same-repository PRs, so PR-controlled code cannot reach JXlan.
+          # Only an upstream push or an explicitly dispatched upstream ref is trusted.
+          if [[ "$REPOSITORY" == "JUXON-AI/jxpkg" && "$EVENT_NAME" != "pull_request" ]]; then
             trusted=true
           fi
           ref="${INPUT_REF:-$EVENT_REF}"
