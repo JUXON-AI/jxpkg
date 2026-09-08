@@ -279,9 +279,12 @@ JXPKG_TEST_S3_REGION
 
 ## CI 与发布
 
-- feature branch push：执行编译、格式、vet、单元测试、race 和 vendor 一致性检查。
-- pull request：执行相同的完整检查；受信内部贡献在 JXlan self-hosted runner 上运行，未知 fork 在 GitHub-hosted runner 上运行。
-- `main`：required check 通过后才允许合并；合并后再次验证。
+- upstream branch push：在 `JXlan Trusted` self-hosted runner 执行编译、格式、
+  vet、单元测试、race 和 vendor 一致性检查。
+- pull request：无论来自同仓库还是 fork，都在 GitHub-hosted runner 执行同一套
+  完整检查；PR 控制的代码不会进入 JXlan。
+- `main`：合并或直接 push 后重新执行完整检查。是否强制 `Required` check 由
+  GitHub branch rules 管理，workflow 本身不能替代该仓库设置。
 - manual：`workflow_dispatch` 可在 GitHub UI 选择或输入指定 ref 验证。
 
 正式发布必须在 `main` 绿灯后创建语义化 tag。下游升级到新 tag 并完成兼容性测试后，才能删除临时 commit pin。
