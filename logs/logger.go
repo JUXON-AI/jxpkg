@@ -278,7 +278,7 @@ func syncRegistry(r *loggerRegistry) error {
 }
 
 func ignorableSyncError(err error) bool {
-	return err == nil || errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTTY)
+	return err == nil || errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTTY) || errors.Is(err, syscall.EBADF)
 }
 
 func closeAll(closers []io.Closer) error {

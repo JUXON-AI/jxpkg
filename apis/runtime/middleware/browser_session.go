@@ -213,7 +213,7 @@ func validateSessionPrincipal(principal *auth.SessionPrincipal, host string, now
 	if principal.Host != host {
 		return auth.ErrInvalidCredential
 	}
-	if principal.Claims.UserID == 0 || principal.Claims.UIN == 0 || principal.Claims.CompanyID == 0 {
+	if principal.Claims.UserID == 0 || principal.Claims.UIN == 0 || principal.Claims.CompanyID == 0 || principal.Claims.MembershipEpoch == 0 {
 		return auth.ErrInvalidPrincipal
 	}
 	if principal.ClientID == "" || strings.TrimSpace(principal.ClientID) != principal.ClientID ||

@@ -166,6 +166,7 @@ func TestInternalSessionResolverClientRejectsMalformedResponses(t *testing.T) {
 		{name: "bad csrf hash", contentType: "application/json", body: strings.Replace(valid, sessionResolveHash(t), "short", 1)},
 		{name: "host mismatch", contentType: "application/json", body: strings.Replace(valid, `"host":"app.example.com"`, `"host":"other.example.com"`, 1)},
 		{name: "invalid identity", contentType: "application/json", body: strings.Replace(valid, `"user_id":11`, `"user_id":0`, 1)},
+		{name: "zero membership epoch", contentType: "application/json", body: strings.Replace(valid, `"membership_epoch":14`, `"membership_epoch":0`, 1)},
 		{name: "invalid time order", contentType: "application/json", body: strings.Replace(valid, `"idle_expires_at":1700000600`, `"idle_expires_at":1800000000`, 1)},
 		{name: "noncanonical csrf", contentType: "application/json", body: strings.Replace(valid, sessionResolveHash(t), hash+"=", 1)},
 	}

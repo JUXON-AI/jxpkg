@@ -205,7 +205,7 @@ func (client *InternalSessionResolverClient) Resolve(ctx context.Context, reques
 		AbsoluteExpiresAt: wire.AbsoluteExpiresAt,
 		CSRFTokenHash:     csrfHash,
 	}
-	if wire.UserID == 0 || wire.UIN == 0 || wire.CompanyID == 0 || wire.Host != request.Host ||
+	if wire.UserID == 0 || wire.UIN == 0 || wire.CompanyID == 0 || wire.MembershipEpoch == 0 || wire.Host != request.Host ||
 		!validSessionResolveIdentifier(wire.ClientID) || wire.SessionVersion == 0 ||
 		wire.AuthenticatedAt <= 0 || wire.IdleExpiresAt <= 0 || wire.AbsoluteExpiresAt <= 0 ||
 		wire.AuthenticatedAt > wire.IdleExpiresAt || wire.IdleExpiresAt > wire.AbsoluteExpiresAt {

@@ -1,0 +1,23 @@
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local environment and credentials
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Go build and test outputs
+/bin/
+/dist/
+/coverage/
+*.coverprofile
+*.test
+*.out
+
+# Temporary runtime data
+/tmp/
+*.log

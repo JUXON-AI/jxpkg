@@ -39,9 +39,10 @@ func TestRouterBrowserSessionChainOrderAndFailures(t *testing.T) {
 	validPrincipal := func() *auth.SessionPrincipal {
 		return &auth.SessionPrincipal{
 			Claims: auth.UserClaims{
-				UserID:    1,
-				UIN:       2,
-				CompanyID: 3,
+				UserID:          1,
+				UIN:             2,
+				CompanyID:       3,
+				MembershipEpoch: 4,
 			},
 			Host:              "app.example.com",
 			ClientID:          "browser-client",
@@ -326,9 +327,10 @@ func TestRouterCORSAndCSRFShareAuthoritativeExternalOrigin(t *testing.T) {
 	hash := sha256.Sum256([]byte("csrf-token"))
 	principal := &auth.SessionPrincipal{
 		Claims: auth.UserClaims{
-			UserID:    1,
-			UIN:       2,
-			CompanyID: 3,
+			UserID:          1,
+			UIN:             2,
+			CompanyID:       3,
+			MembershipEpoch: 4,
 		},
 		Host:              "app.example.com",
 		ClientID:          "browser-client",

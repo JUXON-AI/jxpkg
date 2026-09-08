@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to verify (defaults to the selected workflow ref)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jxpkg-ci-${{ github.event.pull_request.number || inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  classify:
+    name: Classify execution
+    runs-on: ubuntu-latest
+    outputs:
+      trusted: ${{ steps.classify.outputs.trusted }}
+      ref: ${{ steps.classify.outputs.ref }}
+    steps:
+      - id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTOR: ${{ github.actor }}
+          EVENT_REF: ${{ github.sha }}
+          INPUT_REF: ${{ inputs.ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          trusted=false
+          if [[ "$EVENT_NAME" != "pull_request" || "$HEAD_REPOSITORY" == "$BASE_REPOSITORY" || "$EVENT_ACTOR" == "ZoeImport" ]]; then
+            trusted=true
+          fi
+          ref="${INPUT_REF:-$EVENT_REF}"
+          printf 'trusted=%s\n' "$trusted" >> "$GITHUB_OUTPUT"
+          printf 'ref=%s\n' "$ref" >> "$GITHUB_OUTPUT"
+
+  trusted-ci:
+    name: JXlan trusted CI
+    needs: classify
+    if: needs.classify.outputs.trusted == 'true'
+    runs-on: [self-hosted, linux, x64, jxlan-ci]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.classify.outputs.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify source and dependencies
+        run: |
+          test -z "$(find . -path ./vendor -prune -o -name '*.go' -type f -print0 | xargs -0 gofmt -l)"
+          go vet ./...
+          go mod verify
+          go list -mod=vendor ./... >/dev/null
+      - name: Test and compile
+        run: |
+          go test ./...
+          go test -race ./...
+          make build
+
+  untrusted-ci:
+    name: GitHub-hosted untrusted CI
+    needs: classify
+    if: needs.classify.outputs.trusted != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.classify.outputs.ref }}
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify source and dependencies
+        run: |
+          test -z "$(find . -path ./vendor -prune -o -name '*.go' -type f -print0 | xargs -0 gofmt -l)"
+          go vet ./...
+          go mod verify
+          go list -mod=vendor ./... >/dev/null
+      - name: Test and compile
+        run: |
+          go test ./...
+          go test -race ./...
+          make build
+
+  required:
+    name: Required
+    if: always()
+    needs: [classify, trusted-ci, untrusted-ci]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require one successful execution path
+        env:
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          TRUSTED_RESULT: ${{ needs.trusted-ci.result }}
+          UNTRUSTED_RESULT: ${{ needs.untrusted-ci.result }}
+        run: |
+          test "$CLASSIFY_RESULT" = "success"
+          if [[ "$TRUSTED_RESULT" == "success" && "$UNTRUSTED_RESULT" == "skipped" ]]; then
+            exit 0
+          fi
+          if [[ "$TRUSTED_RESULT" == "skipped" && "$UNTRUSTED_RESULT" == "success" ]]; then
+            exit 0
+          fi
+          printf 'trusted=%s untrusted=%s\n' "$TRUSTED_RESULT" "$UNTRUSTED_RESULT" >&2
+          exit 1

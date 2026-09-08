@@ -2,9 +2,11 @@ package logs
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"go.uber.org/zap/zapcore"
@@ -113,6 +115,17 @@ func TestJSON(t *testing.T) {
 	}
 	if got := JSON(make(chan int)); got != "" {
 		t.Fatalf("JSON returned %q for an unsupported value", got)
+	}
+}
+
+func TestIgnorableSyncError(t *testing.T) {
+	for _, err := range []error{nil, syscall.EINVAL, syscall.ENOTTY, syscall.EBADF, errors.Join(errors.New("sync"), syscall.EBADF)} {
+		if !ignorableSyncError(err) {
+			t.Fatalf("ignorableSyncError(%v) = false", err)
+		}
+	}
+	if ignorableSyncError(errors.New("disk failure")) {
+		t.Fatal("ignorableSyncError accepted an unrelated error")
 	}
 }
 

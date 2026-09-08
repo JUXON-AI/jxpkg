@@ -118,6 +118,7 @@ func TestNewBrowserSessionMiddleware(t *testing.T) {
 		}, wantState: auth.StateFailed, wantErr: auth.ErrAuthBackendUnavailable, wantCalls: 1},
 		{name: "invalid csrf hash", host: "app.example.com", cookies: []string{"__Host-app_session=sid"}, principal: func() *auth.SessionPrincipal { p := validPrincipal(); p.CSRFTokenHash = []byte("short"); return p }, wantState: auth.StateFailed, wantErr: auth.ErrAuthBackendUnavailable, wantCalls: 1},
 		{name: "invalid claims", host: "app.example.com", cookies: []string{"__Host-app_session=sid"}, principal: func() *auth.SessionPrincipal { p := validPrincipal(); p.Claims.UIN = 0; return p }, wantState: auth.StateFailed, wantErr: auth.ErrInvalidPrincipal, wantCalls: 1},
+		{name: "zero membership epoch", host: "app.example.com", cookies: []string{"__Host-app_session=sid"}, principal: func() *auth.SessionPrincipal { p := validPrincipal(); p.Claims.MembershipEpoch = 0; return p }, wantState: auth.StateFailed, wantErr: auth.ErrInvalidPrincipal, wantCalls: 1},
 	}
 
 	for _, test := range tests {

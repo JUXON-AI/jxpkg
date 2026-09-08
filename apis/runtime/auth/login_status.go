@@ -24,17 +24,11 @@ type InjectorFunc func(ctx *gin.Context, ls *LoginStatus) error
 type AuthMode string
 
 const (
-	// AuthModeAnonymous 表示不解析认证凭据的公开路由。
-	AuthModeAnonymous AuthMode = "anonymous"
-
 	// AuthModeBrowserSession 表示仅接受浏览器 Cookie Session 的路由。
 	AuthModeBrowserSession AuthMode = "browser_session"
 
 	// AuthModeBearer 表示仅接受 Bearer Token 的路由。
 	AuthModeBearer AuthMode = "bearer"
-
-	// AuthModeInternal 表示仅接受内部工作负载身份的路由。
-	AuthModeInternal AuthMode = "internal"
 )
 
 // State 登录状态枚举。
