@@ -5,7 +5,7 @@
 ## 快速开始
 
 ```bash
-go get github.com/JUXON-AI/jxpkg@v0.0.6
+go get github.com/JUXON-AI/jxpkg@v0.0.7
 ```
 
 要求 Go 1.25 或更高版本。生产代码应依赖正式 tag；跨仓库联调可以临时使用 commit，但不得把个人 fork 的 `replace` 提交到仓库。
