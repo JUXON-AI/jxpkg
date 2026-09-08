@@ -59,7 +59,9 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-          cache: true
+          # All JXlan runners share the host Go caches. Uploading that multi-GB
+          # cache again in the post step blocks runner turnover and adds no reuse.
+          cache: false
       - name: Verify source and dependencies
         run: |
           test -z "$(find . -path ./vendor -prune -o -name '*.go' -type f -print0 | xargs -0 gofmt -l)"
