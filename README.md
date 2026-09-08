@@ -5,7 +5,7 @@
 ## 快速开始
 
 ```bash
-go get github.com/JUXON-AI/jxpkg@v0.0.7
+go get github.com/JUXON-AI/jxpkg@v0.0.8
 ```
 
 要求 Go 1.25 或更高版本。生产代码应依赖正式 tag；跨仓库联调可以临时使用 commit，但不得把个人 fork 的 `replace` 提交到仓库。
@@ -105,6 +105,23 @@ resolver, err := auth.NewInternalSessionResolverClient(auth.SessionResolverClien
 `Transport` 必须已经配置 mTLS 或等价的工作负载认证。客户端不使用匿名默认 Transport、不跟随重定向、不缓存、不重试，并严格校验 HTTPS 地址、JSON 类型、响应大小和主体字段。Account 的 401/404 映射为 `ErrInvalidCredential`；Transport、超时、限流、调用方认证失败和畸形响应均 fail closed 为 `ErrAuthBackendUnavailable`。
 
 有效主体必须同时包含非零 `UserID`、`UIN`、`CompanyID`、`MembershipEpoch` 和 `SessionVersion`。`membership_epoch=0` 不代表有效旧成员关系。
+
+同一个受认证客户端还实现 `CompanyIdentityResolver`，供业务服务按公司和一组
+UIN 批量取得成员授权所需的最小权威快照。该调用只返回请求集合中仍存在的身份，
+调用方必须把缺失、非 `active` 或 epoch 不匹配的身份视为不可授权：
+
+```go
+identities, err := resolver.ResolveCompanyIdentities(ctx, auth.CompanyIdentityResolveRequest{
+    Service:   "juxonone",
+    CompanyID: companyID,
+    UINs:      targetUINs,
+})
+```
+
+公司身份解析复用 Session Resolve 的 mTLS Transport、总超时和 Account 内部
+Origin，不增加第二组凭据；它不会接受浏览器 Cookie、Bearer 或调用方提交的用户
+身份作为认证依据。响应只包含 UIN、成员代次、显示资料、状态和公司 Owner 标记，
+不返回邮箱、Token、Session 或 Account 数据库对象。
 
 #### EdDSA JWT
 

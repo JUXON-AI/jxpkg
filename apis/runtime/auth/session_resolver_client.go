@@ -43,9 +43,10 @@ type SessionResolverClientOptions struct {
 
 // InternalSessionResolverClient 通过受认证的内部 HTTP 接口解析浏览器会话。
 type InternalSessionResolverClient struct {
-	endpoint string
-	service  string
-	client   *http.Client
+	endpoint                string
+	companyIdentityEndpoint string
+	service                 string
+	client                  *http.Client
 }
 
 var _ SessionResolver = (*InternalSessionResolverClient)(nil)
@@ -112,8 +113,9 @@ func NewInternalSessionResolverClient(options SessionResolverClientOptions) (*In
 		return nil, fmt.Errorf("%w: resolver timeout must be positive", ErrAuthBackendUnavailable)
 	}
 	return &InternalSessionResolverClient{
-		endpoint: endpoint,
-		service:  options.Service,
+		endpoint:                endpoint,
+		companyIdentityEndpoint: strings.TrimSuffix(endpoint, InternalSessionResolvePath) + InternalCompanyIdentityResolvePath,
+		service:                 options.Service,
 		client: &http.Client{
 			Transport: options.Transport,
 			Timeout:   options.Timeout,
