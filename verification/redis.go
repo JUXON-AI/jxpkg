@@ -15,6 +15,10 @@ const (
 
 	// reserveScript 原子执行冷却、固定窗口限流和挑战保存。
 	reserveScript = `
+if redis.call('HEXISTS', KEYS[1], 'claim') == 1 then
+  return 1
+end
+
 if redis.call('EXISTS', KEYS[2]) == 1 then
   return 1
 end
@@ -57,6 +61,10 @@ if not stored_code then
   return 1
 end
 
+if redis.call('HEXISTS', KEYS[1], 'claim') == 1 then
+  return 4
+end
+
 if stored_code == ARGV[1] then
   redis.call('DEL', KEYS[1])
   return 0
@@ -68,6 +76,59 @@ if attempts >= tonumber(ARGV[2]) then
   return 3
 end
 return 2
+`
+
+	// verifyAndClaimScript 原子核验并领取挑战，同时保留挑战原始 TTL。
+	verifyAndClaimScript = `
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return 1
+end
+
+local stored_code = redis.call('HGET', KEYS[1], 'code')
+if not stored_code then
+  redis.call('DEL', KEYS[1])
+  return 1
+end
+
+if redis.call('HEXISTS', KEYS[1], 'claim') == 1 then
+  return 4
+end
+
+if stored_code == ARGV[1] then
+  redis.call('HSET', KEYS[1], 'claim', ARGV[3])
+  return 0
+end
+
+local attempts = redis.call('HINCRBY', KEYS[1], 'attempts', 1)
+if attempts >= tonumber(ARGV[2]) then
+  redis.call('DEL', KEYS[1])
+  return 3
+end
+return 2
+`
+
+	// consumeClaimScript 仅允许持有匹配领取凭据的调用方删除挑战。
+	consumeClaimScript = `
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return 1
+end
+if redis.call('HGET', KEYS[1], 'claim') ~= ARGV[1] then
+  return 5
+end
+redis.call('DEL', KEYS[1])
+return 0
+`
+
+	// releaseClaimScript 仅移除匹配的领取字段，不改变挑战剩余 TTL 和错误次数。
+	releaseClaimScript = `
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return 1
+end
+if redis.call('HGET', KEYS[1], 'claim') ~= ARGV[1] then
+  return 5
+end
+redis.call('HDEL', KEYS[1], 'claim')
+return 0
 `
 )
 
@@ -81,6 +142,11 @@ type RedisStore struct {
 
 	// verify 是原子核验并消费挑战的脚本。
 	verify *redis.Script
+
+	// verifyAndClaimScript、consumeClaimScript 和 releaseClaimScript 构成可回滚的两阶段领取生命周期。
+	verifyAndClaimScript *redis.Script
+	consumeClaimScript   *redis.Script
+	releaseClaimScript   *redis.Script
 }
 
 // NewRedisStore 使用应用提供的 Redis 客户端创建验证码存储。
@@ -89,9 +155,12 @@ func NewRedisStore(client *redis.Client) (*RedisStore, error) {
 		return nil, fmt.Errorf("%w: nil redis client", ErrStore)
 	}
 	return &RedisStore{
-		client:  client,
-		reserve: redis.NewScript(reserveScript),
-		verify:  redis.NewScript(verifyScript),
+		client:               client,
+		reserve:              redis.NewScript(reserveScript),
+		verify:               redis.NewScript(verifyScript),
+		verifyAndClaimScript: redis.NewScript(verifyAndClaimScript),
+		consumeClaimScript:   redis.NewScript(consumeClaimScript),
+		releaseClaimScript:   redis.NewScript(releaseClaimScript),
 	}, nil
 }
 
@@ -121,6 +190,41 @@ func (s *RedisStore) VerifyAndConsume(ctx context.Context, input VerifyInput, po
 	return mapVerifyResult(result)
 }
 
+// verifyAndClaim 原子核验并领取挑战，成功时保留原始过期时间。
+func (s *RedisStore) verifyAndClaim(ctx context.Context, input VerifyInput, policy Policy, claimToken string) error {
+	key := challengeKey(input.Purpose, input.Channel, input.Destination)
+	result, err := s.verifyAndClaimScript.Run(ctx, s.client, []string{key}, input.Code, policy.MaxAttempts, claimToken).Int64()
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("%w: verify-and-claim script failed", ErrStore)
+	}
+	return mapVerifyResult(result)
+}
+
+// consumeClaim 原子删除持有匹配领取凭据的挑战。
+func (s *RedisStore) consumeClaim(ctx context.Context, purpose Purpose, channel Channel, destination, claimToken string) error {
+	return s.runClaimMutation(ctx, s.consumeClaimScript, purpose, channel, destination, claimToken, "consume")
+}
+
+// releaseClaim 原子释放持有匹配领取凭据的挑战并保留其剩余 TTL。
+func (s *RedisStore) releaseClaim(ctx context.Context, purpose Purpose, channel Channel, destination, claimToken string) error {
+	return s.runClaimMutation(ctx, s.releaseClaimScript, purpose, channel, destination, claimToken, "release")
+}
+
+func (s *RedisStore) runClaimMutation(ctx context.Context, script *redis.Script, purpose Purpose, channel Channel, destination, claimToken, operation string) error {
+	key := challengeKey(purpose, channel, destination)
+	result, err := script.Run(ctx, s.client, []string{key}, claimToken).Int64()
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("%w: %s claim script failed", ErrStore, operation)
+	}
+	return mapClaimMutationResult(result)
+}
+
 func mapReserveResult(result int64) error {
 	switch result {
 	case 0:
@@ -146,8 +250,23 @@ func mapVerifyResult(result int64) error {
 		return ErrCodeMismatch
 	case 3:
 		return ErrAttemptsExceeded
+	case 4:
+		return ErrChallengeClaimed
 	default:
 		return fmt.Errorf("%w: unexpected verify script result", ErrStore)
+	}
+}
+
+func mapClaimMutationResult(result int64) error {
+	switch result {
+	case 0:
+		return nil
+	case 1:
+		return ErrChallengeNotFound
+	case 5:
+		return ErrInvalidClaim
+	default:
+		return fmt.Errorf("%w: unexpected claim mutation result", ErrStore)
 	}
 }
 

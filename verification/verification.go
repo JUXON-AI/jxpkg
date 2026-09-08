@@ -4,7 +4,9 @@ package verification
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
+	"io"
 	"net"
 	"net/mail"
 	"regexp"
@@ -63,11 +65,20 @@ var (
 	// ErrAttemptsExceeded 表示错误次数已达到上限且挑战已删除。
 	ErrAttemptsExceeded = errors.New("verification attempts exceeded")
 
+	// ErrChallengeClaimed 表示验证码正由另一个尚未完成的业务事务占用。
+	ErrChallengeClaimed = errors.New("verification challenge is already claimed")
+
+	// ErrInvalidClaim 表示验证码领取凭据不存在、已过期或不匹配。
+	ErrInvalidClaim = errors.New("invalid verification claim")
+
 	// ErrDeliveryFailed 表示投递结果不确定或投递服务明确失败。
 	ErrDeliveryFailed = errors.New("verification delivery failed")
 
 	// ErrCodeGenerationFailed 表示安全随机验证码生成失败。
 	ErrCodeGenerationFailed = errors.New("verification code generation failed")
+
+	// ErrClaimGenerationFailed 表示安全随机领取凭据生成失败。
+	ErrClaimGenerationFailed = errors.New("verification claim generation failed")
 
 	// ErrStore 表示验证码存储操作失败。
 	ErrStore = errors.New("verification store failed")
@@ -159,6 +170,18 @@ type VerifyInput struct {
 	Code string
 }
 
+// Claim 是一次成功验证码核验产生的短期不透明领取凭据。
+//
+// 调用方不能读取或构造其内部值，只能把它交回创建该凭据的 Service：业务事务
+// 成功后调用 ConsumeClaim；失败时调用 ReleaseClaim。领取期间原验证码保留原始 TTL，
+// 但不能被其他核验请求消费。
+type Claim struct {
+	purpose     Purpose
+	channel     Channel
+	destination string
+	token       string
+}
+
 // Delivery 描述交给具体通道投递的验证码内容。
 type Delivery struct {
 	// Purpose 表示验证码的业务用途。
@@ -192,6 +215,14 @@ type Store interface {
 	VerifyAndConsume(ctx context.Context, input VerifyInput, policy Policy) error
 }
 
+// claimStore 是支持业务事务两阶段验证码生命周期的存储扩展。
+// 保留为包内接口可避免破坏只使用 Store 旧版即时消费能力的自定义实现。
+type claimStore interface {
+	verifyAndClaim(ctx context.Context, input VerifyInput, policy Policy, claimToken string) error
+	consumeClaim(ctx context.Context, purpose Purpose, channel Channel, destination, claimToken string) error
+	releaseClaim(ctx context.Context, purpose Purpose, channel Channel, destination, claimToken string) error
+}
+
 // Service 提供验证码发送和核验编排。
 type Service struct {
 	// store 保存并原子消费验证码挑战。
@@ -205,6 +236,9 @@ type Service struct {
 
 	// now 提供可替换的当前时间，便于确定投递过期时间。
 	now func() time.Time
+
+	// entropy 生成不透明领取凭据；生产环境固定使用 crypto/rand.Reader。
+	entropy io.Reader
 }
 
 // NewService 使用指定存储、投递器和策略创建验证码服务。
@@ -220,6 +254,7 @@ func NewService(store Store, deliverer Deliverer, policy Policy) (*Service, erro
 		deliverer: deliverer,
 		policy:    policy,
 		now:       time.Now,
+		entropy:   rand.Reader,
 	}, nil
 }
 
@@ -259,7 +294,85 @@ func (s *Service) VerifyAndConsume(ctx context.Context, input VerifyInput) error
 		ErrChallengeNotFound,
 		ErrCodeMismatch,
 		ErrAttemptsExceeded,
+		ErrChallengeClaimed,
 	)
+}
+
+// VerifyAndClaim 原子核验验证码并领取挑战，但不会立即删除挑战。
+// 该方法用于后续还要提交数据库事务的业务：成功后必须 ConsumeClaim，失败时必须
+// ReleaseClaim。领取凭据不包含验证码，且同一挑战同时只允许一个有效领取者。
+func (s *Service) VerifyAndClaim(ctx context.Context, input VerifyInput) (*Claim, error) {
+	if err := validateVerifyInput(input, s.policy.CodeLength); err != nil {
+		return nil, err
+	}
+	store, ok := s.store.(claimStore)
+	if !ok {
+		return nil, ErrStore
+	}
+	token, err := generateClaimToken(s.entropy)
+	if err != nil {
+		return nil, ErrClaimGenerationFailed
+	}
+	if err := sanitizeStoreError(
+		store.verifyAndClaim(ctx, input, s.policy, token),
+		ErrChallengeNotFound,
+		ErrCodeMismatch,
+		ErrAttemptsExceeded,
+		ErrChallengeClaimed,
+	); err != nil {
+		return nil, err
+	}
+	return &Claim{
+		purpose:     input.Purpose,
+		channel:     input.Channel,
+		destination: input.Destination,
+		token:       token,
+	}, nil
+}
+
+// ConsumeClaim 原子消费一次已经成功领取的验证码挑战。
+func (s *Service) ConsumeClaim(ctx context.Context, claim *Claim) error {
+	store, ok := s.store.(claimStore)
+	if !ok || !validClaim(claim) {
+		return ErrInvalidClaim
+	}
+	return sanitizeStoreError(
+		store.consumeClaim(ctx, claim.purpose, claim.channel, claim.destination, claim.token),
+		ErrChallengeNotFound,
+		ErrInvalidClaim,
+	)
+}
+
+// ReleaseClaim 原子释放一次领取，使仍在原始 TTL 内的正确验证码可以重试。
+func (s *Service) ReleaseClaim(ctx context.Context, claim *Claim) error {
+	store, ok := s.store.(claimStore)
+	if !ok || !validClaim(claim) {
+		return ErrInvalidClaim
+	}
+	return sanitizeStoreError(
+		store.releaseClaim(ctx, claim.purpose, claim.channel, claim.destination, claim.token),
+		ErrChallengeNotFound,
+		ErrInvalidClaim,
+	)
+}
+
+func generateClaimToken(entropy io.Reader) (string, error) {
+	if entropy == nil {
+		return "", ErrClaimGenerationFailed
+	}
+	value := make([]byte, 32)
+	if _, err := io.ReadFull(entropy, value); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(value), nil
+}
+
+func validClaim(claim *Claim) bool {
+	if claim == nil || validateIdentity(claim.purpose, claim.channel, claim.destination) != nil {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(claim.token)
+	return err == nil && len(decoded) == 32 && base64.RawURLEncoding.EncodeToString(decoded) == claim.token
 }
 
 func generateCode() (string, error) {

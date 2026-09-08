@@ -1,6 +1,7 @@
 package verification
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"regexp"
@@ -14,6 +15,34 @@ type fakeStore struct {
 
 	// verifyFn 模拟验证码核验行为。
 	verifyFn func(context.Context, VerifyInput, Policy) error
+}
+
+type fakeClaimStore struct {
+	*fakeStore
+	claimFn   func(context.Context, VerifyInput, Policy, string) error
+	consumeFn func(context.Context, Purpose, Channel, string, string) error
+	releaseFn func(context.Context, Purpose, Channel, string, string) error
+}
+
+func (s *fakeClaimStore) verifyAndClaim(ctx context.Context, input VerifyInput, policy Policy, token string) error {
+	if s.claimFn == nil {
+		return nil
+	}
+	return s.claimFn(ctx, input, policy, token)
+}
+
+func (s *fakeClaimStore) consumeClaim(ctx context.Context, purpose Purpose, channel Channel, destination, token string) error {
+	if s.consumeFn == nil {
+		return nil
+	}
+	return s.consumeFn(ctx, purpose, channel, destination, token)
+}
+
+func (s *fakeClaimStore) releaseClaim(ctx context.Context, purpose Purpose, channel Channel, destination, token string) error {
+	if s.releaseFn == nil {
+		return nil
+	}
+	return s.releaseFn(ctx, purpose, channel, destination, token)
 }
 
 func (s *fakeStore) Reserve(ctx context.Context, input SendInput, code string, policy Policy) error {
@@ -241,5 +270,126 @@ func TestServiceVerifyAndConsume(t *testing.T) {
 	})
 	if !errors.Is(err, want) {
 		t.Fatalf("VerifyAndConsume() error = %v, want %v", err, want)
+	}
+}
+
+func TestServiceVerificationClaimLifecycle(t *testing.T) {
+	input := VerifyInput{
+		Purpose:     "registration",
+		Channel:     ChannelEmail,
+		Destination: "person@example.com",
+		Code:        "012345",
+	}
+	var claimedToken string
+	consumeCalls := 0
+	releaseCalls := 0
+	store := &fakeClaimStore{
+		fakeStore: &fakeStore{},
+		claimFn: func(_ context.Context, got VerifyInput, _ Policy, token string) error {
+			if got != input {
+				t.Fatalf("VerifyAndClaim() input = %#v, want %#v", got, input)
+			}
+			claimedToken = token
+			return nil
+		},
+		consumeFn: func(_ context.Context, purpose Purpose, channel Channel, destination, token string) error {
+			consumeCalls++
+			if purpose != input.Purpose || channel != input.Channel || destination != input.Destination || token != claimedToken {
+				t.Fatal("ConsumeClaim() did not receive the claimed challenge identity")
+			}
+			return nil
+		},
+		releaseFn: func(_ context.Context, purpose Purpose, channel Channel, destination, token string) error {
+			releaseCalls++
+			if purpose != input.Purpose || channel != input.Channel || destination != input.Destination || token != claimedToken {
+				t.Fatal("ReleaseClaim() did not receive the claimed challenge identity")
+			}
+			return nil
+		},
+	}
+	service, err := NewService(store, &fakeDeliverer{}, validPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.entropy = bytes.NewReader(bytes.Repeat([]byte{7}, 32))
+	claim, err := service.VerifyAndClaim(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim == nil || claim.token == "" || claim.token != claimedToken {
+		t.Fatal("VerifyAndClaim() did not return the opaque store claim")
+	}
+	if claim.destination == "" || claim.token == input.Code {
+		t.Fatal("Claim contains an invalid challenge identity or retained code")
+	}
+	if err := service.ConsumeClaim(context.Background(), claim); err != nil {
+		t.Fatal(err)
+	}
+	if releaseCalls != 0 || consumeCalls != 1 {
+		t.Fatalf("claim mutations release=%d consume=%d", releaseCalls, consumeCalls)
+	}
+}
+
+func TestServiceVerificationClaimCanBeReleasedAfterBusinessFailure(t *testing.T) {
+	input := VerifyInput{
+		Purpose:     "registration",
+		Channel:     ChannelEmail,
+		Destination: "person@example.com",
+		Code:        "012345",
+	}
+	releaseCalls := 0
+	store := &fakeClaimStore{
+		fakeStore: &fakeStore{},
+		releaseFn: func(_ context.Context, purpose Purpose, channel Channel, destination, token string) error {
+			releaseCalls++
+			if purpose != input.Purpose || channel != input.Channel || destination != input.Destination || token == "" {
+				t.Fatal("ReleaseClaim() did not receive the claimed challenge identity")
+			}
+			return nil
+		},
+	}
+	service, err := NewService(store, &fakeDeliverer{}, validPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.entropy = bytes.NewReader(bytes.Repeat([]byte{9}, 32))
+	claim, err := service.VerifyAndClaim(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ReleaseClaim(context.Background(), claim); err != nil {
+		t.Fatal(err)
+	}
+	if releaseCalls != 1 {
+		t.Fatalf("ReleaseClaim() calls = %d, want 1", releaseCalls)
+	}
+}
+
+func TestServiceVerificationClaimRequiresCapableStore(t *testing.T) {
+	service, err := NewService(&fakeStore{}, &fakeDeliverer{}, validPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.VerifyAndClaim(context.Background(), VerifyInput{
+		Purpose: "registration", Channel: ChannelEmail,
+		Destination: "person@example.com", Code: "012345",
+	})
+	if !errors.Is(err, ErrStore) {
+		t.Fatalf("VerifyAndClaim() error = %v, want ErrStore", err)
+	}
+}
+
+func TestServiceVerificationClaimRejectsInvalidClaim(t *testing.T) {
+	service, err := NewService(&fakeClaimStore{fakeStore: &fakeStore{}}, &fakeDeliverer{}, validPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, claim := range []*Claim{nil, {}, {purpose: "registration", channel: ChannelEmail, destination: "person@example.com", token: "short"}} {
+		if err := service.ConsumeClaim(context.Background(), claim); !errors.Is(err, ErrInvalidClaim) {
+			t.Fatalf("ConsumeClaim(%#v) error = %v, want ErrInvalidClaim", claim, err)
+		}
+		if err := service.ReleaseClaim(context.Background(), claim); !errors.Is(err, ErrInvalidClaim) {
+			t.Fatalf("ReleaseClaim(%#v) error = %v, want ErrInvalidClaim", claim, err)
+		}
 	}
 }

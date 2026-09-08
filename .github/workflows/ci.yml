@@ -31,15 +31,22 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_REF: ${{ github.sha }}
+          EVENT_GIT_REF: ${{ github.ref }}
           INPUT_REF: ${{ inputs.ref }}
           REPOSITORY: ${{ github.repository }}
         run: |
           trusted=false
           # jxpkg is public. Pull requests always stay on GitHub-hosted runners,
           # including same-repository PRs, so PR-controlled code cannot reach JXlan.
-          # Only an upstream push or an explicitly dispatched upstream ref is trusted.
-          if [[ "$REPOSITORY" == "JUXON-AI/jxpkg" && "$EVENT_NAME" != "pull_request" ]]; then
-            trusted=true
+          # Only main/tag pushes and an explicit dispatch of the allowlisted main
+          # workflow may enter JXlan. Feature-branch pushes use GitHub-hosted CI;
+          # maintainers can still validate one exact ref through workflow_dispatch.
+          if [[ "$REPOSITORY" == "JUXON-AI/jxpkg" ]]; then
+            if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+              trusted=true
+            elif [[ "$EVENT_NAME" == "push" && ( "$EVENT_GIT_REF" == "refs/heads/main" || "$EVENT_GIT_REF" == refs/tags/* ) ]]; then
+              trusted=true
+            fi
           fi
           ref="${INPUT_REF:-$EVENT_REF}"
           printf 'trusted=%s\n' "$trusted" >> "$GITHUB_OUTPUT"
@@ -51,6 +58,16 @@ jobs:
     if: needs.classify.outputs.trusted == 'true'
     runs-on: [self-hosted, linux, x64, jxlan-ci]
     timeout-minutes: 30
+    services:
+      redis:
+        image: redis:7.4.11-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+        ports:
+          - 6379/tcp
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -69,6 +86,8 @@ jobs:
           go mod verify
           go list -mod=vendor ./... >/dev/null
       - name: Test and compile
+        env:
+          JXPKG_TEST_REDIS_ADDR: 127.0.0.1:${{ job.services.redis.ports[6379] }}
         run: |
           go test ./...
           go test -race ./...
@@ -80,6 +99,16 @@ jobs:
     if: needs.classify.outputs.trusted != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      redis:
+        image: redis:7.4.11-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+        ports:
+          - 6379/tcp
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -95,6 +124,8 @@ jobs:
           go mod verify
           go list -mod=vendor ./... >/dev/null
       - name: Test and compile
+        env:
+          JXPKG_TEST_REDIS_ADDR: 127.0.0.1:${{ job.services.redis.ports[6379] }}
         run: |
           go test ./...
           go test -race ./...
