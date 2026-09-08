@@ -41,7 +41,7 @@ func main() {
 | [`settings`](#settings) | 数据库存储的分组配置项 | `GetValue`、`Set`、`InitDB` |
 | [`storage`](#storage) | S3-compatible 对象存储和文件元数据 | `NewS3Fs`、`LoadStorager` |
 | [`task`](#task) | 数据库/Redis 支撑的异步任务与 worker API | `CreateTask`、`RegisterCallBack` |
-| [`verification`](#verification) | 一次性验证码的发送、存储和校验 | `NewService`、`NewRedisStore` |
+| [`verification`](#verification) | 一次性验证码的发送、即时消费和可回滚事务领取 | `NewService`、`NewRedisStore`、`VerifyAndClaim` |
 
 ## 包使用说明
 
@@ -246,6 +246,30 @@ logs.Infow("request complete", "request_id", requestID)
 ### `verification`
 
 一次性验证码的通用领域服务。`Store` 管理验证码状态，`Deliverer` 负责邮件等通道，`Policy` 定义长度、有效期、发送冷却和尝试次数；`RedisStore` 是共享环境实现。
+
+没有后续事务的操作可以使用 `VerifyAndConsume` 立即消费。注册等还需要提交数据库事务的流程应使用两阶段领取，避免验证码正确但业务事务失败后无法重试：
+
+```go
+claim, err := service.VerifyAndClaim(ctx, verification.VerifyInput{
+    Purpose:     "account.registration",
+    Channel:     verification.ChannelEmail,
+    Destination: email,
+    Code:        code,
+})
+if err != nil {
+    return err
+}
+
+if err := createAccountTransaction(ctx); err != nil {
+    _ = service.ReleaseClaim(ctx, claim)
+    return err
+}
+// 数据库已经提交，因此验证码清理失败不得把已创建账号伪装成注册失败；
+// 调用方应记录不含目标地址、验证码和领取凭据的运维告警。
+_ = service.ConsumeClaim(ctx, claim)
+```
+
+`VerifyAndClaim` 会原子校验并独占挑战，同时保留原来的 TTL、错误次数和验证码；其他即时消费或领取请求会被拒绝。`ConsumeClaim` 只允许匹配的不透明领取凭据删除挑战，`ReleaseClaim` 只移除领取状态并保留剩余 TTL。`Claim` 不公开内部凭据或验证码，不能由业务代码构造。
 
 业务方必须为 `Purpose`、目标地址和验证上下文建立绑定，不能把“验证码数字相同”当作跨邮箱、跨用途或跨流程有效。验证码、存储 key 和完整目标地址不得写日志。
 
