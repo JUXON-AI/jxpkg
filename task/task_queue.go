@@ -46,8 +46,8 @@ func PopTaskQueue(ctx context.Context, taskType, workerid string) (string, error
 	}).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
-			logs.WarnContextf(ctx, "no task, wait for next task, taskType: %s, workerid: %s", taskType, workerid) // 没有消息，继续等待
-			// CheckQueueCount()
+			// 空队列是 worker 长轮询的正常状态，只在 Debug 级别保留诊断信息。
+			logs.DebugContextf(ctx, "no task, wait for next task, taskType: %s, workerid: %s", taskType, workerid)
 			return "", nil
 		}
 		return "", err // 真正的错误
