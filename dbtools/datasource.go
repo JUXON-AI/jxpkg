@@ -56,7 +56,10 @@ func InitDBConn(name, dburl string) (*gorm.DB, error) {
 // InitMutilDBConn 批量初始化数据库
 func InitMutilDBConn(dburls map[string]string) error {
 	for name, dburl := range dburls {
-		logs.Infof("[init-db] init db(%s) %s", name, dburl)
+		// Database URLs can contain credentials and driver options. Log only the
+		// protocol, address and database name so startup diagnostics never expose
+		// the username, password, query string or fragment.
+		logs.Infof("[init-db] init db(%s) %s", name, redactedDatabaseURL(dburl))
 		db, err := InitDBConn(name, dburl)
 		if err != nil {
 			return err
@@ -64,6 +67,19 @@ func InitMutilDBConn(dburls map[string]string) error {
 		db.Logger = logs.GetGorm("gorm")
 	}
 	return nil
+}
+
+func redactedDatabaseURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "<invalid-database-url>"
+	}
+
+	return (&url.URL{
+		Scheme: parsed.Scheme,
+		Host:   parsed.Host,
+		Path:   parsed.Path,
+	}).String()
 }
 
 // DB 获取数据库连接
