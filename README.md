@@ -5,10 +5,10 @@
 ## 快速开始
 
 ```bash
-go get github.com/JUXON-AI/jxpkg@v0.0.11
+go get github.com/JUXON-AI/jxpkg@latest
 ```
 
-要求 Go 1.25 或更高版本。生产代码应依赖正式 tag；跨仓库联调可以临时使用 commit，但不得把个人 fork 的 `replace` 提交到仓库。
+要求 Go 1.25 或更高版本。`@latest` 会解析为最新正式 tag；生产仓库应将解析后的明确版本提交到 `go.mod`。跨仓库联调可以临时使用 commit，但不得把个人 fork 的 `replace` 提交到仓库。
 
 ```go
 import "github.com/JUXON-AI/jxpkg/logs"
