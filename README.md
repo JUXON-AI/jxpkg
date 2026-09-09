@@ -18,6 +18,22 @@ func main() {
 }
 ```
 
+## 开发检查
+
+`jxpkg` 是库而不是可启动服务，因此不提供虚假的 `dev` 或容器镜像 target。Makefile
+只暴露可重复执行且与 CI 相同的检查：
+
+```bash
+make check       # gofmt、vet、module/vendor 完整性
+make test        # 单元与集成测试
+make test-race   # race detector
+make build       # 编译全部 package 与 test binary，不执行测试
+make clean       # 清理 Go test cache
+```
+
+需要 Redis 的测试通过 `JXPKG_TEST_REDIS_ADDR` 指向专用测试实例；不得连接生产或共享
+业务 Redis。GitHub Actions 会为两条 CI 路径提供隔离的 Redis service。
+
 ## 包索引
 
 | 包 | 用途 | 主要入口 |

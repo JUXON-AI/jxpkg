@@ -80,17 +80,13 @@ jobs:
           # cache again in the post step blocks runner turnover and adds no reuse.
           cache: false
       - name: Verify source and dependencies
-        run: |
-          test -z "$(find . -path ./vendor -prune -o -name '*.go' -type f -print0 | xargs -0 gofmt -l)"
-          go vet ./...
-          go mod verify
-          go list -mod=vendor ./... >/dev/null
+        run: make check
       - name: Test and compile
         env:
-          JXPKG_TEST_REDIS_ADDR: 127.0.0.1:${{ job.services.redis.ports[6379] }}
+          JXPKG_TEST_REDIS_ADDR: 127.0.0.1:${{ job.services.redis.ports['6379'] }}
         run: |
-          go test ./...
-          go test -race ./...
+          make test
+          make test-race
           make build
 
   untrusted-ci:
@@ -118,17 +114,13 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Verify source and dependencies
-        run: |
-          test -z "$(find . -path ./vendor -prune -o -name '*.go' -type f -print0 | xargs -0 gofmt -l)"
-          go vet ./...
-          go mod verify
-          go list -mod=vendor ./... >/dev/null
+        run: make check
       - name: Test and compile
         env:
-          JXPKG_TEST_REDIS_ADDR: 127.0.0.1:${{ job.services.redis.ports[6379] }}
+          JXPKG_TEST_REDIS_ADDR: 127.0.0.1:${{ job.services.redis.ports['6379'] }}
         run: |
-          go test ./...
-          go test -race ./...
+          make test
+          make test-race
           make build
 
   required:
