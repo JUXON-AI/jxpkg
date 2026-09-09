@@ -226,9 +226,20 @@ lifecycle.Std().WaitExit()
 ```
 
 `Run` 会把 Router 注册为 lifecycle closer。收到 SIGTERM 或中断信号时，HTTP server
-立即停止接收新连接，并最多等待 10 秒让进行中的 handler 完成；这用于避免滚动发布把
-Worker 长轮询或用户请求截断成 `EOF`。应用不要再独立关闭同一个 listener；需要在测试
-或自定义生命周期中主动停止时可调用 `router.Close()`，重复调用 `Run` 会返回错误。
+立即停止接收新连接，并默认最多等待 10 秒让进行中的 handler 完成；这用于避免滚动发布
+把请求截断成 `EOF`。如果 handler（例如 Worker 长轮询）的最长执行时间可能超过 10 秒，
+创建 Router 时必须传入 `WithGracefulShutdownTimeout`，同时让 lifecycle hard timeout 和
+容器编排器 termination grace 依次更长，并在入口摘流后再发送 SIGTERM：
+
+```go
+lifecycle.Std().SetTimeout(75 * time.Second)
+router := server.NewRouter("/v1/",
+    server.WithGracefulShutdownTimeout(60*time.Second),
+)
+```
+
+应用不要再独立关闭同一个 listener；需要在测试或自定义生命周期中主动停止时可调用
+`router.Close()`，重复调用 `Run` 会返回错误。非正数 timeout 保留 10 秒默认值。
 
 ### `config`
 
