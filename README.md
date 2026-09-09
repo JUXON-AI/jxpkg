@@ -212,6 +212,24 @@ router.PRequireBrowserSession("profile.Get", server.API(handler.GetProfile))
 
 Browser Session 路由顺序固定为 Session Resolve、业务身份注入、登录要求、unsafe-method CSRF、业务 handler。`API` 支持请求体大小限制；不要在 handler 中重新实现认证分支。
 
+应用创建 listener 后调用 `Run`，再交给同一个进程级 lifecycle 等待退出信号：
+
+```go
+listener, err := net.Listen("tcp", cfg.HTTPAddr)
+if err != nil {
+    return err
+}
+if err := router.Run(listener); err != nil {
+    return err
+}
+lifecycle.Std().WaitExit()
+```
+
+`Run` 会把 Router 注册为 lifecycle closer。收到 SIGTERM 或中断信号时，HTTP server
+立即停止接收新连接，并最多等待 10 秒让进行中的 handler 完成；这用于避免滚动发布把
+Worker 长轮询或用户请求截断成 `EOF`。应用不要再独立关闭同一个 listener；需要在测试
+或自定义生命周期中主动停止时可调用 `router.Close()`，重复调用 `Run` 会返回错误。
+
 ### `config`
 
 加载核心 YAML 配置。通常使用 `LoadCoreConfigFromEnv` 读取环境指定配置，或在工具/测试中显式使用 `LoadCoreConfigFromFile`。`Conf` 返回当前已加载核心配置。不要把 secret 写入仓库 YAML；由部署环境注入。
@@ -336,12 +354,13 @@ JXPKG_TEST_S3_REGION
 
 ## CI 与发布
 
-- upstream branch push：在 `JXlan Trusted` self-hosted runner 执行编译、格式、
-  vet、单元测试、race 和 vendor 一致性检查。
-- pull request：无论来自同仓库还是 fork，都在 GitHub-hosted runner 执行同一套
-  完整检查；PR 控制的代码不会进入 JXlan。
+- feature branch push 与 pull request：无论来自同仓库还是 fork，都在 GitHub-hosted
+  runner 执行编译、格式、vet、单元测试、race 和 vendor 一致性检查；PR 控制的代码不会
+  进入 JXlan。同仓库同一分支的 push/PR 事件共用并发键，只保留一个全量 run；fork 的
+  仓库名参与并发键，不会与同名内部 branch 相互取消。
 - `main`：合并或直接 push 后重新执行完整检查。是否强制 `Required` check 由
-  GitHub branch rules 管理，workflow 本身不能替代该仓库设置。
+  GitHub branch rules 管理，workflow 本身不能替代该仓库设置；受信执行使用
+  `JXlan Trusted` self-hosted runner。
 - `v*` tag：在 JXlan 重新执行与 `main` 相同的完整检查，发布 tag 未通过不能作为
   下游升级证据。
 - manual：`workflow_dispatch` 可在 GitHub UI 选择或输入指定 ref 验证。

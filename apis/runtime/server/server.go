@@ -1,10 +1,14 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/JUXON-AI/jxpkg/apis/constants"
 	"github.com/JUXON-AI/jxpkg/apis/runtime/auth"
@@ -22,6 +26,10 @@ const (
 	PrefixAPIV1 = "/v1/"
 	// PrefixAPIDefault 默认 API 前缀。
 	PrefixAPIDefault = "/v1/"
+
+	// gracefulShutdownTimeout bounds how long a process termination waits for
+	// active API requests before lifecycle applies its outer hard timeout.
+	gracefulShutdownTimeout = 10 * time.Second
 )
 
 // MethodFunc Gin 路由注册方法类型（如 GET、POST）。
@@ -34,6 +42,14 @@ type Router struct {
 
 	// l 保存服务当前使用的网络监听器。
 	l net.Listener
+
+	// serverMu protects httpServer while Run and Close coordinate startup and
+	// graceful process termination.
+	serverMu sync.RWMutex
+
+	// httpServer owns active HTTP connections so Close can drain in-flight
+	// requests instead of abruptly closing the listener during a rollout.
+	httpServer *http.Server
 
 	// lc 保存服务生命周期控制器。
 	lc *lifecycle.LifeCycle
@@ -157,16 +173,47 @@ func NewRouter(apiPrefix string, opts ...RouterOption) *Router {
 	return svr
 }
 
-// Run 在指定 Listener 上启动 HTTP 服务，goroutine 中运行。
+// Run 在指定 Listener 上启动 HTTP 服务，goroutine 中运行。服务会注册到当前
+// lifecycle；进程退出时 Close 会先停止接收新连接，再等待进行中的请求完成。
 func (svr *Router) Run(l net.Listener) error {
+	if l == nil {
+		return errors.New("server: nil listener")
+	}
+
+	svr.serverMu.Lock()
+	if svr.httpServer != nil {
+		svr.serverMu.Unlock()
+		return errors.New("server: router is already running")
+	}
+	httpServer := &http.Server{Handler: svr.eng}
 	svr.l = l
+	svr.httpServer = httpServer
+	svr.serverMu.Unlock()
+	svr.lc.AddCloser(svr)
+
 	go func() {
-		if err := http.Serve(l, svr.eng); err != nil {
-			logs.Errorf("http.Serve error: %v", err)
+		if err := httpServer.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logs.Errorf("http server error: %v", err)
 		}
 		svr.lc.Exit()
 	}()
 	return nil
+}
+
+// Close gracefully stops the Router. New connections are rejected immediately,
+// while in-flight handlers receive up to ten seconds to finish before returning
+// a shutdown error to the lifecycle's outer hard-stop policy.
+func (svr *Router) Close() error {
+	svr.serverMu.RLock()
+	httpServer := svr.httpServer
+	svr.serverMu.RUnlock()
+	if httpServer == nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+	defer cancel()
+	return httpServer.Shutdown(ctx)
 }
 
 // GinEngine 返回内部的 Gin 引擎。
