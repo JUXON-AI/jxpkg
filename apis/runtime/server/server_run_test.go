@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -83,6 +85,58 @@ func TestRouterCloseWaitsForInflightRequest(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Close did not return after request completed")
+	}
+}
+
+func TestRouterCloseUsesConfiguredTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := NewRouter("/v1/", WithGracefulShutdownTimeout(25*time.Millisecond))
+	router.lc = lifecycle.New()
+
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	router.GinEngine().GET("/blocked", func(ctx *gin.Context) {
+		close(requestStarted)
+		<-releaseRequest
+		ctx.Status(http.StatusNoContent)
+	})
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	if err := router.Run(listener); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	requestDone := make(chan struct{})
+	go func() {
+		defer close(requestDone)
+		response, requestErr := http.Get("http://" + listener.Addr().String() + "/blocked")
+		if requestErr == nil {
+			response.Body.Close()
+		}
+	}()
+	select {
+	case <-requestStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request did not reach handler")
+	}
+
+	started := time.Now()
+	err = router.Close()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("close error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed < 20*time.Millisecond {
+		t.Fatalf("configured shutdown timeout returned too early: %s", elapsed)
+	}
+
+	close(releaseRequest)
+	select {
+	case <-requestDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request did not finish after test release")
 	}
 }
 

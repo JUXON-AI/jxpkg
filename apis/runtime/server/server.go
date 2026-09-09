@@ -27,9 +27,9 @@ const (
 	// PrefixAPIDefault 默认 API 前缀。
 	PrefixAPIDefault = "/v1/"
 
-	// gracefulShutdownTimeout bounds how long a process termination waits for
-	// active API requests before lifecycle applies its outer hard timeout.
-	gracefulShutdownTimeout = 10 * time.Second
+	// defaultGracefulShutdownTimeout bounds how long a process termination waits
+	// for active API requests unless the application opts into a longer drain.
+	defaultGracefulShutdownTimeout = 10 * time.Second
 )
 
 // MethodFunc Gin 路由注册方法类型（如 GET、POST）。
@@ -50,6 +50,11 @@ type Router struct {
 	// httpServer owns active HTTP connections so Close can drain in-flight
 	// requests instead of abruptly closing the listener during a rollout.
 	httpServer *http.Server
+
+	// gracefulShutdownTimeout must be shorter than the lifecycle and process
+	// termination deadlines. Long-polling applications should override it with
+	// WithGracefulShutdownTimeout.
+	gracefulShutdownTimeout time.Duration
 
 	// lc 保存服务生命周期控制器。
 	lc *lifecycle.LifeCycle
@@ -142,19 +147,33 @@ func WithBrowserSession(options middleware.BrowserSessionOptions) RouterOption {
 	}
 }
 
+// WithGracefulShutdownTimeout sets the maximum time Close waits for active HTTP
+// handlers. Non-positive values keep the ten-second default. Applications must
+// configure their lifecycle and orchestrator termination deadlines to exceed
+// this value.
+func WithGracefulShutdownTimeout(timeout time.Duration) RouterOption {
+	return func(svr *Router) {
+		if svr == nil || timeout <= 0 {
+			return
+		}
+		svr.gracefulShutdownTimeout = timeout
+	}
+}
+
 // NewRouter 创建 Router 实例，默认启用 CORS、日志、Recovery、登录态等中间件。
 func NewRouter(apiPrefix string, opts ...RouterOption) *Router {
 	if apiPrefix == "" {
 		apiPrefix = PrefixAPIDefault
 	}
 	svr := &Router{
-		eng:            gin.New(),
-		lc:             lifecycle.Std(),
-		Prefix:         apiPrefix,
-		routerMap:      map[string]interface{}{},
-		routeGroups:    map[string]*gin.RouterGroup{},
-		authInjector:   &authInjector{},
-		corsMiddleware: middleware.CORS(),
+		eng:                     gin.New(),
+		lc:                      lifecycle.Std(),
+		Prefix:                  apiPrefix,
+		routerMap:               map[string]interface{}{},
+		routeGroups:             map[string]*gin.RouterGroup{},
+		authInjector:            &authInjector{},
+		corsMiddleware:          middleware.CORS(),
+		gracefulShutdownTimeout: defaultGracefulShutdownTimeout,
 	}
 	svr.router()
 	for _, opt := range opts {
@@ -201,8 +220,8 @@ func (svr *Router) Run(l net.Listener) error {
 }
 
 // Close gracefully stops the Router. New connections are rejected immediately,
-// while in-flight handlers receive up to ten seconds to finish before returning
-// a shutdown error to the lifecycle's outer hard-stop policy.
+// while in-flight handlers receive the configured drain interval before
+// returning a shutdown error to the lifecycle's outer hard-stop policy.
 func (svr *Router) Close() error {
 	svr.serverMu.RLock()
 	httpServer := svr.httpServer
@@ -211,7 +230,7 @@ func (svr *Router) Close() error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), svr.gracefulShutdownTimeout)
 	defer cancel()
 	return httpServer.Shutdown(ctx)
 }
