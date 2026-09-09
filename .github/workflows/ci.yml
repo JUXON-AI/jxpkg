@@ -18,7 +18,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: jxpkg-ci-${{ github.event.pull_request.number || inputs.ref || github.ref }}
+  # A same-repository branch push and its pull_request event share this key,
+  # so only one full untrusted run consumes GitHub-hosted capacity. A fork's
+  # repository name keeps an identically named branch isolated.
+  group: jxpkg-ci-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || inputs.ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
