@@ -5,7 +5,7 @@
 ## 快速开始
 
 ```bash
-go get github.com/JUXON-AI/jxpkg@v0.0.10
+go get github.com/JUXON-AI/jxpkg@v0.0.11
 ```
 
 要求 Go 1.25 或更高版本。生产代码应依赖正式 tag；跨仓库联调可以临时使用 commit，但不得把个人 fork 的 `replace` 提交到仓库。
@@ -342,6 +342,8 @@ JXPKG_TEST_S3_REGION
   完整检查；PR 控制的代码不会进入 JXlan。
 - `main`：合并或直接 push 后重新执行完整检查。是否强制 `Required` check 由
   GitHub branch rules 管理，workflow 本身不能替代该仓库设置。
+- `v*` tag：在 JXlan 重新执行与 `main` 相同的完整检查，发布 tag 未通过不能作为
+  下游升级证据。
 - manual：`workflow_dispatch` 可在 GitHub UI 选择或输入指定 ref 验证。
 
 正式发布必须在 `main` 绿灯后创建语义化 tag。下游升级到新 tag 并完成兼容性测试后，才能删除临时 commit pin。
