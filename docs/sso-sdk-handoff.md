@@ -79,7 +79,7 @@ ConfigureCompanyIdentityResolver 是公司目录注入点，不是另一个浏�
 | cmd/sso.go | 删除无调用方的 buildProductionSSOHandlers、buildProductionSSOHandler | 全仓搜索无引用；不新增别名或转发 wrapper |
 | cmd/sso.go、cmd/sso_test.go | assembleAccountRouter 移入 _test.go，只构造测试依赖并调用生产 newAccountRouter | 不把测试依赖工厂编进生产 |
 | internal/apis/api.go | 保留显式认证边界与 Account AuthInject | 三个旧身份接口仍需 Bearer 数据库复核 |
-| go.mod、go.sum、vendor | 与 JXOne 固定同一官方 SDK commit | 发布后统一升级正式版本，不用浮动分支 |
+| go.mod、go.sum | 与 JXOne 固定同一官方 SDK commit；Account 基线不跟踪 vendor，不引入整套 vendor | 发布后统一升级正式版本，不用浮动分支 |
 | README.md | 说明公共 BrowserSecurity 与 Account 专属能力边界 | 不声称 SDK 取代完整 IdP |
 
 必须保留的 Account 代码：
@@ -136,7 +136,7 @@ JXOne vet 和 Juxonone 构建通过。Account cmd/internal/resolver 测试通过
 接手 agent 执行顺序：
 
 1. 读取三个 PR 当前 head，确认 JXOne/Account 固定的 SDK 版本包含 84c7722。
-2. 合并发布 SDK 后将两应用依赖统一升级正式版本，go mod tidy、go mod vendor、go mod verify。当前草稿允许固定官方 pseudo-version，不能依赖本地 workspace 才编译。
+2. 合并发布 SDK 后将两应用依赖统一升级正式版本，执行 go mod tidy、go mod verify；仅 JXOne 执行 go mod vendor，Account 保持原模块布局。当前草稿允许固定官方 pseudo-version，不能依赖本地 workspace 才编译。
 3. 各仓执行 AGENTS.md 要求的 gofmt、vet、全量测试、race、构建；保留已知失败与跳过记录。重点检查没有应用 AuthInject 的 Cookie 正向链路、重复/缺失 Cookie、Bearer 混用、Host/Origin/CSRF 拒绝、epoch/version/过期/撤销、resolver 超时 503。
 4. Account 额外执行 selected business Host、auth Host CORS、logout CORS、上游禁用/错误配置、mTLS caller 身份和 CompanyIdentityDirectory 故障测试；保留旧 Bearer 身份协议断言。
 5. 对比两仓变更前后路由 action 清单；只允许实现归属变化，不删除业务或 Worker action。
