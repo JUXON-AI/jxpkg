@@ -78,10 +78,12 @@ runtime.LoginWay(ctx)
 
 当前部署的新版 `jxone-web` 使用 `/auth/session`、`/auth/identities`、
 `/auth/switch-identity`、`/auth/logout`；新版 `jxaccount-web` 使用 OIDC interaction
-Cookie 和 `credentials: include`，两者都不发送用户 Bearer。仍有生产源码调用的
-兼容方是 `jxx` 与旧 `jxone-web/main`，并可能存在仓库外客户端，因此本 PR 不让
-路由失效。后续禁止新增用户-Bearer 调用；上述消费者迁移并完成调用观测后，三个
-action、DTO、service wrapper、Account `AuthInject` 和 JXpKG `PRequireLogin` 才能同批删除。
+Cookie 和 `credentials: include`，两者都不发送用户 Bearer。旧 `jxone-web/main`
+直接调用上述 Account action，因此当前不能让三条路由失效；仓库外客户端还需通过
+调用观测排除。`jxx` 的自身生产路由仍大量使用 JXpKG `PRequireLogin`，它不是当前
+Account 三个 endpoint 的调用证据，但会阻止直接删除 SDK legacy alias。后续禁止新增
+用户-Bearer 调用：旧 Web/外部客户端归零后删除 Account 三套 contract；`jxx` 迁移后
+再删除 JXpKG legacy alias。
 
 JXWorker Bearer 是独立的 256-bit workload credential，不是用户令牌，不在弃用范围。
 
@@ -225,9 +227,9 @@ JXOne 的已知 full-test 失败不算 SSO 回归，但合并前应独立修复�
    grace period；按正常 promote workflow 做 migration 判定、rollout 和 smoke。
 6. 使用真实账号验证 Browser login、identity switch、公司/项目 403、Origin/CSRF、
    logout 后旧 Session 失效；不要把 302 bootstrap 当成完整登录成功。
-7. 为 deprecated user-Bearer 统计剩余调用。先迁移 `jxx` 和旧 `jxone-web/main`，确认
-   无仓库外客户端后，一次性删除三个 action、DTO、service wrapper、Account injector
-   与 JXpKG legacy alias；JXWorker credential 始终保留。
+7. 为 deprecated user-Bearer 统计剩余调用。迁移旧 `jxone-web/main` 并确认无仓库外
+   客户端后，删除 Account 三个 action、DTO、service wrapper 和 injector；迁移 `jxx`
+   的 legacy registrar 后再删除 JXpKG alias。JXWorker credential 始终保留。
 
 ## 整洁度结论
 

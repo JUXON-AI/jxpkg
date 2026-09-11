@@ -156,8 +156,10 @@ compatibility boundary: `account.ListMyIdentities`, `account.SwitchIdentity` and
 `account.GetCurrentIdentity`. The current JXOne and Account browser frontends use
 `/auth/session`, `/auth/identities`, `/auth/switch-identity` and `/auth/logout`
 instead. Do not add new user-Bearer consumers. Removal is safe only after `jxx`,
-the pre-Browser-Session `jxone-web/main`, and any external clients have migrated.
-Worker Bearer is a separate workload credential and is not deprecated.
+the pre-Browser-Session `jxone-web/main`, and any external clients have migrated:
+the old web directly blocks removal of Account's three endpoints, while `jxx`
+blocks removal of JXpKG's legacy registrar until its own routes migrate. Worker
+Bearer is a separate workload credential and is not deprecated.
 
 ## Validation and handoff
 
