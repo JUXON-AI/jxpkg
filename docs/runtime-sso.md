@@ -80,6 +80,38 @@ client/cookie/origin policy into one `server.NewBrowserSessionOption`, installs
 the registered-host CORS middleware, and mounts Account routes. Account does not
 assemble or reorder the Session and CSRF handlers.
 
+### Multi-host bindings (SDK implemented; Account adoption follows separately)
+
+The low-level `BrowserSessionOptions` now contains `Bindings []BrowserSessionBinding`
+instead of process-wide `Service`, `CookieName`, `AllowedHosts`, and `ExternalOrigin`.
+Each binding has exactly `Host`, `Service`, `CookieName`, and `ExternalOrigin`.
+`server.NewBrowserSessionOption` calls the single middleware constructor
+`NewBrowserSessionHandlers` once: Session, CSRF and Bearer handlers share one
+startup-validated, defensively copied Host index. Empty directories, duplicate
+Hosts, invalid cookies and mismatched origin Hosts fail before serving requests.
+Caller changes to the binding slice or unsafe-method map cannot alter the handlers.
+
+Requests select the exact registered Host, including its port; there is no suffix,
+case, default-port or forwarded-header fallback. Browser routes resolve only that
+Host's cookie using its service, and unsafe requests require that binding's exact
+origin and session CSRF token. Bearer routes reject only the selected Host's cookie;
+an unrelated binding's cookie alone does not block a valid Bearer credential.
+Unknown Hosts fail closed on browser routes. On a Bearer route an unbound Host has
+no selected browser cookie and still requires normal Bearer authentication; this
+preserves Account's auth-host legacy boundary. Pure Bearer routers without browser
+configuration retain their existing behavior.
+
+`sso.LoadEnv`, `Runtime.RouterOption` and `PRequireBrowserSession` remain unchanged.
+`LoadEnv` still requires `EXTERNAL_ORIGIN`, checks its Host belongs to
+`BROWSER_ALLOWED_HOSTS_JSON`, then generates each explicit Host's origin using that
+same scheme (`scheme://host`). CORS also selects the Host's exact origin.
+Only low-level bindings may omit `ExternalOrigin` to derive it from direct TLS/Host;
+trusted proxy deployments should always supply it. The earlier Account example
+above describes its pre-migration call; the next Account change must instead build
+all registered bindings via `BrowserSessionOptions(authority)` and remove
+`ACCOUNT_BUSINESS_HOST`. This SDK change alone is not evidence of that downstream
+change or a new cluster rollout.
+
 `LoadProviderEnv` validates configuration and binds its TLS listener. `Serve()`
 and `Close() error` are concurrently idempotent; `Close` drains for three seconds
 and then forces remaining connections closed. Provider implements `io.Closer`

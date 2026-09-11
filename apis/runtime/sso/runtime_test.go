@@ -10,6 +10,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"github.com/JUXON-AI/jxpkg/apis/runtime/auth"
+	"github.com/JUXON-AI/jxpkg/apis/runtime/server"
 )
 
 func TestValidPrefix(t *testing.T) {
@@ -91,6 +94,52 @@ func TestLoadEnvBuildsBrowserSessionRuntime(t *testing.T) {
 			}
 		})
 	}
+	t.Run("multiple hosts keep exact origins", func(t *testing.T) {
+		previous := values["JUXONONE_BROWSER_ALLOWED_HOSTS_JSON"]
+		values["JUXONONE_BROWSER_ALLOWED_HOSTS_JSON"] = `["one.example.com","alias.example.com:8443"]`
+		defer func() { values["JUXONONE_BROWSER_ALLOWED_HOSTS_JSON"] = previous }()
+		runtime, err := LoadEnv(func(key string) string { return values[key] }, "JUXONONE")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer runtime.Close()
+		router := server.NewRouter("/v1/", runtime.RouterOption())
+		for _, test := range []struct {
+			host, origin string
+			status       int
+		}{
+			{"one.example.com", "https://one.example.com", 204},
+			{"alias.example.com:8443", "https://alias.example.com:8443", 204},
+			{"alias.example.com:8443", "https://one.example.com", 403},
+			{"alias.example.com:8443", "http://alias.example.com:8443", 403},
+			{"unknown.example.com", "https://unknown.example.com", 403},
+			{"one.example.com:443", "https://one.example.com", 403},
+		} {
+			request := httptest.NewRequest(http.MethodOptions, "http://"+test.host+"/v1/resource", nil)
+			request.Header.Set("Origin", test.origin)
+			request.Header.Set("Access-Control-Request-Method", "POST")
+			request.Header.Set("Access-Control-Request-Headers", "X-CSRF-Token")
+			recorder := httptest.NewRecorder()
+			router.GinEngine().ServeHTTP(recorder, request)
+			if recorder.Code != test.status {
+				t.Fatalf("%s / %s = %d, want %d", test.host, test.origin, recorder.Code, test.status)
+			}
+			if test.status == 204 && (recorder.Header().Get("Access-Control-Allow-Origin") != test.origin || recorder.Header().Get("Access-Control-Allow-Credentials") != "true") {
+				t.Fatal("preflight lost exact origin or credentials")
+			}
+		}
+	})
+	t.Run("origin must be canonical and registered", func(t *testing.T) {
+		previous := values["JUXONONE_EXTERNAL_ORIGIN"]
+		defer func() { values["JUXONONE_EXTERNAL_ORIGIN"] = previous }()
+		for _, origin := range []string{"https://other.example.com", "https://one.example.com/path", "https://one.example.com?", "HTTPS://one.example.com"} {
+			values["JUXONONE_EXTERNAL_ORIGIN"] = origin
+			runtime, err := LoadEnv(func(key string) string { return values[key] }, "JUXONONE")
+			if runtime != nil || !errors.Is(err, auth.ErrAuthBackendUnavailable) {
+				t.Fatalf("invalid origin accepted: %q", origin)
+			}
+		}
+	})
 	t.Run("certificate failure is redacted", func(t *testing.T) {
 		values["JUXONONE_SESSION_RESOLVER_TLS_KEY_FILE"] = "/private/DO_NOT_LOG/key.pem"
 		got, err := LoadEnv(func(name string) string { return values[name] }, "JUXONONE")

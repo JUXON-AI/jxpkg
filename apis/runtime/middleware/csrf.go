@@ -8,13 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// NewCSRFMiddleware 创建浏览器会话副作用请求的精确 Origin 和 CSRF 校验中间件。
-func NewCSRFMiddleware(options BrowserSessionOptions) (gin.HandlerFunc, error) {
-	normalized, err := normalizeBrowserSessionOptions(options, false)
-	if err != nil {
-		return nil, err
-	}
-
+func csrfMiddleware(normalized normalizedBrowserSessionOptions) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		if _, unsafe := normalized.unsafeMethods[strings.ToUpper(ctx.Request.Method)]; !unsafe {
 			return
@@ -22,16 +16,17 @@ func NewCSRFMiddleware(options BrowserSessionOptions) (gin.HandlerFunc, error) {
 
 		value, ok := ctx.Get(constants.CtxKeyLoginStatus)
 		ls, valid := value.(*auth.LoginStatus)
-		if !ok || !valid || ls.State != auth.StateSucc || ls.AuthMode != auth.AuthModeBrowserSession {
+		if !ok || !valid || ls == nil || ls.State != auth.StateSucc || ls.AuthMode != auth.AuthModeBrowserSession {
 			abortAuth(ctx, ls)
 			return
 		}
-		if _, err := allowedCanonicalHost(ctx.Request.Host, normalized.allowedHosts); err != nil {
-			failLoginStatus(ls, err)
+		binding, ok := normalized.bindings[ctx.Request.Host]
+		if !ok {
+			failLoginStatus(ls, auth.ErrInvalidCredential)
 			abortAuth(ctx, ls)
 			return
 		}
-		if !validRequestOrigin(ctx, normalized.externalOrigin) {
+		if !validRequestOrigin(ctx, binding.ExternalOrigin) {
 			failLoginStatus(ls, auth.ErrInvalidCredential)
 			abortAuth(ctx, ls)
 			return
@@ -48,7 +43,7 @@ func NewCSRFMiddleware(options BrowserSessionOptions) (gin.HandlerFunc, error) {
 			abortAuth(ctx, ls)
 			return
 		}
-	}, nil
+	}
 }
 
 func validRequestOrigin(ctx *gin.Context, externalOrigin string) bool {

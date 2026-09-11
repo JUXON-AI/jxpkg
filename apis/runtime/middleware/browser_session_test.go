@@ -28,13 +28,24 @@ type fakeSessionResolver struct {
 	calls int
 }
 
+func newTestBrowserSessionMiddleware(options BrowserSessionOptions) (gin.HandlerFunc, error) {
+	handlers, err := NewBrowserSessionHandlers(options)
+	return handlers.Session, err
+}
+
+func newTestCSRFMiddleware(options BrowserSessionOptions) (gin.HandlerFunc, error) {
+	options.Resolver = &fakeSessionResolver{}
+	handlers, err := NewBrowserSessionHandlers(options)
+	return handlers.CSRF, err
+}
+
 func (resolver *fakeSessionResolver) Resolve(_ context.Context, request auth.SessionResolveRequest) (*auth.SessionPrincipal, error) {
 	resolver.calls++
 	resolver.request = request
 	return resolver.principal, resolver.err
 }
 
-func TestNewBrowserSessionMiddleware(t *testing.T) {
+func TestBrowserSessionMiddleware(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	now := time.Unix(2_000_000, 0)
 	csrfHash := sha256.Sum256([]byte("csrf-token"))
@@ -127,12 +138,10 @@ func TestNewBrowserSessionMiddleware(t *testing.T) {
 			if test.principal != nil {
 				resolver.principal = test.principal()
 			}
-			handler, err := NewBrowserSessionMiddleware(BrowserSessionOptions{
-				Service:      "juxonone",
-				CookieName:   "__Host-app_session",
-				AllowedHosts: map[string]struct{}{"app.example.com": {}},
-				Resolver:     resolver,
-				Clock:        func() time.Time { return now },
+			handler, err := newTestBrowserSessionMiddleware(BrowserSessionOptions{
+				Bindings: []BrowserSessionBinding{{Host: "app.example.com", Service: "juxonone", CookieName: "__Host-app_session"}},
+				Resolver: resolver,
+				Clock:    func() time.Time { return now },
 			})
 			if err != nil {
 				t.Fatalf("NewBrowserSessionMiddleware: %v", err)
@@ -182,10 +191,8 @@ func TestNewBrowserSessionMiddleware(t *testing.T) {
 func TestBrowserSessionOptionsValidation(t *testing.T) {
 	resolver := &fakeSessionResolver{}
 	base := BrowserSessionOptions{
-		Service:      "service",
-		CookieName:   "__Host-session",
-		AllowedHosts: map[string]struct{}{"app.example.com": {}},
-		Resolver:     resolver,
+		Bindings: []BrowserSessionBinding{{Host: "app.example.com", Service: "service", CookieName: "__Host-session"}},
+		Resolver: resolver,
 	}
 
 	tests := []struct {
@@ -195,19 +202,19 @@ func TestBrowserSessionOptionsValidation(t *testing.T) {
 		// mutate 构造无效配置。
 		mutate func(*BrowserSessionOptions)
 	}{
-		{name: "empty service", mutate: func(options *BrowserSessionOptions) { options.Service = "" }},
-		{name: "spaced service", mutate: func(options *BrowserSessionOptions) { options.Service = " service " }},
-		{name: "cookie without host prefix", mutate: func(options *BrowserSessionOptions) { options.CookieName = "session" }},
-		{name: "invalid cookie name", mutate: func(options *BrowserSessionOptions) { options.CookieName = "__Host-bad name" }},
-		{name: "empty allowed hosts", mutate: func(options *BrowserSessionOptions) { options.AllowedHosts = nil }},
+		{name: "empty service", mutate: func(options *BrowserSessionOptions) { options.Bindings[0].Service = "" }},
+		{name: "spaced service", mutate: func(options *BrowserSessionOptions) { options.Bindings[0].Service = " service " }},
+		{name: "cookie without host prefix", mutate: func(options *BrowserSessionOptions) { options.Bindings[0].CookieName = "session" }},
+		{name: "invalid cookie name", mutate: func(options *BrowserSessionOptions) { options.Bindings[0].CookieName = "__Host-bad name" }},
+		{name: "empty allowed hosts", mutate: func(options *BrowserSessionOptions) { options.Bindings = nil }},
 		{name: "noncanonical allowed host", mutate: func(options *BrowserSessionOptions) {
-			options.AllowedHosts = map[string]struct{}{"App.example.com": {}}
+			options.Bindings[0].Host = "App.example.com"
 		}},
 		{name: "noncanonical external origin", mutate: func(options *BrowserSessionOptions) {
-			options.ExternalOrigin = "https://App.example.com"
+			options.Bindings[0].ExternalOrigin = "https://App.example.com"
 		}},
 		{name: "external origin host mismatch", mutate: func(options *BrowserSessionOptions) {
-			options.ExternalOrigin = "https://other.example.com"
+			options.Bindings[0].ExternalOrigin = "https://other.example.com"
 		}},
 		{name: "nil resolver", mutate: func(options *BrowserSessionOptions) { options.Resolver = nil }},
 		{name: "invalid csrf header", mutate: func(options *BrowserSessionOptions) { options.CSRFHeader = "bad header" }},
@@ -217,8 +224,9 @@ func TestBrowserSessionOptionsValidation(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			options := base
+			options.Bindings = append([]BrowserSessionBinding(nil), base.Bindings...)
 			test.mutate(&options)
-			if _, err := NewBrowserSessionMiddleware(options); !errors.Is(err, auth.ErrAuthBackendUnavailable) {
+			if _, err := newTestBrowserSessionMiddleware(options); !errors.Is(err, auth.ErrAuthBackendUnavailable) {
 				t.Fatalf("error = %v, want ErrAuthBackendUnavailable", err)
 			}
 		})

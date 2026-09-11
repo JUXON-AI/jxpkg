@@ -102,6 +102,22 @@ server.NewBrowserSessionOption(middleware.BrowserSessionOptions) (server.RouterO
 (*server.Router).PRequireBearer(action string, handlers ...interface{})
 ```
 
+Multi-host T1 adds `middleware.BrowserSessionBinding{Host, Service, CookieName,
+ExternalOrigin}` and replaces the old single-host fields with
+`BrowserSessionOptions.Bindings`. `NewBrowserSessionHandlers` is the only low-level
+browser constructor, returning Session/CSRF/Bearer handlers backed by one immutable
+Host directory. The old `NewBrowserSessionMiddleware` and `NewCSRFMiddleware`
+constructors are removed. Normal consumers still only install `Runtime.RouterOption`.
+
+Every Host (including port) is exact. Bearer checks only its selected cookie;
+an unbound Host still requires normal Bearer authentication without selecting a
+browser cookie. Browser routes reject unbound Hosts. `LoadEnv` validates the configured origin belongs to the explicit
+allowlist, then derives each allowlisted Host's own origin using that scheme, for
+both CORS and CSRF. Low-level empty origins retain direct TLS/Host derivation.
+Account T2 must build all registry bindings and remove `ACCOUNT_BUSINESS_HOST`;
+the earlier Account call and deployment evidence describe pre-T2 sources, not
+acceptance of this new multi-host change.
+
 Provider：
 
 ```go

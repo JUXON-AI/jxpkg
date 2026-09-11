@@ -43,7 +43,7 @@ make clean       # 清理 Go test cache
 | [`apis/errcode`](#apiserrcode) | 业务错误码注册和消息查询 | `Register`、`GetMessage` |
 | [`apis/runtime`](#apisruntime) | HTTP 响应与已验证身份读取 | `Success`、`BadRequest`、`UserID` |
 | [`apis/runtime/auth`](#apisruntimeauth) | Bearer/JWT、Browser Session 的共享认证契约 | `TokenSigner`、`TokenVerifier`、`SessionResolver` |
-| [`apis/runtime/middleware`](#apisruntimemiddleware) | Gin 日志、恢复、CORS、认证与 CSRF 中间件 | `NewCORS`、`NewBrowserSessionMiddleware` |
+| [`apis/runtime/middleware`](#apisruntimemiddleware) | Gin 日志、恢复、CORS、认证与 CSRF 中间件 | `NewCORS`、`NewBrowserSessionHandlers` |
 | [`apis/runtime/server`](#apisruntimeserver) | Gin Router、路由认证模式和 API 适配 | `NewRouter`、`API` |
 | [`config`](#config) | YAML 和环境变量配置加载 | `LoadCoreConfigFromEnv` |
 | [`dbtools`](#dbtools) | GORM 多数据库连接和显式迁移 | `InitDBConn`、`DoInitModels` |

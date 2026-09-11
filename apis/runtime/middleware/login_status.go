@@ -27,7 +27,7 @@ func RequireAuthenticated(ctx *gin.Context) {
 		return
 	}
 	ls, ok := value.(*auth.LoginStatus)
-	if !ok || ls.State != auth.StateSucc {
+	if !ok || ls == nil || ls.State != auth.StateSucc {
 		abortAuth(ctx, ls)
 		return
 	}

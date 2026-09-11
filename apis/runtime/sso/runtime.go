@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/JUXON-AI/jxpkg/apis/runtime/auth"
 	"github.com/JUXON-AI/jxpkg/apis/runtime/middleware"
 	"github.com/JUXON-AI/jxpkg/apis/runtime/server"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -83,22 +85,58 @@ func LoadEnv(getenv func(string) string, prefix string) (*Runtime, error) {
 	}
 
 	origin := getenv(env(prefix, "EXTERNAL_ORIGIN"))
+	primaryCORS, err := middleware.NewCORS(middleware.CORSOptions{ExternalOrigin: origin})
+	if err != nil {
+		transport.CloseIdleConnections()
+		return nil, fmt.Errorf("%w: invalid CORS external origin", auth.ErrAuthBackendUnavailable)
+	}
+	parsedOrigin, err := url.Parse(origin)
+	if err != nil || parsedOrigin == nil {
+		transport.CloseIdleConnections()
+		return nil, fmt.Errorf("%w: invalid external origin", auth.ErrAuthBackendUnavailable)
+	}
+	if _, ok := hosts[parsedOrigin.Host]; !ok {
+		transport.CloseIdleConnections()
+		return nil, fmt.Errorf("%w: external origin host is not allowed", auth.ErrAuthBackendUnavailable)
+	}
+	bindings := make([]middleware.BrowserSessionBinding, 0, len(hosts))
+	for host := range hosts {
+		bindings = append(bindings, middleware.BrowserSessionBinding{
+			Host:           host,
+			Service:        getenv(env(prefix, "SESSION_RESOLVER_SERVICE")),
+			CookieName:     getenv(env(prefix, "BROWSER_SESSION_COOKIE")),
+			ExternalOrigin: parsedOrigin.Scheme + "://" + host,
+		})
+	}
 	session := middleware.BrowserSessionOptions{
-		Service:        getenv(env(prefix, "SESSION_RESOLVER_SERVICE")),
-		CookieName:     getenv(env(prefix, "BROWSER_SESSION_COOKIE")),
-		AllowedHosts:   hosts,
-		ExternalOrigin: origin,
-		Resolver:       resolver,
+		Bindings: bindings,
+		Resolver: resolver,
 	}
 	browserSession, err := server.NewBrowserSessionOption(session)
 	if err != nil {
 		transport.CloseIdleConnections()
 		return nil, fmt.Errorf("%w: invalid browser cookie, hosts or external origin", auth.ErrAuthBackendUnavailable)
 	}
-	cors, err := middleware.NewCORS(middleware.CORSOptions{ExternalOrigin: origin})
-	if err != nil {
-		transport.CloseIdleConnections()
-		return nil, fmt.Errorf("%w: invalid CORS external origin", auth.ErrAuthBackendUnavailable)
+	corsByHost := make(map[string]gin.HandlerFunc, len(bindings))
+	corsByHost[parsedOrigin.Host] = primaryCORS
+	for _, binding := range bindings {
+		if binding.Host == parsedOrigin.Host {
+			continue
+		}
+		cors, err := middleware.NewCORS(middleware.CORSOptions{ExternalOrigin: binding.ExternalOrigin})
+		if err != nil {
+			transport.CloseIdleConnections()
+			return nil, fmt.Errorf("%w: invalid binding CORS origin", auth.ErrAuthBackendUnavailable)
+		}
+		corsByHost[binding.Host] = cors
+	}
+	cors := func(ctx *gin.Context) {
+		handler, ok := corsByHost[ctx.Request.Host]
+		if !ok {
+			ctx.AbortWithStatus(http.StatusForbidden)
+			return
+		}
+		handler(ctx)
 	}
 	routerOption := func(router *server.Router) {
 		server.WithCORS(cors)(router)

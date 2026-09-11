@@ -93,11 +93,9 @@ func TestRouterBrowserSessionChainOrderAndFailures(t *testing.T) {
 			order := make([]string, 0, 3)
 			resolver := &orderedSessionResolver{order: &order, principal: validPrincipal(), err: test.resolverErr}
 			router := NewRouter("/v1/", mustBrowserSessionOption(t, middleware.BrowserSessionOptions{
-				Service:      "service",
-				CookieName:   "__Host-app_session",
-				AllowedHosts: map[string]struct{}{"app.example.com": {}},
-				Resolver:     resolver,
-				Clock:        func() time.Time { return now },
+				Bindings: []middleware.BrowserSessionBinding{{Host: "app.example.com", Service: "service", CookieName: "__Host-app_session"}},
+				Resolver: resolver,
+				Clock:    func() time.Time { return now },
 			}))
 			router.AuthInject(func(_ *gin.Context, _ *auth.LoginStatus) error {
 				order = append(order, "inject")
@@ -143,10 +141,8 @@ func TestRouterPublicRouteStaysAnonymous(t *testing.T) {
 		return nil, errors.New("must not resolve")
 	})
 	router := NewRouter("/v1/", mustBrowserSessionOption(t, middleware.BrowserSessionOptions{
-		Service:      "service",
-		CookieName:   "__Host-app_session",
-		AllowedHosts: map[string]struct{}{"app.example.com": {}},
-		Resolver:     resolver,
+		Bindings: []middleware.BrowserSessionBinding{{Host: "app.example.com", Service: "service", CookieName: "__Host-app_session"}},
+		Resolver: resolver,
 	}))
 	router.AuthInject(func(_ *gin.Context, _ *auth.LoginStatus) error {
 		injectorCalls++
@@ -189,9 +185,7 @@ func TestRouterBearerRoutesRejectConfiguredSessionCookie(t *testing.T) {
 	for _, registration := range registrations {
 		t.Run(registration.name, func(t *testing.T) {
 			router := NewRouter("/v1/", mustBrowserSessionOption(t, middleware.BrowserSessionOptions{
-				Service:      "service",
-				CookieName:   "__Host-app_session",
-				AllowedHosts: map[string]struct{}{"app.example.com": {}},
+				Bindings: []middleware.BrowserSessionBinding{{Host: "app.example.com", Service: "service", CookieName: "__Host-app_session"}},
 				Resolver: sessionResolverFunc(func(_ context.Context, _ auth.SessionResolveRequest) (*auth.SessionPrincipal, error) {
 					t.Fatal("Bearer route called browser resolver")
 					return nil, nil
@@ -360,7 +354,7 @@ func TestRouterCORSAndCSRFShareAuthoritativeExternalOrigin(t *testing.T) {
 		wantHandlerCalls int
 	}{
 		{name: "matching configuration", csrfExternalOrigin: "https://app.example.com", wantStatus: http.StatusNoContent, wantHandlerCalls: 1},
-		{name: "mismatched configuration", csrfExternalOrigin: "https://other.example.com", wantStatus: http.StatusUnauthorized},
+		{name: "mismatched configuration", csrfExternalOrigin: "http://app.example.com", wantStatus: http.StatusUnauthorized},
 	}
 
 	for _, test := range tests {
@@ -378,15 +372,9 @@ func TestRouterCORSAndCSRFShareAuthoritativeExternalOrigin(t *testing.T) {
 			router := NewRouter("/v1/",
 				WithCORS(corsMiddleware),
 				mustBrowserSessionOption(t, middleware.BrowserSessionOptions{
-					Service:    "service",
-					CookieName: "__Host-app_session",
-					AllowedHosts: map[string]struct{}{
-						"app.example.com":   {},
-						"other.example.com": {},
-					},
-					ExternalOrigin: test.csrfExternalOrigin,
-					Resolver:       resolver,
-					Clock:          func() time.Time { return now },
+					Bindings: []middleware.BrowserSessionBinding{{Host: "app.example.com", Service: "service", CookieName: "__Host-app_session", ExternalOrigin: test.csrfExternalOrigin}},
+					Resolver: resolver,
+					Clock:    func() time.Time { return now },
 				}),
 			)
 			router.AuthInject(func(_ *gin.Context, _ *auth.LoginStatus) error { return nil })

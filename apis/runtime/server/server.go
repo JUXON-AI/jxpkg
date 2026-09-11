@@ -83,8 +83,8 @@ type Router struct {
 	// browserCSRFMiddleware 保存浏览器会话 CSRF 中间件。
 	browserCSRFMiddleware gin.HandlerFunc
 
-	// browserSessionCookieName 保存 Bearer 路由必须拒绝的 Session Cookie 名称。
-	browserSessionCookieName string
+	// browserBearerMiddleware selects the current Host's Cookie rejection boundary.
+	browserBearerMiddleware gin.HandlerFunc
 
 	// browserSessionErr 保存浏览器会话中间件的静态配置错误。
 	browserSessionErr error
@@ -139,11 +139,7 @@ func WithCORS(corsMiddleware gin.HandlerFunc) RouterOption {
 // route boundary. Applications normally receive this option from sso.Runtime;
 // they do not assemble the Session and CSRF middleware themselves.
 func NewBrowserSessionOption(options middleware.BrowserSessionOptions) (RouterOption, error) {
-	session, err := middleware.NewBrowserSessionMiddleware(options)
-	if err != nil {
-		return nil, err
-	}
-	csrf, err := middleware.NewCSRFMiddleware(options)
+	handlers, err := middleware.NewBrowserSessionHandlers(options)
 	if err != nil {
 		return nil, err
 	}
@@ -151,9 +147,9 @@ func NewBrowserSessionOption(options middleware.BrowserSessionOptions) (RouterOp
 		if svr == nil {
 			return
 		}
-		svr.browserSessionCookieName = options.CookieName
-		svr.browserSessionMiddleware = session
-		svr.browserCSRFMiddleware = csrf
+		svr.browserBearerMiddleware = handlers.Bearer
+		svr.browserSessionMiddleware = handlers.Session
+		svr.browserCSRFMiddleware = handlers.CSRF
 		svr.browserSessionErr = nil
 	}, nil
 }
@@ -307,7 +303,10 @@ func (svr *Router) PRequireBrowserSession(action string, handlers ...interface{}
 
 // PRequireBearer 注册仅接受 Bearer Token 的 POST 路由。
 func (svr *Router) PRequireBearer(action string, hdrs ...interface{}) {
-	parser := middleware.BearerLoginStatusMiddleware(svr.browserSessionCookieName)
+	parser := svr.browserBearerMiddleware
+	if parser == nil {
+		parser = middleware.BearerLoginStatusMiddleware("")
+	}
 	newhdrs := append([]interface{}{parser, svr.Inject, middleware.RequireAuthenticated}, hdrs...)
 	svr.Post(action, newhdrs...)
 }
