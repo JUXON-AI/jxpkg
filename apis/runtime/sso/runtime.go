@@ -45,7 +45,16 @@ func LoadEnv(getenv func(string) string, prefix string) (*Runtime, error) {
 	}
 	// Validate required deployment keys before opening certificate files. Error
 	// messages identify only the key or stage, never configured values.
-	for _, key := range []string{"BROWSER_ALLOWED_HOSTS_JSON", "BROWSER_SESSION_COOKIE", "EXTERNAL_ORIGIN", "SESSION_RESOLVER_ENDPOINT", "SESSION_RESOLVER_SERVICE", "SESSION_RESOLVER_TLS_CERT_FILE", "SESSION_RESOLVER_TLS_KEY_FILE", "SESSION_RESOLVER_CA_FILE"} {
+	for _, key := range []string{
+		"BROWSER_ALLOWED_HOSTS_JSON",
+		"BROWSER_SESSION_COOKIE",
+		"EXTERNAL_ORIGIN",
+		"SESSION_RESOLVER_ENDPOINT",
+		"SESSION_RESOLVER_SERVICE",
+		"SESSION_RESOLVER_TLS_CERT_FILE",
+		"SESSION_RESOLVER_TLS_KEY_FILE",
+		"SESSION_RESOLVER_CA_FILE",
+	} {
 		if strings.TrimSpace(getenv(env(prefix, key))) == "" {
 			return nil, fmt.Errorf("%w: required %s", auth.ErrAuthBackendUnavailable, env(prefix, key))
 		}
