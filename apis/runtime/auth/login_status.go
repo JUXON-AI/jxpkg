@@ -80,7 +80,7 @@ type LoginStatus struct {
 	AuthMode AuthMode
 
 	// session 保存不可变的浏览器会话元数据。
-	session SessionMetadata
+	session sessionMetadata
 
 	// idmap 保存业务注入器补充的额外 ID。
 	idmap map[string]uint
@@ -93,16 +93,8 @@ func NewBrowserSessionLoginStatus(principal SessionPrincipal) *LoginStatus {
 		Claim:    &claims,
 		State:    StateSucc,
 		AuthMode: AuthModeBrowserSession,
-		session:  NewSessionMetadata(principal),
+		session:  newSessionMetadata(principal),
 	}
-}
-
-// SessionMetadata 返回不可变的浏览器会话元数据。
-func (ls *LoginStatus) SessionMetadata() SessionMetadata {
-	if ls == nil {
-		return SessionMetadata{}
-	}
-	return ls.session
 }
 
 // SetID 存储额外 ID（如 company_id、employee_id）。

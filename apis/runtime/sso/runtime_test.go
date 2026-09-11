@@ -58,7 +58,7 @@ func TestLoadEnvFailsClosedBeforeReadingFiles(t *testing.T) {
 	}
 }
 
-func TestLoadEnvBuildsImmutableBrowserSecurityRuntime(t *testing.T) {
+func TestLoadEnvBuildsBrowserSessionRuntime(t *testing.T) {
 	certFile, keyFile, caFile := writeTestTLSFiles(t)
 	values := map[string]string{
 		"JUXONONE_BROWSER_ALLOWED_HOSTS_JSON":     `["one.example.com"]`,
@@ -75,7 +75,7 @@ func TestLoadEnvBuildsImmutableBrowserSecurityRuntime(t *testing.T) {
 		t.Fatalf("LoadEnv() error = %v", err)
 	}
 	defer runtime.Close()
-	if runtime.Origin() != "https://one.example.com" || runtime.CompanyIdentityResolver() == nil || len(runtime.RouterOptions()) != 2 {
+	if runtime.Origin() != "https://one.example.com" || runtime.CompanyIdentityResolver() == nil || runtime.RouterOption() == nil {
 		t.Fatalf("LoadEnv() returned an incomplete runtime")
 	}
 	if runtime.transport.Proxy != nil || runtime.transport.TLSClientConfig.MinVersion != tls.VersionTLS13 {

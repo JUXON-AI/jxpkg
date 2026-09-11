@@ -24,14 +24,12 @@ const (
 	providerShutdownTimeout = 3 * time.Second
 )
 
-// ProviderOptions supplies authoritative domain adapters without transferring their ownership.
-type ProviderOptions struct {
-	// Sessions validates registered client binding, session state and current membership.
-	Sessions auth.SessionResolver
-	// Identities resolves Account-owned company identity snapshots.
-	Identities auth.CompanyIdentityResolver
-	// ServiceHostAllowed validates each caller binding against the startup client registry.
-	ServiceHostAllowed func(service, host string) bool
+// ProviderAuthority is the single Account-owned authority consumed by the mTLS
+// Provider. Provider does not own or close the implementation.
+type ProviderAuthority interface {
+	auth.SessionResolver
+	auth.CompanyIdentityResolver
+	ServiceHostAllowed(service, host string) bool
 }
 
 // providerCaller is a frozen workload registration read from deployment configuration.
@@ -47,22 +45,21 @@ type providerCaller struct {
 // Provider owns the internal TLS listener and exposes the two fixed resolver paths.
 // Its authority adapters remain application-owned and are never closed by Provider.
 type Provider struct {
-	sessions   auth.SessionResolver
-	identities auth.CompanyIdentityResolver
-	callers    map[string]providerCaller
-	listener   net.Listener
-	server     *http.Server
-	serveOnce  sync.Once
-	serveErr   error
-	closeOnce  sync.Once
-	closeErr   error
+	authority ProviderAuthority
+	callers   map[string]providerCaller
+	listener  net.Listener
+	server    *http.Server
+	serveOnce sync.Once
+	serveErr  error
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // LoadProviderEnv validates <PREFIX>_SESSION_RESOLVER_* and binds the internal listener.
 // ACCOUNT preserves the existing Account environment contract. Call Serve after startup
 // is complete, and register Close with the application's shutdown lifecycle.
-func LoadProviderEnv(getenv func(string) string, prefix string, options ProviderOptions) (*Provider, error) {
-	if getenv == nil || !validPrefix(prefix) || options.Sessions == nil || options.Identities == nil || options.ServiceHostAllowed == nil {
+func LoadProviderEnv(getenv func(string) string, prefix string, authority ProviderAuthority) (*Provider, error) {
+	if getenv == nil || !validPrefix(prefix) || authority == nil {
 		return nil, auth.ErrAuthBackendUnavailable
 	}
 	for _, suffix := range []string{"ADDR", "CALLERS_JSON", "TLS_CERT_FILE", "TLS_KEY_FILE", "CLIENT_CA_FILE"} {
@@ -71,7 +68,7 @@ func LoadProviderEnv(getenv func(string) string, prefix string, options Provider
 			return nil, fmt.Errorf("%w: required %s", auth.ErrAuthBackendUnavailable, key)
 		}
 	}
-	callers, err := decodeProviderCallers(getenv(env(prefix, "SESSION_RESOLVER_CALLERS_JSON")), options.ServiceHostAllowed)
+	callers, err := decodeProviderCallers(getenv(env(prefix, "SESSION_RESOLVER_CALLERS_JSON")), authority.ServiceHostAllowed)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid resolver callers", auth.ErrAuthBackendUnavailable)
 	}
@@ -95,17 +92,14 @@ func LoadProviderEnv(getenv func(string) string, prefix string, options Provider
 	if err != nil {
 		return nil, fmt.Errorf("%w: resolver listener could not bind", auth.ErrAuthBackendUnavailable)
 	}
-	provider := &Provider{sessions: options.Sessions, identities: options.Identities, callers: callers}
+	provider := &Provider{authority: authority, callers: callers}
 	provider.listener = tls.NewListener(listener, &tls.Config{
 		MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate},
 		ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: clientCAs, NextProtos: []string{"http/1.1"},
 	})
-	provider.server = &http.Server{Handler: provider, ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 3 * time.Second, WriteTimeout: 3 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 * 1024}
+	provider.server = &http.Server{Handler: http.HandlerFunc(provider.serveHTTP), ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 3 * time.Second, WriteTimeout: 3 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 * 1024}
 	return provider, nil
 }
-
-// Addr returns the bound listener address, including its assigned ephemeral port.
-func (provider *Provider) Addr() net.Addr { return provider.listener.Addr() }
 
 // Serve handles internal requests until Close; repeated calls share the same result.
 func (provider *Provider) Serve() error {

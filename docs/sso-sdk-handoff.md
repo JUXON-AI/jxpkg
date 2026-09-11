@@ -17,10 +17,10 @@
 
 ## 目标与已实现边界
 
-业务应用只加载一次 SDK、挂载 RouterOptions、声明受保护方法。
+业务应用只加载一次 SDK、挂载一个 RouterOption、声明受保护方法。
 JXOne 不再实现证书加载、resolver transport、Session/CSRF/CORS 构造、
 LoginStatus 字段校验或 MembershipEpoch 复制。项目权限仍归 JXOne。
-Account 的同一个 Authority 被本地 BrowserSecurity 和网络 Provider 调用；
+Account 的同一个 Authority 被本地浏览器会话边界和网络 Provider 调用；
 Provider 拥有内部 HTTP/mTLS 与 listener 生命周期，Account 继续拥有密码、
 OIDC、Session 写入/撤销和公司身份权威数据。没有引入第三方 OIDC/IdP 替换、
 新外部依赖、通用认证框架或新的部署拓扑。
@@ -35,21 +35,18 @@ OIDC、Session 写入/撤销和公司身份权威数据。没有引入第三方 
 ```go
 sso.LoadEnv(getenv func(string) string, prefix string) (*sso.Runtime, error)
 (*sso.Runtime).Origin() string
-(*sso.Runtime).RouterOptions() []server.RouterOption
+(*sso.Runtime).RouterOption() server.RouterOption
 (*sso.Runtime).CompanyIdentityResolver() auth.CompanyIdentityResolver
-(*sso.Runtime).Close()
-middleware.NewBrowserSecurity(middleware.BrowserSessionOptions) (*middleware.BrowserSecurity, error)
-server.WithBrowserSecurity(*middleware.BrowserSecurity) server.RouterOption
-sso.LoadProviderEnv(getenv func(string) string, prefix string, options sso.ProviderOptions) (*sso.Provider, error)
+(*sso.Runtime).Close() error
+server.NewBrowserSessionOption(middleware.BrowserSessionOptions) (server.RouterOption, error)
+sso.LoadProviderEnv(getenv func(string) string, prefix string, authority sso.ProviderAuthority) (*sso.Provider, error)
 (*sso.Provider).Serve() error
 (*sso.Provider).Close() error
-(*sso.Provider).Addr() net.Addr
-(*sso.Provider).ServeHTTP(http.ResponseWriter, *http.Request)
 ```
 
-`ProviderOptions` 只有 `Sessions auth.SessionResolver`、
-`Identities auth.CompanyIdentityResolver` 和
-`ServiceHostAllowed func(service, host string) bool`。
+`ProviderAuthority` 组合 `auth.SessionResolver`、
+`auth.CompanyIdentityResolver` 和
+`ServiceHostAllowed(service, host string) bool`，Account 只传入唯一 authority。
 caller 配置仍从环境读取，并在启动时对 Account registry 逐项检查。
 wire DTO 与严格 DecodeSessionResolveRequest/DecodeCompanyIdentityResolveRequest
 归属 `apis/runtime/auth`，客户端与 Provider 使用同一份类型。
@@ -59,7 +56,7 @@ wire DTO 与严格 DecodeSessionResolveRequest/DecodeCompanyIdentityResolveReque
 CSRF、业务 handler。默认路径校验 BrowserSession 模式及非零
 UserID/UIN/CompanyID/MembershipEpoch，然后发布上下文。显式 callback 仍执行，
 拒绝结果仍生效。Bearer 没有 callback 时仍拒绝，不能借此次重构放宽。
-兼容入口 WithBrowserSession 保留，内部复用 BrowserSecurity。
+Browser Session 的应用接入不再暴露 middleware pair、getter 或兼容入口。
 
 ## JXOne 文件与方法清单
 
@@ -72,7 +69,7 @@ UserID/UIN/CompanyID/MembershipEpoch，然后发布上下文。显式 callback �
 | apps/juxonone/internal/mds/loginstatus.go | 整删 InjectLoginStatus | SDK 自动发布 epoch，拒绝非法 principal |
 | apps/juxonone/internal/mds/loginstatus_test.go | 删除迁走的重复测试 | SDK 增加默认 injector 正向、非法主体和 CSRF 回归 |
 | apps/juxonone/internal/apis/api.go | 删除 mds import 和 AuthInject 注册 | 所有 PRequireBrowserSession 保留，Worker 路由保持独立 |
-| apps/juxonone/cmd/main.go | LoadEnv 替代 transport/options/CORS 构造；defer Close；Origin 传给 initCollaboration；注入 CompanyIdentityResolver；展开 RouterOptions 并追加 graceful timeout | 启动错误脱敏；migration-only 仍先退出；初始化及资源关闭顺序保持 |
+| apps/juxonone/cmd/main.go | LoadEnv 替代 transport/options/CORS 构造；defer Close；Origin 传给 initCollaboration；注入 CompanyIdentityResolver；挂载单个 RouterOption | 启动错误脱敏；migration-only 仍先退出；初始化及资源关闭顺序保持 |
 | apps/juxonone/session_resolve_integration_test.go | 删除应用 injector import/注册；保留真实解析客户端与身份上下文断言 | 无 injector 时 user_id/uin/company_id/epoch 正确；失败不进 handler |
 | go.mod、go.sum、vendor | 固定官方 SDK commit 的 pseudo-version；使用 go mod vendor 生成 | 禁止个人 fork、手改 vendor、提交本地 replace/go.work |
 | README.md、docs/sso/README.md | 指向此次 SDK 接入说明，旧 AuthInject 图示标明历史基线 | 新服务按文档不需要应用 injector |
@@ -84,8 +81,8 @@ runtime, err := sso.LoadEnv(os.Getenv, "JUXONONE")
 // 启动边界处理 err，失败时终止；随后 defer runtime.Close()。
 devproject.ConfigureCompanyIdentityResolver(runtime.CompanyIdentityResolver())
 // initCollaboration(ctx, runtime.Origin()) 继续使用同一权威 Origin。
-router := server.NewRouter("/v1/",
-    append(runtime.RouterOptions(), server.WithGracefulShutdownTimeout(httpDrainTimeout))...)
+router := server.NewRouter("/v1/", runtime.RouterOption(),
+    server.WithGracefulShutdownTimeout(httpDrainTimeout))
 // 原有 workerAuth 参数及业务路由注册继续使用。
 ```
 
@@ -101,7 +98,7 @@ ConfigureCompanyIdentityResolver 是公司目录注入点，不是另一个浏�
 | 文件 | 实施动作 | 验收 |
 |---|---|---|
 | cmd/main.go | newAccountRouter 组装公共路由；devssoauthority.New 创建唯一 authority；LoadProviderEnv 创建内部服务 | AddCloser(provider) 在启动时注册；Serve 错误触发 lifecycle.Exit；trusted proxies 与 upstream 生命周期保留 |
-| cmd/sso.go | newAccountRouter 统一 NewBrowserSecurity、CORS、WithBrowserSecurity 和 OAuth/upstream 路由注册 | 生产与测试调用同一组装函数，构造失败在监听前返回 |
+| cmd/sso.go | newAccountRouter 统一 NewBrowserSessionOption、CORS 和 OAuth/upstream 路由注册 | 生产与测试调用同一组装函数，构造失败在监听前返回 |
 | cmd/sso.go | 删除无调用方的 buildProductionSSOHandlers、buildProductionSSOHandler | 全仓搜索无引用；不新增别名或转发 wrapper |
 | cmd/sso.go、cmd/sso_test.go | assembleAccountRouter 移入 _test.go，只构造测试依赖并调用生产 newAccountRouter | 不把测试依赖工厂编进生产 |
 | cmd/session_resolver.go | 整删 142 行及旧构造/timeout 测试 | Account 不再自行加载 resolver TLS、创建 server/listener 或实现关闭逻辑 |
@@ -113,7 +110,7 @@ ConfigureCompanyIdentityResolver 是公司目录注入点，不是另一个浏�
 | services/svroauth/handler.go | BrowserSessionOptions(host, authority) 接受同一个 auth.SessionResolver | 保留登记 Client/Cookie/Origin 装配，不在方法内部 new resolver |
 | internal/apis/api.go | 保留显式认证边界与 Account AuthInject | 三个旧身份接口仍需 Bearer 数据库复核 |
 | go.mod、go.sum | 与 JXOne 固定同一官方 SDK commit；Account 基线不跟踪 vendor，不引入整套 vendor | 发布后统一升级正式版本，不用浮动分支 |
-| README.md | 说明公共 BrowserSecurity 与 Account 专属能力边界 | 不声称 SDK 取代完整 IdP |
+| README.md | 说明公共 Browser Session 边界与 Account 专属能力边界 | 不声称 SDK 取代完整 IdP |
 
 最终调用方式见 [runtime-sso.md](runtime-sso.md#account-issuer-integration)。核心接线如下，
 各个构造返回的 error 都必须在启动边界处理后再继续：
@@ -121,10 +118,7 @@ ConfigureCompanyIdentityResolver 是公司目录注入点，不是另一个浏�
 ```go
 authority, err := devssoauthority.New(sessions, oauthHandler, devcompany.NewService(db))
 if err != nil { return err }
-provider, err := sso.LoadProviderEnv(os.Getenv, "ACCOUNT", sso.ProviderOptions{
-    Sessions: authority, Identities: authority,
-    ServiceHostAllowed: authority.ServiceHostAllowed,
-})
+provider, err := sso.LoadProviderEnv(os.Getenv, "ACCOUNT", authority)
 if err != nil { return err }
 lifecycle.Std().AddCloser(provider)
 defer provider.Close()

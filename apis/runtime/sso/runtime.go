@@ -16,7 +16,6 @@ import (
 	"github.com/JUXON-AI/jxpkg/apis/runtime/auth"
 	"github.com/JUXON-AI/jxpkg/apis/runtime/middleware"
 	"github.com/JUXON-AI/jxpkg/apis/runtime/server"
-	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -29,11 +28,10 @@ const (
 // It owns the mTLS client and exposes only the already-validated dependencies
 // that a business service needs to construct its router and authorize members.
 type Runtime struct {
-	origin    string
-	resolver  *auth.InternalSessionResolverClient
-	security  *middleware.BrowserSecurity
-	cors      gin.HandlerFunc
-	transport *http.Transport
+	origin       string
+	resolver     *auth.InternalSessionResolverClient
+	routerOption server.RouterOption
+	transport    *http.Transport
 }
 
 // LoadEnv creates a Runtime from the established <PREFIX>_* deployment keys.
@@ -92,7 +90,7 @@ func LoadEnv(getenv func(string) string, prefix string) (*Runtime, error) {
 		ExternalOrigin: origin,
 		Resolver:       resolver,
 	}
-	security, err := middleware.NewBrowserSecurity(session)
+	browserSession, err := server.NewBrowserSessionOption(session)
 	if err != nil {
 		transport.CloseIdleConnections()
 		return nil, fmt.Errorf("%w: invalid browser cookie, hosts or external origin", auth.ErrAuthBackendUnavailable)
@@ -102,7 +100,11 @@ func LoadEnv(getenv func(string) string, prefix string) (*Runtime, error) {
 		transport.CloseIdleConnections()
 		return nil, fmt.Errorf("%w: invalid CORS external origin", auth.ErrAuthBackendUnavailable)
 	}
-	return &Runtime{origin: origin, resolver: resolver, security: security, cors: cors, transport: transport}, nil
+	routerOption := func(router *server.Router) {
+		server.WithCORS(cors)(router)
+		browserSession(router)
+	}
+	return &Runtime{origin: origin, resolver: resolver, routerOption: routerOption, transport: transport}, nil
 }
 
 // Origin returns the normalized external origin after LoadEnv has validated it.
@@ -110,12 +112,10 @@ func (runtime *Runtime) Origin() string {
 	return runtime.origin
 }
 
-// RouterOptions returns the complete browser-session security stack.
-func (runtime *Runtime) RouterOptions() []server.RouterOption {
-	return []server.RouterOption{
-		server.WithCORS(runtime.cors),
-		server.WithBrowserSecurity(runtime.security),
-	}
+// RouterOption returns the complete, already validated browser authentication
+// boundary. Applications install it once and never assemble SSO middleware.
+func (runtime *Runtime) RouterOption() server.RouterOption {
+	return runtime.routerOption
 }
 
 // CompanyIdentityResolver returns Account's authoritative, mTLS-protected
@@ -126,10 +126,11 @@ func (runtime *Runtime) CompanyIdentityResolver() auth.CompanyIdentityResolver {
 }
 
 // Close releases idle resolver connections during application shutdown.
-func (runtime *Runtime) Close() {
+func (runtime *Runtime) Close() error {
 	if runtime.transport != nil {
 		runtime.transport.CloseIdleConnections()
 	}
+	return nil
 }
 
 func env(prefix, key string) string { return prefix + "_" + key }

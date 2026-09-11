@@ -29,7 +29,7 @@ callback 残留身份和 nil Claim 边界已修复；无新增阻塞项。
 
 ## 可读性与方法规范
 
-- Runtime 负责环境配置、transport 和连接生命周期；BrowserSecurity 负责共享会话/CSRF 组件。两者有必要的跨包边界，不添加近义 wrapper。
+- Runtime 负责环境配置、transport 和连接生命周期；单个 RouterOption 封装共享 Session/CSRF 顺序，不向应用暴露 middleware pair 或近义 wrapper。
 - Account 的 newAccountRouter 同时服务生产与测试，负责构造验证和路由装配；测试工厂仅存在于 _test.go。
 - JXOne 不恢复私有 SSO 方法来让旧测试通过；测试迁到公共契约。
 - Account 的 OIDC、Session writer、注册表和数据库复核保留在所属服务；业务 RBAC 不移动到 SDK。

@@ -105,7 +105,7 @@ func TestBearerLoginStatusMiddlewareRejectsInvalidModes(t *testing.T) {
 	}
 }
 
-func TestAuthMiddleWareUsesUniformStatus(t *testing.T) {
+func TestRequireAuthenticatedUsesUniformStatus(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tests := []struct {
 		// name 表示测试用例名称。
@@ -130,7 +130,7 @@ func TestAuthMiddleWareUsesUniformStatus(t *testing.T) {
 			if test.status != nil {
 				ctx.Set(constants.CtxKeyLoginStatus, test.status)
 			}
-			AuthMiddleWare(ctx)
+			RequireAuthenticated(ctx)
 			if recorder.Code != test.wantStatus {
 				t.Fatalf("status = %d, want %d", recorder.Code, test.wantStatus)
 			}

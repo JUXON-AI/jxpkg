@@ -171,7 +171,7 @@ func TestNewBrowserSessionMiddleware(t *testing.T) {
 					t.Fatalf("resolve request = %#v", resolver.request)
 				}
 				resolver.principal.CSRFTokenHash[0] ^= 0xff
-				if status.SessionMetadata().CSRFTokenHash()[0] != csrfHash[0] {
+				if !status.MatchesBrowserCSRF("csrf-token") {
 					t.Fatal("LoginStatus metadata changed after resolver principal mutation")
 				}
 			}

@@ -18,14 +18,15 @@ defer runtime.Close()
 devproject.ConfigureCompanyIdentityResolver(runtime.CompanyIdentityResolver())
 router := server.NewRouter(
     "/v1/",
-    append(runtime.RouterOptions(), server.WithGracefulShutdownTimeout(drain))...,
+    runtime.RouterOption(),
+    server.WithGracefulShutdownTimeout(drain),
 )
 ```
 
-`Runtime.RouterOptions()` installs the public `middleware.BrowserSecurity`
-pair. Its Session resolver always executes before the CSRF validator, and
-`server.PRequireBrowserSession` then uses that same pair for every protected
-browser route.
+`Runtime.RouterOption()` is the application's only Browser Session installation
+point. It carries the validated CORS, Session resolver and CSRF middleware as one
+router option. `server.PRequireBrowserSession` is the only browser-authenticated
+route registrar and fixes their execution order.
 
 The application still registers its own routes and makes its own domain
 authorization decisions. For example, a project service must still decide
@@ -44,11 +45,7 @@ authority, err := devssoauthority.New(sessions, oauthHandler, devcompany.NewServ
 if err != nil {
     return err
 }
-provider, err := sso.LoadProviderEnv(os.Getenv, "ACCOUNT", sso.ProviderOptions{
-    Sessions:           authority,
-    Identities:         authority,
-    ServiceHostAllowed: authority.ServiceHostAllowed,
-})
+provider, err := sso.LoadProviderEnv(os.Getenv, "ACCOUNT", authority)
 if err != nil {
     return err
 }
@@ -78,17 +75,15 @@ if err := router.Run(publicListener); err != nil {
 lifecycle.Std().WaitExit()
 ```
 
-`newAccountRouter` is Account's composition root. It creates
-`middleware.NewBrowserSecurity(browserSession)`, then passes
-`server.WithBrowserSecurity(security)` and the registered-host CORS middleware to
-`server.NewRouter`, and mounts Account routes. `BrowserSessionOptions` selects
-the client/cookie/origin but no longer constructs another resolver.
+`newAccountRouter` is Account's composition root. It converts the Account-owned
+client/cookie/origin policy into one `server.NewBrowserSessionOption`, installs
+the registered-host CORS middleware, and mounts Account routes. Account does not
+assemble or reorder the Session and CSRF handlers.
 
 `LoadProviderEnv` validates configuration and binds its TLS listener. `Serve()`
 and `Close() error` are concurrently idempotent; `Close` drains for three seconds
-and then forces remaining connections closed. `Addr()` exposes the bound address,
-and `ServeHTTP` permits direct handler testing while still requiring verified TLS
-identity. Provider implements `io.Closer` and never closes Account's stores.
+and then forces remaining connections closed. Provider implements `io.Closer`
+and never closes Account's stores.
 `AddCloser(provider)` is required: `lifecycle.WaitExit` terminates through
 `os.Exit`, which does not run deferred functions.
 
@@ -149,8 +144,8 @@ Consumer. Account no longer defines duplicate wire DTOs or protocol handlers.
   failures deny browser access instead of falling back to a cached identity.
 ## Browser identity publication
 
-`PRequireBrowserSession` and `GRequireBrowserSession` publish `UserID`, `UIN`,
-`CompanyID` and `MembershipEpoch` after successful session resolution. Applications
+`PRequireBrowserSession` publishes `UserID`, `UIN`, `CompanyID` and
+`MembershipEpoch` after successful session resolution. Applications
 do not need an `AuthInject` callback merely to validate or copy those fields.
 An explicitly registered callback still runs and can reject the principal;
 Bearer routes continue to require their application validator. Do not remove an

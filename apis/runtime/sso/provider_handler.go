@@ -12,13 +12,13 @@ import (
 	"github.com/JUXON-AI/jxpkg/apis/runtime/auth"
 )
 
-// ServeHTTP implements the fixed internal resolver protocol without opening a listener.
-// Even direct callers must supply a verified TLS peer; forwarded identity is rejected.
-func (provider *Provider) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+// serveHTTP implements the fixed internal resolver protocol. Even callers that
+// bypass the listener in tests must supply a verified TLS peer.
+func (provider *Provider) serveHTTP(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.Header().Set("Pragma", "no-cache")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
-	if provider == nil || provider.sessions == nil || provider.identities == nil {
+	if provider == nil || provider.authority == nil {
 		providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
 		return
 	}
@@ -89,7 +89,7 @@ func (provider *Provider) resolveSession(writer http.ResponseWriter, request *ht
 		providerError(writer, http.StatusUnauthorized, "invalid_session")
 		return
 	}
-	principal, err := provider.sessions.Resolve(request.Context(), input)
+	principal, err := provider.authority.Resolve(request.Context(), input)
 	if err != nil {
 		if errors.Is(err, auth.ErrInvalidCredential) || errors.Is(err, auth.ErrInvalidPrincipal) {
 			providerError(writer, http.StatusUnauthorized, "invalid_session")
@@ -125,7 +125,7 @@ func (provider *Provider) resolveIdentities(writer http.ResponseWriter, request 
 		providerError(writer, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	identities, err := provider.identities.ResolveCompanyIdentities(request.Context(), input)
+	identities, err := provider.authority.ResolveCompanyIdentities(request.Context(), input)
 	if err != nil {
 		if errors.Is(err, auth.ErrCompanyIdentityNotFound) {
 			providerError(writer, http.StatusNotFound, "not_found")

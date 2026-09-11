@@ -111,7 +111,7 @@ func TestBrowserInjectorRejectsInvalidPrincipalWithoutCallback(t *testing.T) {
 			Claim: &auth.UserClaims{UserID: 1, UIN: 2, CompanyID: 3},
 		}
 		ctx.Set(constants.CtxKeyLoginStatus, ls)
-		new(authInjector).injectBrowser(ctx)
+		new(authInjector).publishBrowserPrincipal(ctx)
 		if ls.State != auth.StateFailed || !errors.Is(ls.Err, auth.ErrInvalidPrincipal) || ctx.GetUint(constants.CtxKeyUserID) != 0 {
 			t.Fatal("invalid browser principal was accepted")
 		}
@@ -129,7 +129,7 @@ func TestBrowserInjectorRevalidatesCallbackResult(t *testing.T) {
 			Claim: &auth.UserClaims{UserID: 1, UIN: 2, CompanyID: 3, MembershipEpoch: 4}}
 		ctx.Set(constants.CtxKeyLoginStatus, ls)
 		ai := &authInjector{injector: func(_ *gin.Context, status *auth.LoginStatus) error { mutate(status); return nil }}
-		ai.injectBrowser(ctx)
+		ai.publishBrowserPrincipal(ctx)
 		if ls.State != auth.StateFailed || ctx.GetUint(constants.CtxKeyUserID) != 0 || ctx.GetUint64(constants.CtxKeyMembershipEpoch) != 0 {
 			t.Fatal("invalid callback result published an identity")
 		}

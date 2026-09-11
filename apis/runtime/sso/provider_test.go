@@ -43,15 +43,33 @@ func (resolve providerIdentityFunc) ResolveCompanyIdentities(ctx context.Context
 	return resolve(ctx, input)
 }
 
-func providerTestOptions() ProviderOptions {
-	return ProviderOptions{
-		Sessions: providerSessionFunc(func(_ context.Context, input auth.SessionResolveRequest) (*auth.SessionPrincipal, error) {
+type providerTestAuthority struct {
+	sessions   providerSessionFunc
+	identities providerIdentityFunc
+	allowed    func(service, host string) bool
+}
+
+func (authority *providerTestAuthority) Resolve(ctx context.Context, input auth.SessionResolveRequest) (*auth.SessionPrincipal, error) {
+	return authority.sessions(ctx, input)
+}
+
+func (authority *providerTestAuthority) ResolveCompanyIdentities(ctx context.Context, input auth.CompanyIdentityResolveRequest) ([]auth.CompanyIdentity, error) {
+	return authority.identities(ctx, input)
+}
+
+func (authority *providerTestAuthority) ServiceHostAllowed(service, host string) bool {
+	return authority.allowed(service, host)
+}
+
+func newProviderTestAuthority() *providerTestAuthority {
+	return &providerTestAuthority{
+		sessions: providerSessionFunc(func(_ context.Context, input auth.SessionResolveRequest) (*auth.SessionPrincipal, error) {
 			return &auth.SessionPrincipal{Claims: auth.UserClaims{UserID: 1, UIN: 2, CompanyID: 3, MembershipEpoch: 4}, Host: input.Host, ClientID: "browser", SessionVersion: 1, AuthenticatedAt: 1, IdleExpiresAt: 2, AbsoluteExpiresAt: 3, CSRFTokenHash: make([]byte, 32)}, nil
 		}),
-		Identities: providerIdentityFunc(func(context.Context, auth.CompanyIdentityResolveRequest) ([]auth.CompanyIdentity, error) {
+		identities: providerIdentityFunc(func(context.Context, auth.CompanyIdentityResolveRequest) ([]auth.CompanyIdentity, error) {
 			return []auth.CompanyIdentity{{UIN: 2, MembershipEpoch: 4, Status: auth.CompanyIdentityStatusActive}}, nil
 		}),
-		ServiceHostAllowed: func(service, host string) bool { return service == "app" && host == "app.example.com" },
+		allowed: func(service, host string) bool { return service == "app" && host == "app.example.com" },
 	}
 }
 
@@ -59,13 +77,13 @@ func providerTestBody() string {
 	return `{"host":"app.example.com","service":"app","session_id":"` + base64.RawURLEncoding.EncodeToString(make([]byte, 32)) + `"}`
 }
 
-func providerTestHandler(t *testing.T, options ProviderOptions) *Provider {
+func providerTestHandler(t *testing.T, authority *providerTestAuthority) *Provider {
 	t.Helper()
-	callers, err := decodeProviderCallers(`[{"principal":"spiffe://test/app","service":"app","allowed_hosts":["app.example.com"]}]`, options.ServiceHostAllowed)
+	callers, err := decodeProviderCallers(`[{"principal":"spiffe://test/app","service":"app","allowed_hosts":["app.example.com"]}]`, authority.ServiceHostAllowed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Provider{sessions: options.Sessions, identities: options.Identities, callers: callers}
+	return &Provider{authority: authority, callers: callers}
 }
 
 func providerTestRequest(body string) *http.Request {
@@ -77,7 +95,7 @@ func providerTestRequest(body string) *http.Request {
 }
 
 func TestProviderHandlerRejectsAmbiguousSessionRequests(t *testing.T) {
-	provider := providerTestHandler(t, providerTestOptions())
+	provider := providerTestHandler(t, newProviderTestAuthority())
 	valid := providerTestBody()
 	for _, test := range []struct {
 		name, body string
@@ -114,7 +132,7 @@ func TestProviderHandlerRejectsAmbiguousSessionRequests(t *testing.T) {
 				test.mutate(request)
 			}
 			writer := httptest.NewRecorder()
-			provider.ServeHTTP(writer, request)
+			provider.serveHTTP(writer, request)
 			if writer.Code != test.status {
 				t.Fatalf("status=%d want=%d", writer.Code, test.status)
 			}
@@ -140,9 +158,9 @@ func TestProviderValidatesAuthorityResponses(t *testing.T) {
 		{"invalid_csrf", func(p *auth.SessionPrincipal) { p.CSRFTokenHash = nil }, nil, 503},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			options := providerTestOptions()
-			original := options.Sessions
-			options.Sessions = providerSessionFunc(func(ctx context.Context, request auth.SessionResolveRequest) (*auth.SessionPrincipal, error) {
+			authority := newProviderTestAuthority()
+			original := authority.sessions
+			authority.sessions = providerSessionFunc(func(ctx context.Context, request auth.SessionResolveRequest) (*auth.SessionPrincipal, error) {
 				principal, _ := original.Resolve(ctx, request)
 				if test.mutate != nil {
 					test.mutate(principal)
@@ -150,7 +168,7 @@ func TestProviderValidatesAuthorityResponses(t *testing.T) {
 				return principal, test.err
 			})
 			writer := httptest.NewRecorder()
-			providerTestHandler(t, options).ServeHTTP(writer, providerTestRequest(providerTestBody()))
+			providerTestHandler(t, authority).serveHTTP(writer, providerTestRequest(providerTestBody()))
 			if writer.Code != test.status {
 				t.Fatalf("status=%d want=%d", writer.Code, test.status)
 			}
@@ -182,14 +200,14 @@ func TestProviderDirectoryProtocol(t *testing.T) {
 		{"outage", valid, nil, auth.ErrAuthBackendUnavailable, 503},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			options := providerTestOptions()
-			options.Identities = providerIdentityFunc(func(context.Context, auth.CompanyIdentityResolveRequest) ([]auth.CompanyIdentity, error) {
+			authority := newProviderTestAuthority()
+			authority.identities = providerIdentityFunc(func(context.Context, auth.CompanyIdentityResolveRequest) ([]auth.CompanyIdentity, error) {
 				return test.rows, test.err
 			})
 			request := providerTestRequest(test.body)
 			request.URL.Path = auth.InternalCompanyIdentityResolvePath
 			writer := httptest.NewRecorder()
-			providerTestHandler(t, options).ServeHTTP(writer, request)
+			providerTestHandler(t, authority).serveHTTP(writer, request)
 			if writer.Code != test.status {
 				t.Fatalf("status=%d want=%d", writer.Code, test.status)
 			}
@@ -267,13 +285,13 @@ func providerTestTrust(t *testing.T) (map[string]string, *tls.Config, *tls.Confi
 func TestProviderRealTLSAndLifecycle(t *testing.T) {
 	values, trusted, unknown := providerTestTrust(t)
 	var resolved atomic.Int32
-	options := providerTestOptions()
-	original := options.Sessions
-	options.Sessions = providerSessionFunc(func(ctx context.Context, input auth.SessionResolveRequest) (*auth.SessionPrincipal, error) {
+	authority := newProviderTestAuthority()
+	original := authority.sessions
+	authority.sessions = providerSessionFunc(func(ctx context.Context, input auth.SessionResolveRequest) (*auth.SessionPrincipal, error) {
 		resolved.Add(1)
-		return original.Resolve(ctx, input)
+		return original(ctx, input)
 	})
-	provider, err := LoadProviderEnv(func(key string) string { return values[key] }, "ACCOUNT", options)
+	provider, err := LoadProviderEnv(func(key string) string { return values[key] }, "ACCOUNT", authority)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +313,7 @@ func TestProviderRealTLSAndLifecycle(t *testing.T) {
 			transport := &http.Transport{TLSClientConfig: test.config}
 			defer transport.CloseIdleConnections()
 			client := &http.Client{Transport: transport, Timeout: time.Second}
-			response, err := client.Post("https://"+provider.Addr().String()+auth.InternalSessionResolvePath, "application/json", strings.NewReader(providerTestBody()))
+			response, err := client.Post("https://"+provider.listener.Addr().String()+auth.InternalSessionResolvePath, "application/json", strings.NewReader(providerTestBody()))
 			if test.status == 0 {
 				if err == nil {
 					response.Body.Close()
@@ -343,7 +361,7 @@ func TestProviderRealTLSAndLifecycle(t *testing.T) {
 
 func TestProviderCloseBeforeServe(t *testing.T) {
 	values, _, _ := providerTestTrust(t)
-	provider, err := LoadProviderEnv(func(key string) string { return values[key] }, "ACCOUNT", providerTestOptions())
+	provider, err := LoadProviderEnv(func(key string) string { return values[key] }, "ACCOUNT", newProviderTestAuthority())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +371,7 @@ func TestProviderCloseBeforeServe(t *testing.T) {
 	if err := provider.Serve(); err != nil {
 		t.Fatal(err)
 	}
-	listener, err := net.Listen("tcp", provider.Addr().String())
+	listener, err := net.Listen("tcp", provider.listener.Addr().String())
 	if err != nil {
 		t.Fatal("Close leaked listener")
 	}
@@ -368,20 +386,20 @@ func TestProviderCloseDrainsAndBoundsActiveRequests(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			values, trusted, _ := providerTestTrust(t)
-			options := providerTestOptions()
-			original := options.Sessions
+			authority := newProviderTestAuthority()
+			original := authority.sessions
 			entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
-			options.Sessions = providerSessionFunc(func(ctx context.Context, input auth.SessionResolveRequest) (*auth.SessionPrincipal, error) {
+			authority.sessions = providerSessionFunc(func(ctx context.Context, input auth.SessionResolveRequest) (*auth.SessionPrincipal, error) {
 				defer close(finished)
 				close(entered)
 				select {
 				case <-release:
-					return original.Resolve(ctx, input)
+					return original(ctx, input)
 				case <-ctx.Done():
 					return nil, ctx.Err()
 				}
 			})
-			provider, err := LoadProviderEnv(func(key string) string { return values[key] }, "ACCOUNT", options)
+			provider, err := LoadProviderEnv(func(key string) string { return values[key] }, "ACCOUNT", authority)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -393,7 +411,7 @@ func TestProviderCloseDrainsAndBoundsActiveRequests(t *testing.T) {
 			client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
 			requested := make(chan error, 1)
 			go func() {
-				response, err := client.Post("https://"+provider.Addr().String()+auth.InternalSessionResolvePath, "application/json", strings.NewReader(providerTestBody()))
+				response, err := client.Post("https://"+provider.listener.Addr().String()+auth.InternalSessionResolvePath, "application/json", strings.NewReader(providerTestBody()))
 				if response != nil {
 					_, _ = io.Copy(io.Discard, response.Body)
 					response.Body.Close()
@@ -455,14 +473,14 @@ func TestProviderInvalidConfiguration(t *testing.T) {
 					return ""
 				}
 				return values[name]
-			}, "ACCOUNT", providerTestOptions())
+			}, "ACCOUNT", newProviderTestAuthority())
 			if !errors.Is(err, auth.ErrAuthBackendUnavailable) {
 				t.Fatalf("error=%v", err)
 			}
 		})
 	}
 	for _, raw := range []string{`[]`, `null`, `[{}]`, `[{"principal":"spiffe://test/app","service":"app","service":"app","allowed_hosts":["app.example.com"]}]`, values["ACCOUNT_SESSION_RESOLVER_CALLERS_JSON"] + ` []`, strings.Replace(values["ACCOUNT_SESSION_RESOLVER_CALLERS_JSON"], "app.example.com", "other.example.com", 1)} {
-		if _, err := decodeProviderCallers(raw, providerTestOptions().ServiceHostAllowed); err == nil {
+		if _, err := decodeProviderCallers(raw, newProviderTestAuthority().ServiceHostAllowed); err == nil {
 			t.Fatal("invalid caller configuration accepted")
 		}
 	}
@@ -471,7 +489,7 @@ func TestProviderInvalidConfiguration(t *testing.T) {
 // Keep the shared wire DTO directly decodable by standard library users.
 func TestProviderResponseUsesSharedWireDTO(t *testing.T) {
 	writer := httptest.NewRecorder()
-	providerTestHandler(t, providerTestOptions()).ServeHTTP(writer, providerTestRequest(providerTestBody()))
+	providerTestHandler(t, newProviderTestAuthority()).serveHTTP(writer, providerTestRequest(providerTestBody()))
 	var response auth.SessionResolveResponse
 	if err := json.NewDecoder(bytes.NewReader(writer.Body.Bytes())).Decode(&response); err != nil {
 		t.Fatal(err)

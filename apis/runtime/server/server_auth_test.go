@@ -90,7 +90,6 @@ func TestRouterBrowserSessionChainOrderAndFailures(t *testing.T) {
 		{name: "SDK default identity injection", withoutInjector: true, method: http.MethodPost, cookie: "__Host-app_session=sid", origin: "http://app.example.com", csrf: "csrf-token", wantStatus: http.StatusNoContent, wantOrder: []string{"resolve", "handler"}, browserMethod: (*Router).PRequireBrowserSession},
 		{name: "SDK default still enforces csrf", withoutInjector: true, method: http.MethodPost, cookie: "__Host-app_session=sid", origin: "http://app.example.com", csrf: "wrong", wantStatus: http.StatusUnauthorized, wantOrder: []string{"resolve"}, browserMethod: (*Router).PRequireBrowserSession},
 		{name: "post fixed order", method: http.MethodPost, cookie: "__Host-app_session=sid", origin: "http://app.example.com", csrf: "csrf-token", wantStatus: http.StatusNoContent, wantOrder: []string{"resolve", "inject", "handler"}, browserMethod: (*Router).PRequireBrowserSession},
-		{name: "get skips csrf", method: http.MethodGet, cookie: "__Host-app_session=sid", wantStatus: http.StatusNoContent, wantOrder: []string{"resolve", "inject", "handler"}, browserMethod: (*Router).GRequireBrowserSession},
 		{name: "resolver precedes injector", method: http.MethodPost, cookie: "__Host-app_session=sid", origin: "http://app.example.com", csrf: "csrf-token", resolverErr: context.DeadlineExceeded, wantStatus: http.StatusServiceUnavailable, wantOrder: []string{"resolve"}, browserMethod: (*Router).PRequireBrowserSession},
 		{name: "injector precedes auth requirement", method: http.MethodPost, cookie: "__Host-app_session=sid", origin: "http://app.example.com", csrf: "csrf-token", injectorErr: auth.ErrAuthBackendUnavailable, wantStatus: http.StatusServiceUnavailable, wantOrder: []string{"resolve", "inject"}, browserMethod: (*Router).PRequireBrowserSession},
 		{name: "csrf precedes handler", method: http.MethodPost, cookie: "__Host-app_session=sid", origin: "http://app.example.com", csrf: "wrong", wantStatus: http.StatusUnauthorized, wantOrder: []string{"resolve", "inject"}, browserMethod: (*Router).PRequireBrowserSession},
@@ -101,7 +100,7 @@ func TestRouterBrowserSessionChainOrderAndFailures(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			order := make([]string, 0, 3)
 			resolver := &orderedSessionResolver{order: &order, principal: validPrincipal(), err: test.resolverErr}
-			router := NewRouter("/v1/", WithBrowserSession(middleware.BrowserSessionOptions{
+			router := NewRouter("/v1/", mustBrowserSessionOption(t, middleware.BrowserSessionOptions{
 				Service:      "service",
 				CookieName:   "__Host-app_session",
 				AllowedHosts: map[string]struct{}{"app.example.com": {}},
@@ -153,7 +152,7 @@ func TestRouterPublicRouteStaysAnonymous(t *testing.T) {
 		resolverCalls++
 		return nil, errors.New("must not resolve")
 	})
-	router := NewRouter("/v1/", WithBrowserSession(middleware.BrowserSessionOptions{
+	router := NewRouter("/v1/", mustBrowserSessionOption(t, middleware.BrowserSessionOptions{
 		Service:      "service",
 		CookieName:   "__Host-app_session",
 		AllowedHosts: map[string]struct{}{"app.example.com": {}},
@@ -184,7 +183,7 @@ func TestRouterPublicRouteStaysAnonymous(t *testing.T) {
 	}
 }
 
-func TestRouterBearerAndLegacyRoutesRejectConfiguredSessionCookie(t *testing.T) {
+func TestRouterBearerRoutesRejectConfiguredSessionCookie(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	registrations := []struct {
 		// name 表示测试用例名称。
@@ -193,13 +192,13 @@ func TestRouterBearerAndLegacyRoutesRejectConfiguredSessionCookie(t *testing.T) 
 		// register 表示待测试的路由注册方法。
 		register func(*Router, string, ...interface{})
 	}{
-		{name: "explicit bearer", register: (*Router).GRequireBearer},
-		{name: "legacy login", register: (*Router).GRequireLogin},
+		{name: "explicit bearer", register: (*Router).PRequireBearer},
+		{name: "legacy login", register: (*Router).PRequireLogin},
 	}
 
 	for _, registration := range registrations {
 		t.Run(registration.name, func(t *testing.T) {
-			router := NewRouter("/v1/", WithBrowserSession(middleware.BrowserSessionOptions{
+			router := NewRouter("/v1/", mustBrowserSessionOption(t, middleware.BrowserSessionOptions{
 				Service:      "service",
 				CookieName:   "__Host-app_session",
 				AllowedHosts: map[string]struct{}{"app.example.com": {}},
@@ -218,7 +217,7 @@ func TestRouterBearerAndLegacyRoutesRejectConfiguredSessionCookie(t *testing.T) 
 			}))
 
 			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(http.MethodGet, "http://app.example.com/v1/protected", nil)
+			request := httptest.NewRequest(http.MethodPost, "http://app.example.com/v1/protected", nil)
 			request.Header.Set("Cookie", "__Host-app_session=sid")
 			request.Header.Set("Authorization", "Bearer token")
 			router.GinEngine().ServeHTTP(recorder, request)
@@ -236,12 +235,12 @@ func TestRouterBearerAndLegacyRoutesRejectConfiguredSessionCookie(t *testing.T) 
 func TestRouterBrowserRouteWithoutConfigurationReturnsUnavailable(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := NewRouter("/v1/")
-	router.GRequireBrowserSession("protected", gin.HandlerFunc(func(ctx *gin.Context) {
+	router.PRequireBrowserSession("protected", gin.HandlerFunc(func(ctx *gin.Context) {
 		t.Fatal("protected handler was called")
 	}))
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "http://app.example.com/v1/protected", nil)
+	request := httptest.NewRequest(http.MethodPost, "http://app.example.com/v1/protected", nil)
 	router.GinEngine().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
@@ -280,23 +279,10 @@ func TestRouterWithCORSWiresConfiguredOrigin(t *testing.T) {
 	}
 }
 
-func TestWithBrowserSecurityFailsClosedWhenMissing(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	called := false
-	router := NewRouter("/v1/", WithBrowserSecurity(nil))
-	router.PRequireBrowserSession("resource", func(ctx *gin.Context) {
-		called = true
-		ctx.Status(http.StatusNoContent)
-	})
-
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "https://app.example.com/v1/resource", nil)
-	router.GinEngine().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
-	}
-	if called {
-		t.Fatal("protected handler was called without browser security")
+func TestNewBrowserSessionOptionRejectsInvalidConfiguration(t *testing.T) {
+	option, err := NewBrowserSessionOption(middleware.BrowserSessionOptions{})
+	if !errors.Is(err, auth.ErrAuthBackendUnavailable) || option != nil {
+		t.Fatalf("NewBrowserSessionOption() = %#v, %v", option, err)
 	}
 }
 
@@ -401,7 +387,7 @@ func TestRouterCORSAndCSRFShareAuthoritativeExternalOrigin(t *testing.T) {
 			})
 			router := NewRouter("/v1/",
 				WithCORS(corsMiddleware),
-				WithBrowserSession(middleware.BrowserSessionOptions{
+				mustBrowserSessionOption(t, middleware.BrowserSessionOptions{
 					Service:    "service",
 					CookieName: "__Host-app_session",
 					AllowedHosts: map[string]struct{}{
@@ -440,4 +426,13 @@ func TestRouterCORSAndCSRFShareAuthoritativeExternalOrigin(t *testing.T) {
 			}
 		})
 	}
+}
+
+func mustBrowserSessionOption(t *testing.T, options middleware.BrowserSessionOptions) RouterOption {
+	t.Helper()
+	option, err := NewBrowserSessionOption(options)
+	if err != nil {
+		t.Fatalf("NewBrowserSessionOption() error = %v", err)
+	}
+	return option
 }

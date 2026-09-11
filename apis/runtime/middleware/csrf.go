@@ -1,8 +1,6 @@
 package middleware
 
 import (
-	"crypto/sha256"
-	"crypto/subtle"
 	"strings"
 
 	"github.com/JUXON-AI/jxpkg/apis/constants"
@@ -45,8 +43,7 @@ func NewCSRFMiddleware(options BrowserSessionOptions) (gin.HandlerFunc, error) {
 			abortAuth(ctx, ls)
 			return
 		}
-		digest := sha256.Sum256([]byte(tokens[0]))
-		if subtle.ConstantTimeCompare(digest[:], ls.SessionMetadata().CSRFTokenHash()) != 1 {
+		if !ls.MatchesBrowserCSRF(tokens[0]) {
 			failLoginStatus(ls, auth.ErrInvalidCredential)
 			abortAuth(ctx, ls)
 			return

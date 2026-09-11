@@ -32,14 +32,30 @@ func MembershipEpoch(ctx *gin.Context) uint64 {
 	return ctx.GetUint64(constants.CtxKeyMembershipEpoch)
 }
 
-// LoginStatus 从 Gin Context 中获取当前请求的登录状态。
-func LoginStatus(ctx *gin.Context) *auth.LoginStatus {
+// LoginWay returns the authentication method carried by the verified request
+// principal. Unknown means no complete principal was established.
+func LoginWay(ctx *gin.Context) auth.LoginWay {
+	ls := loginStatus(ctx)
+	if ls.State != auth.StateSucc || ls.Claim == nil {
+		return auth.LoginWayUnknown
+	}
+	return ls.Claim.LoginWay
+}
+
+func loginStatus(ctx *gin.Context) *auth.LoginStatus {
 	val, _ := ctx.Get(constants.CtxKeyLoginStatus)
 	ls, ok := val.(*auth.LoginStatus)
 	if !ok {
 		return &auth.LoginStatus{}
 	}
 	return ls
+}
+
+// BrowserSessionExpiresAt returns the effective expiry of the verified browser
+// Session on the current request. Zero means the route did not establish a
+// complete browser Session and callers must fail closed.
+func BrowserSessionExpiresAt(ctx *gin.Context) int64 {
+	return loginStatus(ctx).BrowserSessionExpiresAt()
 }
 
 // RequestID 从 Gin Context 中获取请求 ID。

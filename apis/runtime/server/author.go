@@ -20,9 +20,9 @@ func (ai *authInjector) Inject(ctx *gin.Context) {
 	ai.inject(ctx, false)
 }
 
-// injectBrowser accepts an already resolved browser principal without requiring
-// an application callback. Explicit callbacks still run and may reject it.
-func (ai *authInjector) injectBrowser(ctx *gin.Context) {
+// publishBrowserPrincipal accepts an already resolved browser principal without
+// requiring application glue. Explicit callbacks still run and may reject it.
+func (ai *authInjector) publishBrowserPrincipal(ctx *gin.Context) {
 	ai.inject(ctx, true)
 }
 

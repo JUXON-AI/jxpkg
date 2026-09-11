@@ -1,6 +1,10 @@
 package auth
 
-import "context"
+import (
+	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+)
 
 // SessionResolveRequest 描述业务服务解析浏览器会话所需的最小输入。
 type SessionResolveRequest struct {
@@ -46,20 +50,8 @@ type SessionResolver interface {
 	Resolve(context.Context, SessionResolveRequest) (*SessionPrincipal, error)
 }
 
-// SessionMetadata 保存只能在构造时写入的浏览器会话安全元数据。
-type SessionMetadata struct {
-	// host 保存会话绑定的规范 Host。
-	host string
-
-	// clientID 保存创建会话的客户端标识。
-	clientID string
-
-	// sessionVersion 保存会话撤销与轮换版本。
-	sessionVersion uint64
-
-	// authenticatedAt 保存中央认证完成的 Unix 时间戳。
-	authenticatedAt int64
-
+// sessionMetadata contains only values consumed after principal validation.
+type sessionMetadata struct {
 	// idleExpiresAt 保存会话空闲过期的 Unix 时间戳。
 	idleExpiresAt int64
 
@@ -70,38 +62,33 @@ type SessionMetadata struct {
 	csrfTokenHash []byte
 }
 
-// NewSessionMetadata 从已验证的主体快照创建不可变会话元数据。
-func NewSessionMetadata(principal SessionPrincipal) SessionMetadata {
-	return SessionMetadata{
-		host:              principal.Host,
-		clientID:          principal.ClientID,
-		sessionVersion:    principal.SessionVersion,
-		authenticatedAt:   principal.AuthenticatedAt,
+func newSessionMetadata(principal SessionPrincipal) sessionMetadata {
+	return sessionMetadata{
 		idleExpiresAt:     principal.IdleExpiresAt,
 		absoluteExpiresAt: principal.AbsoluteExpiresAt,
 		csrfTokenHash:     append([]byte(nil), principal.CSRFTokenHash...),
 	}
 }
 
-// Host 返回会话绑定的规范 Host。
-func (metadata SessionMetadata) Host() string { return metadata.host }
+// BrowserSessionExpiresAt returns the earlier idle or absolute expiry for a
+// complete browser principal. Zero means the status is not usable.
+func (ls *LoginStatus) BrowserSessionExpiresAt() int64 {
+	if ls == nil || ls.State != StateSucc || ls.AuthMode != AuthModeBrowserSession || ls.Claim == nil ||
+		ls.session.idleExpiresAt <= 0 || ls.session.absoluteExpiresAt <= 0 {
+		return 0
+	}
+	if ls.session.absoluteExpiresAt < ls.session.idleExpiresAt {
+		return ls.session.absoluteExpiresAt
+	}
+	return ls.session.idleExpiresAt
+}
 
-// ClientID 返回创建会话的客户端标识。
-func (metadata SessionMetadata) ClientID() string { return metadata.clientID }
-
-// SessionVersion 返回会话撤销与轮换版本。
-func (metadata SessionMetadata) SessionVersion() uint64 { return metadata.sessionVersion }
-
-// AuthenticatedAt 返回中央认证完成的 Unix 时间戳。
-func (metadata SessionMetadata) AuthenticatedAt() int64 { return metadata.authenticatedAt }
-
-// IdleExpiresAt 返回会话空闲过期的 Unix 时间戳。
-func (metadata SessionMetadata) IdleExpiresAt() int64 { return metadata.idleExpiresAt }
-
-// AbsoluteExpiresAt 返回会话绝对过期的 Unix 时间戳。
-func (metadata SessionMetadata) AbsoluteExpiresAt() int64 { return metadata.absoluteExpiresAt }
-
-// CSRFTokenHash 返回会话绑定 CSRF 摘要的副本。
-func (metadata SessionMetadata) CSRFTokenHash() []byte {
-	return append([]byte(nil), metadata.csrfTokenHash...)
+// MatchesBrowserCSRF reports whether token belongs to the verified browser
+// Session. The raw token and stored digest are compared in constant time.
+func (ls *LoginStatus) MatchesBrowserCSRF(token string) bool {
+	if ls == nil || ls.State != StateSucc || ls.AuthMode != AuthModeBrowserSession || token == "" || len(ls.session.csrfTokenHash) != sha256.Size {
+		return false
+	}
+	digest := sha256.Sum256([]byte(token))
+	return subtle.ConstantTimeCompare(digest[:], ls.session.csrfTokenHash) == 1
 }
