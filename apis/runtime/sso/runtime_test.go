@@ -8,11 +8,15 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/JUXON-AI/jxpkg/apis/runtime/auth"
 )
 
 func TestValidPrefix(t *testing.T) {
@@ -77,6 +81,23 @@ func TestLoadEnvBuildsImmutableBrowserSecurityRuntime(t *testing.T) {
 	if runtime.transport.Proxy != nil || runtime.transport.TLSClientConfig.MinVersion != tls.VersionTLS13 {
 		t.Fatal("resolver transport does not enforce its proxy and TLS policy")
 	}
+	for key, value := range values {
+		t.Run("missing "+key, func(t *testing.T) {
+			values[key] = ""
+			defer func() { values[key] = value }()
+			got, err := LoadEnv(func(name string) string { return values[name] }, "JUXONONE")
+			if got != nil || !errors.Is(err, auth.ErrAuthBackendUnavailable) || !strings.Contains(err.Error(), key) {
+				t.Fatal("missing deployment key did not fail closed with a safe diagnostic")
+			}
+		})
+	}
+	t.Run("certificate failure is redacted", func(t *testing.T) {
+		values["JUXONONE_SESSION_RESOLVER_TLS_KEY_FILE"] = "/private/DO_NOT_LOG/key.pem"
+		got, err := LoadEnv(func(name string) string { return values[name] }, "JUXONONE")
+		if got != nil || !errors.Is(err, auth.ErrAuthBackendUnavailable) || strings.Contains(err.Error(), "DO_NOT_LOG") {
+			t.Fatal("certificate failure was not redacted")
+		}
+	})
 }
 
 // writeTestTLSFiles creates a matching client certificate, private key, and CA bundle.

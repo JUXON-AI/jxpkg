@@ -43,10 +43,17 @@ func LoadEnv(getenv func(string) string, prefix string) (*Runtime, error) {
 	if getenv == nil || !validPrefix(prefix) {
 		return nil, auth.ErrAuthBackendUnavailable
 	}
+	// Validate required deployment keys before opening certificate files. Error
+	// messages identify only the key or stage, never configured values.
+	for _, key := range []string{"BROWSER_ALLOWED_HOSTS_JSON", "BROWSER_SESSION_COOKIE", "EXTERNAL_ORIGIN", "SESSION_RESOLVER_ENDPOINT", "SESSION_RESOLVER_SERVICE", "SESSION_RESOLVER_TLS_CERT_FILE", "SESSION_RESOLVER_TLS_KEY_FILE", "SESSION_RESOLVER_CA_FILE"} {
+		if strings.TrimSpace(getenv(env(prefix, key))) == "" {
+			return nil, fmt.Errorf("%w: required %s", auth.ErrAuthBackendUnavailable, env(prefix, key))
+		}
+	}
 
 	hosts, err := decodeHosts(getenv(env(prefix, "BROWSER_ALLOWED_HOSTS_JSON")))
 	if err != nil {
-		return nil, auth.ErrAuthBackendUnavailable
+		return nil, fmt.Errorf("%w: invalid %s", auth.ErrAuthBackendUnavailable, env(prefix, "BROWSER_ALLOWED_HOSTS_JSON"))
 	}
 	transport, err := newResolverTransport(
 		getenv(env(prefix, "SESSION_RESOLVER_TLS_CERT_FILE")),
@@ -54,7 +61,7 @@ func LoadEnv(getenv func(string) string, prefix string) (*Runtime, error) {
 		getenv(env(prefix, "SESSION_RESOLVER_CA_FILE")),
 	)
 	if err != nil {
-		return nil, auth.ErrAuthBackendUnavailable
+		return nil, err
 	}
 
 	resolver, err := auth.NewInternalSessionResolverClient(auth.SessionResolverClientOptions{
@@ -65,7 +72,7 @@ func LoadEnv(getenv func(string) string, prefix string) (*Runtime, error) {
 	})
 	if err != nil {
 		transport.CloseIdleConnections()
-		return nil, err
+		return nil, fmt.Errorf("%w: invalid resolver endpoint or service", auth.ErrAuthBackendUnavailable)
 	}
 
 	origin := getenv(env(prefix, "EXTERNAL_ORIGIN"))
@@ -79,12 +86,12 @@ func LoadEnv(getenv func(string) string, prefix string) (*Runtime, error) {
 	security, err := middleware.NewBrowserSecurity(session)
 	if err != nil {
 		transport.CloseIdleConnections()
-		return nil, err
+		return nil, fmt.Errorf("%w: invalid browser cookie, hosts or external origin", auth.ErrAuthBackendUnavailable)
 	}
 	cors, err := middleware.NewCORS(middleware.CORSOptions{ExternalOrigin: origin})
 	if err != nil {
 		transport.CloseIdleConnections()
-		return nil, err
+		return nil, fmt.Errorf("%w: invalid CORS external origin", auth.ErrAuthBackendUnavailable)
 	}
 	return &Runtime{origin: origin, resolver: resolver, security: security, cors: cors, transport: transport}, nil
 }
@@ -153,15 +160,15 @@ func decodeHosts(raw string) (map[string]struct{}, error) {
 func newResolverTransport(certFile, keyFile, caFile string) (*http.Transport, error) {
 	certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: resolver client certificate/key could not be loaded", auth.ErrAuthBackendUnavailable)
 	}
 	serverCAPEM, err := os.ReadFile(caFile)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: resolver CA file could not be read", auth.ErrAuthBackendUnavailable)
 	}
 	rootCAs := x509.NewCertPool()
 	if !rootCAs.AppendCertsFromPEM(serverCAPEM) {
-		return nil, fmt.Errorf("invalid resolver CA")
+		return nil, fmt.Errorf("%w: invalid resolver CA bundle", auth.ErrAuthBackendUnavailable)
 	}
 	return &http.Transport{
 		Proxy:                 nil,

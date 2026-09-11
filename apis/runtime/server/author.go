@@ -58,7 +58,16 @@ func (ai *authInjector) inject(ctx *gin.Context, browser bool) {
 		return
 	}
 	if ai.injector != nil {
-		if err := ai.injector(ctx, ls); err != nil {
+		err := ai.injector(ctx, ls)
+		if err == nil && (ls.State != auth.StateSucc || ls.Claim == nil || ls.Claim.UserID == 0 || ls.Claim.UIN == 0 || ls.Claim.CompanyID == 0 ||
+			(browser && (ls.AuthMode != auth.AuthModeBrowserSession || ls.Claim.MembershipEpoch == 0))) {
+			err = auth.ErrInvalidPrincipal
+		}
+		if err != nil {
+			ctx.Set(constants.CtxKeyUserID, uint(0))
+			ctx.Set(constants.CtxKeyUIN, uint(0))
+			ctx.Set(constants.CtxKeyCompanyID, uint(0))
+			ctx.Set(constants.CtxKeyMembershipEpoch, uint64(0))
 			ls.State = auth.StateFailed
 			ls.Err = err
 			ctx.Set(constants.CtxKeyLoginStatus, ls)

@@ -57,6 +57,10 @@ func TestAuthInjectorDoesNotPublishUserIDAfterFailure(t *testing.T) {
 	wantErr := errors.New("user lookup failed")
 
 	ai := &authInjector{injector: func(_ *gin.Context, _ *auth.LoginStatus) error {
+		ctx.Set(constants.CtxKeyUserID, uint(42))
+		ctx.Set(constants.CtxKeyUIN, uint(84))
+		ctx.Set(constants.CtxKeyCompanyID, uint(126))
+		ctx.Set(constants.CtxKeyMembershipEpoch, uint64(7))
 		return wantErr
 	}}
 	ai.Inject(ctx)
@@ -110,6 +114,24 @@ func TestBrowserInjectorRejectsInvalidPrincipalWithoutCallback(t *testing.T) {
 		new(authInjector).injectBrowser(ctx)
 		if ls.State != auth.StateFailed || !errors.Is(ls.Err, auth.ErrInvalidPrincipal) || ctx.GetUint(constants.CtxKeyUserID) != 0 {
 			t.Fatal("invalid browser principal was accepted")
+		}
+	}
+}
+
+func TestBrowserInjectorRevalidatesCallbackResult(t *testing.T) {
+	for _, mutate := range []func(*auth.LoginStatus){
+		func(ls *auth.LoginStatus) { ls.Claim = nil },
+		func(ls *auth.LoginStatus) { ls.State = auth.StateFailed },
+		func(ls *auth.LoginStatus) { ls.Claim.MembershipEpoch = 0 },
+	} {
+		ctx, _ := gin.CreateTestContext(nil)
+		ls := &auth.LoginStatus{State: auth.StateSucc, AuthMode: auth.AuthModeBrowserSession,
+			Claim: &auth.UserClaims{UserID: 1, UIN: 2, CompanyID: 3, MembershipEpoch: 4}}
+		ctx.Set(constants.CtxKeyLoginStatus, ls)
+		ai := &authInjector{injector: func(_ *gin.Context, status *auth.LoginStatus) error { mutate(status); return nil }}
+		ai.injectBrowser(ctx)
+		if ls.State != auth.StateFailed || ctx.GetUint(constants.CtxKeyUserID) != 0 || ctx.GetUint64(constants.CtxKeyMembershipEpoch) != 0 {
+			t.Fatal("invalid callback result published an identity")
 		}
 	}
 }
