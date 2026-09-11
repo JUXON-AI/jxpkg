@@ -58,8 +58,6 @@ func TestRouterBrowserSessionChainOrderAndFailures(t *testing.T) {
 		// name 表示测试用例名称。
 		name string
 
-		withoutInjector bool
-
 		// method 表示请求 Method。
 		method string
 
@@ -75,9 +73,6 @@ func TestRouterBrowserSessionChainOrderAndFailures(t *testing.T) {
 		// resolverErr 表示会话解析器返回的错误。
 		resolverErr error
 
-		// injectorErr 表示业务身份注入器返回的错误。
-		injectorErr error
-
 		// wantStatus 表示期望的 HTTP 状态码。
 		wantStatus int
 
@@ -87,13 +82,10 @@ func TestRouterBrowserSessionChainOrderAndFailures(t *testing.T) {
 		// browserMethod 表示待测试的浏览器路由注册方法。
 		browserMethod func(*Router, string, ...interface{})
 	}{
-		{name: "SDK default identity injection", withoutInjector: true, method: http.MethodPost, cookie: "__Host-app_session=sid", origin: "http://app.example.com", csrf: "csrf-token", wantStatus: http.StatusNoContent, wantOrder: []string{"resolve", "handler"}, browserMethod: (*Router).PRequireBrowserSession},
-		{name: "SDK default still enforces csrf", withoutInjector: true, method: http.MethodPost, cookie: "__Host-app_session=sid", origin: "http://app.example.com", csrf: "wrong", wantStatus: http.StatusUnauthorized, wantOrder: []string{"resolve"}, browserMethod: (*Router).PRequireBrowserSession},
-		{name: "post fixed order", method: http.MethodPost, cookie: "__Host-app_session=sid", origin: "http://app.example.com", csrf: "csrf-token", wantStatus: http.StatusNoContent, wantOrder: []string{"resolve", "inject", "handler"}, browserMethod: (*Router).PRequireBrowserSession},
-		{name: "resolver precedes injector", method: http.MethodPost, cookie: "__Host-app_session=sid", origin: "http://app.example.com", csrf: "csrf-token", resolverErr: context.DeadlineExceeded, wantStatus: http.StatusServiceUnavailable, wantOrder: []string{"resolve"}, browserMethod: (*Router).PRequireBrowserSession},
-		{name: "injector precedes auth requirement", method: http.MethodPost, cookie: "__Host-app_session=sid", origin: "http://app.example.com", csrf: "csrf-token", injectorErr: auth.ErrAuthBackendUnavailable, wantStatus: http.StatusServiceUnavailable, wantOrder: []string{"resolve", "inject"}, browserMethod: (*Router).PRequireBrowserSession},
-		{name: "csrf precedes handler", method: http.MethodPost, cookie: "__Host-app_session=sid", origin: "http://app.example.com", csrf: "wrong", wantStatus: http.StatusUnauthorized, wantOrder: []string{"resolve", "inject"}, browserMethod: (*Router).PRequireBrowserSession},
-		{name: "missing cookie precedes injector", method: http.MethodPost, origin: "http://app.example.com", csrf: "csrf-token", wantStatus: http.StatusUnauthorized, wantOrder: []string{}, browserMethod: (*Router).PRequireBrowserSession},
+		{name: "verified identity is published", method: http.MethodPost, cookie: "__Host-app_session=sid", origin: "http://app.example.com", csrf: "csrf-token", wantStatus: http.StatusNoContent, wantOrder: []string{"resolve", "handler"}, browserMethod: (*Router).PRequireBrowserSession},
+		{name: "csrf remains mandatory", method: http.MethodPost, cookie: "__Host-app_session=sid", origin: "http://app.example.com", csrf: "wrong", wantStatus: http.StatusUnauthorized, wantOrder: []string{"resolve"}, browserMethod: (*Router).PRequireBrowserSession},
+		{name: "resolver failure precedes publication", method: http.MethodPost, cookie: "__Host-app_session=sid", origin: "http://app.example.com", csrf: "csrf-token", resolverErr: context.DeadlineExceeded, wantStatus: http.StatusServiceUnavailable, wantOrder: []string{"resolve"}, browserMethod: (*Router).PRequireBrowserSession},
+		{name: "missing cookie precedes publication", method: http.MethodPost, origin: "http://app.example.com", csrf: "csrf-token", wantStatus: http.StatusUnauthorized, wantOrder: []string{}, browserMethod: (*Router).PRequireBrowserSession},
 	}
 
 	for _, test := range tests {
@@ -107,12 +99,10 @@ func TestRouterBrowserSessionChainOrderAndFailures(t *testing.T) {
 				Resolver:     resolver,
 				Clock:        func() time.Time { return now },
 			}))
-			if !test.withoutInjector {
-				router.AuthInject(func(_ *gin.Context, _ *auth.LoginStatus) error {
-					order = append(order, "inject")
-					return test.injectorErr
-				})
-			}
+			router.AuthInject(func(_ *gin.Context, _ *auth.LoginStatus) error {
+				order = append(order, "inject")
+				return auth.ErrAuthBackendUnavailable
+			})
 			test.browserMethod(router, "resource", gin.HandlerFunc(func(ctx *gin.Context) {
 				if ctx.GetUint64(constants.CtxKeyMembershipEpoch) != 4 {
 					t.Fatal("browser identity epoch was not published")
