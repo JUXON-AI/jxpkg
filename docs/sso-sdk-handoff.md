@@ -11,7 +11,7 @@
 | 仓库 | 当前实现提交 | 作用 |
 | --- | --- | --- |
 | JXpKG | `a6a5c01063b44486ebf53b6c697f4cc536e22f52` | Consumer/Provider、路由边界、Browser 与 Bearer 隔离 |
-| Account | `0e7520f8ace0ca889cfceef9d092612254dfd28f` | 唯一 Authority、Provider 接入、legacy Bearer 弃用标记 |
+| Account | `9562836f64f833079482f92c496f177fb2102768` | 唯一 Authority、Provider 接入、legacy Bearer 弃用标记 |
 | JXOne | `ee63b80a5213b3f3efcf626304e69d8dc791e143` | 最小 Consumer 接入、业务 accessor 使用 |
 
 Account 与 JXOne 固定官方 pseudo-version
@@ -181,12 +181,12 @@ namespace `jxone` 当前 candidate：
 
 | Workload | Source | Immutable image |
 | --- | --- | --- |
-| Account API | `0e7520f8ace0` | `account-api@sha256:9aa7e9cdf23dcac59ce6d248d76d9efe2e8d5d4cf051722ba950f96be0115126` |
+| Account API | `9562836f64f8` | `account-api@sha256:de2a150319937842f428623073ea7c4124c97d3456b31f9aa1afa38168a221bc` |
 | JXOne API | `ee63b80a5213` | `juxonone-api@sha256:6a98e56230ef9110cfa5718cfa223a414e3c869ee5cf9c3e7012b4605d29b787` |
 | JXWorker | `ee63b80a5213` | `jxworker-api@sha256:64f5eb93e0725eb522999aa425b0d5ddff3f032312e0ea1ab6d8cc3e629a0dbb` |
 
 镜像 buildinfo 均包含 JXpKG pseudo-version `...-a6a5c01063b4`。Account 还直接记录
-`vcs.revision=0e7520f...` 和 `vcs.modified=false`；JXOne Docker build context 排除
+`vcs.revision=9562836...` 和 `vcs.modified=false`；JXOne Docker build context 排除
 `.git`，因此其 app binary 无 VCS setting，源码身份由 CI checkout SHA 与不可变 tag/digest
 共同固定。
 

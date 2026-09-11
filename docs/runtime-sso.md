@@ -164,7 +164,7 @@ Bearer is a separate workload credential and is not deprecated.
 ## Validation and handoff
 
 The implementation commit is SDK `a6a5c01063b44486ebf53b6c697f4cc536e22f52`;
-Account adoption is `0e7520f8ace0ca889cfceef9d092612254dfd28f` and
+Account adoption is `9562836f64f833079482f92c496f177fb2102768` and
 JXOne adoption is `ee63b80a5213b3f3efcf626304e69d8dc791e143`. Both
 applications require the official pseudo-version
 `v0.0.14-0.20260911065453-a6a5c01063b4`; neither source tree nor final image
