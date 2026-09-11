@@ -113,7 +113,7 @@ The endpoint, client certificate, and service value are mutually enforced by
 Account's mTLS caller registration. Do not put their contents in application
 configuration files or source control; mount them from a Kubernetes Secret.
 
-For `LoadProviderEnv(getenv, "ACCOUNT", options)`, the existing Provider keys are:
+For `LoadProviderEnv(getenv, "ACCOUNT", authority)`, the existing Provider keys are:
 
 | Key | Purpose |
 | --- | --- |
@@ -147,27 +147,38 @@ Consumer. Account no longer defines duplicate wire DTOs or protocol handlers.
 `PRequireBrowserSession` publishes `UserID`, `UIN`, `CompanyID` and
 `MembershipEpoch` after successful session resolution. Applications
 do not need an `AuthInject` callback merely to validate or copy those fields.
-An explicitly registered callback still runs and can reject the principal;
-Bearer routes continue to require their application validator. Do not remove an
-Account validator while legacy Bearer routes still depend on database revalidation.
+The Browser Session path never executes `AuthInject`: the Account authority has
+already resolved and revalidated the opaque Session. `AuthInject` is exclusively
+the validator hook for `PRequireBearer` compatibility routes.
+
+Account currently keeps three user-Bearer actions as an explicitly deprecated
+compatibility boundary: `account.ListMyIdentities`, `account.SwitchIdentity` and
+`account.GetCurrentIdentity`. The current JXOne and Account browser frontends use
+`/auth/session`, `/auth/identities`, `/auth/switch-identity` and `/auth/logout`
+instead. Do not add new user-Bearer consumers. Removal is safe only after `jxx`,
+the pre-Browser-Session `jxone-web/main`, and any external clients have migrated.
+Worker Bearer is a separate workload credential and is not deprecated.
 
 ## Validation and handoff
 
-The Provider implementation is in SDK commit `c318a8267d4f`; Account adoption is
-`419726b7538d`; JXOne dependency adoption is
-`1d8212c03808c0e5506e958e2bee13e7df870ffe`. Consumer method signatures
-are unchanged. Local SDK tests/vet and full-repository
-`go test -race -count=1 ./...` passed. Account full tests,
-race, vet, module verification, build and real SIGTERM subprocess tests passed.
+The implementation commit is SDK `a6a5c01063b44486ebf53b6c697f4cc536e22f52`;
+Account adoption is `0e7520f8ace0ca889cfceef9d092612254dfd28f` and
+JXOne adoption is `ee63b80a5213b3f3efcf626304e69d8dc791e143`. Both
+applications require the official pseudo-version
+`v0.0.14-0.20260911065453-a6a5c01063b4`; neither source tree nor final image
+uses a `replace` directive.
 
-The subsequent JX-LAN Redis+mTLS integration run passed all scenarios. Isolated
-image builds used a temporary `replace => ./.local-jxpkg` pointing at the exact
-SDK source above; buildinfo in all three images confirmed that source. This
-replacement is a build-local override, not a committed application dependency.
-Rollout in namespace `jxone` completed with Account/JXOne/Worker ready replicas
-1/1/2, four Pods and zero restarts. Module smoke passed 20/20. Live resolver
-checks returned 401 for an invalid session with a valid mTLS client, and TLS
-rejected a client without a certificate. Login bootstrap returned 302 and a
+Local SDK tests/vet/build and runtime race tests passed. Account full tests,
+race, vet, module verification, build and SIGTERM subprocess tests passed.
+JXOne module verification, build and SSO/router/startup/collaboration race tests
+passed. Its full suite still has the unchanged, unrelated
+`devcanvas/TestWorkshopNumbersRetainValidation` numeric-boundary failure.
+
+The final JX-LAN rollout in namespace `jxone` used immutable image digests and
+completed with Account/JXOne/Worker ready replicas 1/1/2, four current Pods and
+zero restarts. Module smoke passed 22/22. Live resolver checks returned 401 for
+an invalid Session with a valid mTLS client and rejected a client without a
+certificate at TLS. Login bootstrap with `return_to=/` returned 302 and a
 callback without required input returned 400.
 
 These are deployment and protocol checks, not a credentialed browser login
