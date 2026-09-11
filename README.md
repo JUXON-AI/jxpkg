@@ -45,6 +45,7 @@ make clean       # 清理 Go test cache
 | [`apis/runtime/auth`](#apisruntimeauth) | Bearer/JWT、Browser Session 的共享认证契约 | `TokenSigner`、`TokenVerifier`、`SessionResolver` |
 | [`apis/runtime/middleware`](#apisruntimemiddleware) | Gin 日志、恢复、CORS、认证与 CSRF 中间件 | `NewCORS`、`NewBrowserSessionHandlers` |
 | [`apis/runtime/server`](#apisruntimeserver) | Gin Router、路由认证模式和 API 适配 | `NewRouter`、`API` |
+| [`apis/runtime/sso`](docs/sso-integration-guide.md) | 开箱即用的 Consumer runtime 与 Account Provider | `LoadEnv`、`LoadProviderEnv` |
 | [`config`](#config) | YAML 和环境变量配置加载 | `LoadCoreConfigFromEnv` |
 | [`dbtools`](#dbtools) | GORM 多数据库连接和显式迁移 | `InitDBConn`、`DoInitModels` |
 | [`dbtools/redispool`](#dbtoolsredispool) | Redis 连接及常用数据结构操作 | `InitRedisWithConfig`、`Redis` |
@@ -203,6 +204,10 @@ defer runtime.Close()
 router := server.NewRouter("/v1/", runtime.RouterOption())
 router.PRequireBrowserSession("profile.Get", server.API(handler.GetProfile))
 ```
+
+新业务域名和新 JXX 服务请按 [JX SSO 接入指南](docs/sso-integration-guide.md)
+同步完成 Go 依赖、Account Client/caller 注册、Ingress、公网 TLS、resolver mTLS、
+Secret 与验证。不要只复制上面的 Go 代码后跳过部署身份和证书配置。
 
 Browser Session 路由顺序固定为 Session Resolve、业务身份注入、登录要求、unsafe-method CSRF、业务 handler。`API` 支持请求体大小限制；不要在 handler 中重新实现认证分支。
 

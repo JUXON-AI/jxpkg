@@ -10,12 +10,12 @@
 
 | 仓库 | 当前实现提交 | 作用 |
 | --- | --- | --- |
-| JXpKG | `a6a5c01063b44486ebf53b6c697f4cc536e22f52` | Consumer/Provider、路由边界、Browser 与 Bearer 隔离 |
-| Account | `9562836f64f833079482f92c496f177fb2102768` | 唯一 Authority、Provider 接入、legacy Bearer 弃用标记 |
-| JXOne | `ee63b80a5213b3f3efcf626304e69d8dc791e143` | 最小 Consumer 接入、业务 accessor 使用 |
+| JXpKG | `fbaafaea11397b928d0344b7e837478ec94dbcfc` | Consumer/Provider、路由边界、Browser 与 Bearer 隔离 |
+| Account | `5ab5fa012f425152f44aa4a4c8fa34f6ed70597e` | 唯一 Authority、Provider 接入、legacy Bearer 弃用标记 |
+| JXOne | `3c5b7c6538b12002152c49826de6aebf7b2f95a6` | 最小 Consumer 接入、业务 accessor 使用 |
 
 Account 与 JXOne 固定官方 pseudo-version
-`github.com/JUXON-AI/jxpkg v0.0.14-0.20260911065453-a6a5c01063b4`。
+`github.com/JUXON-AI/jxpkg v0.0.14-0.20260911085822-fbaafaea1139`。
 源码、`go.mod`、`vendor` 和最终镜像均无 `replace`。
 
 ## 最终边界
@@ -114,9 +114,9 @@ an unbound Host still requires normal Bearer authentication without selecting a
 browser cookie. Browser routes reject unbound Hosts. `LoadEnv` validates the configured origin belongs to the explicit
 allowlist, then derives each allowlisted Host's own origin using that scheme, for
 both CORS and CSRF. Low-level empty origins retain direct TLS/Host derivation.
-Account T2 must build all registry bindings and remove `ACCOUNT_BUSINESS_HOST`;
-the earlier Account call and deployment evidence describe pre-T2 sources, not
-acceptance of this new multi-host change.
+Account 已从不可变 OIDC Client registry 构建所有 binding，并移除
+`ACCOUNT_BUSINESS_HOST`。新增服务不应复制低层构造；完整 Client、caller、Ingress、
+TLS 与 mTLS 配置见 [JX SSO 接入指南](sso-integration-guide.md)。
 
 Provider：
 
@@ -188,8 +188,9 @@ RBAC、上游身份、验证码和动态 Host CORS。JXpKG 是协议边界 SDK�
 - JXOne `terminationGracePeriodSeconds: 90`。
 
 本次协议、Cookie、Secret、端口、存储格式和 DB schema 均未改变，不需要 migration、
-密钥轮换、sidecar、Gateway 或数据回滚。当前验证是直接设置 candidate digest；
-合并发布时仍需把相同 digest 写入 `k3syaml` release set，不能从旧清单全量 apply。
+密钥轮换、sidecar、Gateway 或数据回滚。最终 candidate digest 已写入 `k3syaml`
+release set 并由正常 promote workflow 部署。旧 `ACCOUNT_BUSINESS_HOST` Secret key
+只作为回滚兼容项保留，新镜像不再读取它。
 
 ## 最终部署证据
 
@@ -197,20 +198,23 @@ namespace `jxone` 当前 candidate：
 
 | Workload | Source | Immutable image |
 | --- | --- | --- |
-| Account API | `9562836f64f8` | `account-api@sha256:de2a150319937842f428623073ea7c4124c97d3456b31f9aa1afa38168a221bc` |
-| JXOne API | `ee63b80a5213` | `juxonone-api@sha256:6a98e56230ef9110cfa5718cfa223a414e3c869ee5cf9c3e7012b4605d29b787` |
-| JXWorker | `ee63b80a5213` | `jxworker-api@sha256:64f5eb93e0725eb522999aa425b0d5ddff3f032312e0ea1ab6d8cc3e629a0dbb` |
+| Account API | `5ab5fa012f42` | `account-api@sha256:fabe5118cc4b853dbb15d63a983f4979601811262bc8aece9dc3e65e61738d70` |
+| JXOne API | `3c5b7c6538b1` | `juxonone-api@sha256:3eb95dc0bb70a49a056458233c208a8acd5b8848d6cf7b267e03bd7b84eac364` |
+| JXWorker | `3c5b7c6538b1` | `jxworker-api@sha256:6961d617641c96073781f71c09bfb40f5604ae9d3588c9e2d522ff1185253d31` |
 
-镜像 buildinfo 均包含 JXpKG pseudo-version `...-a6a5c01063b4`。Account 还直接记录
-`vcs.revision=9562836...` 和 `vcs.modified=false`；JXOne Docker build context 排除
+镜像 buildinfo 均包含 JXpKG pseudo-version `...-fbaafaea1139`。Account 还直接记录
+`vcs.revision=5ab5fa0...` 和 `vcs.modified=false`；JXOne Docker build context 排除
 `.git`，因此其 app binary 无 VCS setting，源码身份由 CI checkout SHA 与不可变 tag/digest
 共同固定。
 
 验证结果：
 
+- release set：`k3syaml` `01afaf396974`，deploy run `34584065918` 成功；
 - rollout：Account/JXOne/Worker Ready 为 1/1/2；4 个当前 Pod 均 0 restart；
 - 日志：未发现 panic、fatal、x509、resolver 或 Redis 错误；
 - `k3syaml` `module` smoke：`pass=22 fail=0 blocked=0 manual=0`；
+- Worker 边界：旧 credential 404、匿名 401、有效 credential 进入 handler；
+- graceful rollout：两名 Worker、八次 heartbeat 均完成；
 - 合法 JXOne client certificate + 无效 Session：HTTP 401 `invalid_session`；
 - 无 client certificate：TLS 1.3 `certificate required`，curl exit 56；
 - `/auth/login?return_to=%2F`：HTTP 302 到 Account OIDC authorize；
@@ -233,14 +237,15 @@ JXOne 的已知 full-test 失败不算 SSO 回归，但合并前应独立修复�
 
 ## 下一个 agent 的执行顺序
 
-1. 读取三个 PR 当前 head，并确认应用 `go list -m` 指向 `...-a6a5c01063b4`、无 `replace`。
+1. 从各仓 `origin/main` 更新代码，并确认应用 `go list -m` 指向
+   `...-fbaafaea1139`、无 `replace`。
 2. 全仓搜索 `AuthInject`、`PRequireLogin`、`PRequireBearer` 和 Browser Session getter；
    仅允许本文件描述的真实生产消费者，测试引用不能成为保留公共 API 的理由。
 3. 复跑各仓 format/vet/test/race/build；将 devcanvas 基线失败与 SSO 结果分开记录。
-4. 用受信 JX-LAN runner 按精确 SHA 构建，核对 binary buildinfo、registry digest 和
-   Deployment `imageID`，不要只核对 tag。
-5. 将三个验收 digest 写入 `k3syaml` release set，审阅仅有 image 变化且保留 90 秒
-   grace period；按正常 promote workflow 做 migration 判定、rollout 和 smoke。
+4. 新服务按 [JX SSO 接入指南](sso-integration-guide.md) 完成 Account Client/caller、
+   Ingress、公网 TLS、resolver mTLS 和八个 Consumer 环境变量，不复制 middleware。
+5. 后续镜像仍需用受信 JX-LAN runner 构建，并核对 binary buildinfo、registry digest、
+   release set 与 Deployment `imageID`，不要只核对 tag。
 6. 使用真实账号验证 Browser login、identity switch、公司/项目 403、Origin/CSRF、
    logout 后旧 Session 失效；不要把 302 bootstrap 当成完整登录成功。
 7. 为 deprecated user-Bearer 统计剩余调用。迁移旧 `jxone-web/main` 并确认无仓库外

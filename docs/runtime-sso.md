@@ -52,9 +52,7 @@ if err != nil {
 lifecycle.Std().AddCloser(provider)
 defer provider.Close() // fallback for ordinary startup returns
 
-browserSession, err := oauthHandler.BrowserSessionOptions(
-    os.Getenv("ACCOUNT_BUSINESS_HOST"), authority,
-)
+browserSession, err := oauthHandler.BrowserSessionOptions(authority)
 if err != nil {
     return err
 }
@@ -80,7 +78,7 @@ client/cookie/origin policy into one `server.NewBrowserSessionOption`, installs
 the registered-host CORS middleware, and mounts Account routes. Account does not
 assemble or reorder the Session and CSRF handlers.
 
-### Multi-host bindings (SDK implemented; Account adoption follows separately)
+### Multi-host bindings
 
 The low-level `BrowserSessionOptions` now contains `Bindings []BrowserSessionBinding`
 instead of process-wide `Service`, `CookieName`, `AllowedHosts`, and `ExternalOrigin`.
@@ -110,11 +108,10 @@ internal Worker service Hosts; their route's authentication still applies. A pre
 but empty `Origin` is not treated as absent. Browser routes continue to enforce
 their own Host binding and CSRF checks independently of CORS.
 Only low-level bindings may omit `ExternalOrigin` to derive it from direct TLS/Host;
-trusted proxy deployments should always supply it. The earlier Account example
-above describes its pre-migration call; the next Account change must instead build
-all registered bindings via `BrowserSessionOptions(authority)` and remove
-`ACCOUNT_BUSINESS_HOST`. This SDK change alone is not evidence of that downstream
-change or a new cluster rollout.
+trusted proxy deployments should always supply it. Account now builds every binding
+from its immutable OIDC Client registry through `BrowserSessionOptions(authority)`.
+`ACCOUNT_BUSINESS_HOST` is no longer part of the source, tests, examples or runtime
+contract.
 
 `LoadProviderEnv` validates configuration and binds its TLS listener. `Serve()`
 and `Close() error` are concurrently idempotent; `Close` drains for three seconds
@@ -199,11 +196,11 @@ Bearer is a separate workload credential and is not deprecated.
 
 ## Validation and handoff
 
-The implementation commit is SDK `a6a5c01063b44486ebf53b6c697f4cc536e22f52`;
-Account adoption is `9562836f64f833079482f92c496f177fb2102768` and
-JXOne adoption is `ee63b80a5213b3f3efcf626304e69d8dc791e143`. Both
+The implementation commit is SDK `fbaafaea11397b928d0344b7e837478ec94dbcfc`;
+Account adoption is `5ab5fa012f425152f44aa4a4c8fa34f6ed70597e` and
+JXOne adoption is `3c5b7c6538b12002152c49826de6aebf7b2f95a6`. Both
 applications require the official pseudo-version
-`v0.0.14-0.20260911065453-a6a5c01063b4`; neither source tree nor final image
+`v0.0.14-0.20260911085822-fbaafaea1139`; neither source tree nor final image
 uses a `replace` directive.
 
 Local SDK tests/vet/build and runtime race tests passed. Account full tests,
@@ -212,12 +209,11 @@ JXOne module verification, build and SSO/router/startup/collaboration race tests
 passed. Its full suite still has the unchanged, unrelated
 `devcanvas/TestWorkshopNumbersRetainValidation` numeric-boundary failure.
 
-The final JX-LAN rollout in namespace `jxone` used immutable image digests and
-completed with Account/JXOne/Worker ready replicas 1/1/2, four current Pods and
-zero restarts. Module smoke passed 22/22. Live resolver checks returned 401 for
-an invalid Session with a valid mTLS client and rejected a client without a
-certificate at TLS. Login bootstrap with `return_to=/` returned 302 and a
-callback without required input returned 400.
+The final JX-LAN rollout is recorded by `k3syaml` commit
+`01afaf396974ca09bfc6f449d13155b9a217c3c5` and deploy run `34584065918`.
+Account/JXOne/Worker ready replicas were 1/1/2, all four current Pods had zero
+restarts, runtime release-set validation passed, module smoke passed 22/22 and
+the JXOne graceful-rollout probe passed with two Workers and eight heartbeats.
 
 These are deployment and protocol checks, not a credentialed browser login
 acceptance. No real user credential interaction was performed. Digest prefixes,
@@ -226,3 +222,4 @@ recorded in the handoff below.
 
 See [the cross-repository handoff](sso-sdk-handoff.md) for deletion inventory,
 exact test commands, deployment checks and pending browser/product acceptance.
+For a new service, use the maintained [JX SSO integration guide](sso-integration-guide.md).
