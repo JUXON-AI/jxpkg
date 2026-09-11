@@ -17,13 +17,23 @@ func (ai *authInjector) AuthInject(injector auth.InjectorFunc) {
 
 // Inject 校验业务用户，并在成功后发布用户 ID。
 func (ai *authInjector) Inject(ctx *gin.Context) {
+	ai.inject(ctx, false)
+}
+
+// injectBrowser accepts an already resolved browser principal without requiring
+// an application callback. Explicit callbacks still run and may reject it.
+func (ai *authInjector) injectBrowser(ctx *gin.Context) {
+	ai.inject(ctx, true)
+}
+
+func (ai *authInjector) inject(ctx *gin.Context, browser bool) {
 	val, ok := ctx.Get(constants.CtxKeyLoginStatus)
 	if !ok {
 		ctx.Next()
 		return
 	}
 	ls, ok := val.(*auth.LoginStatus)
-	if !ok || ls.State != auth.StateSucc {
+	if !ok || ls == nil || ls.State != auth.StateSucc {
 		ctx.Next()
 		return
 	}
@@ -32,30 +42,36 @@ func (ai *authInjector) Inject(ctx *gin.Context) {
 	ctx.Set(constants.CtxKeyUIN, uint(0))
 	ctx.Set(constants.CtxKeyCompanyID, uint(0))
 	ctx.Set(constants.CtxKeyMembershipEpoch, uint64(0))
-	if ls.Claim == nil || ls.Claim.UserID == 0 || ls.Claim.UIN == 0 || ls.Claim.CompanyID == 0 {
+	if ls.Claim == nil || ls.Claim.UserID == 0 || ls.Claim.UIN == 0 || ls.Claim.CompanyID == 0 ||
+		(browser && (ls.AuthMode != auth.AuthModeBrowserSession || ls.Claim.MembershipEpoch == 0)) {
 		ls.State = auth.StateFailed
 		ls.Err = auth.ErrInvalidPrincipal
 		ctx.Set(constants.CtxKeyLoginStatus, ls)
 		ctx.Next()
 		return
 	}
-	if ai.injector == nil {
+	if ai.injector == nil && !browser {
 		ls.State = auth.StateFailed
 		ls.Err = auth.ErrAuthBackendUnavailable
 		ctx.Set(constants.CtxKeyLoginStatus, ls)
 		ctx.Next()
 		return
 	}
-	if err := ai.injector(ctx, ls); err != nil {
-		ls.State = auth.StateFailed
-		ls.Err = err
-		ctx.Set(constants.CtxKeyLoginStatus, ls)
-		ctx.Next()
-		return
+	if ai.injector != nil {
+		if err := ai.injector(ctx, ls); err != nil {
+			ls.State = auth.StateFailed
+			ls.Err = err
+			ctx.Set(constants.CtxKeyLoginStatus, ls)
+			ctx.Next()
+			return
+		}
 	}
 
 	ctx.Set(constants.CtxKeyUserID, ls.Claim.UserID)
 	ctx.Set(constants.CtxKeyUIN, ls.Claim.UIN)
 	ctx.Set(constants.CtxKeyCompanyID, ls.Claim.CompanyID)
+	if browser {
+		ctx.Set(constants.CtxKeyMembershipEpoch, ls.Claim.MembershipEpoch)
+	}
 	ctx.Next()
 }

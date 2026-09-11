@@ -306,14 +306,14 @@ func (svr *Router) G(action string, hdrs ...interface{}) {
 // PRequireBrowserSession 注册仅接受浏览器 Cookie Session 的 POST 路由。
 func (svr *Router) PRequireBrowserSession(action string, hdrs ...interface{}) {
 	parser, csrf := svr.browserSessionHandlers()
-	newhdrs := append([]interface{}{parser, svr.Inject, middleware.AuthMiddleWare, csrf}, hdrs...)
+	newhdrs := append([]interface{}{parser, svr.injectBrowser, middleware.AuthMiddleWare, csrf}, hdrs...)
 	svr.Post(action, newhdrs...)
 }
 
 // GRequireBrowserSession 注册仅接受浏览器 Cookie Session 的 GET 路由。
 func (svr *Router) GRequireBrowserSession(action string, hdrs ...interface{}) {
 	parser, csrf := svr.browserSessionHandlers()
-	newhdrs := append([]interface{}{parser, svr.Inject, middleware.AuthMiddleWare, csrf}, hdrs...)
+	newhdrs := append([]interface{}{parser, svr.injectBrowser, middleware.AuthMiddleWare, csrf}, hdrs...)
 	svr.G(action, newhdrs...)
 }
 

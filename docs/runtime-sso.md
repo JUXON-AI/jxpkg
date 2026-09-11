@@ -78,3 +78,11 @@ configuration files or source control; mount them from a Kubernetes Secret.
   exposed to the business service.
 - Invalid configuration prevents the process from starting. Account resolver
   failures deny browser access instead of falling back to a cached identity.
+# Browser identity publication
+
+`PRequireBrowserSession` and `GRequireBrowserSession` publish `UserID`, `UIN`,
+`CompanyID` and `MembershipEpoch` after successful session resolution. Applications
+do not need an `AuthInject` callback merely to validate or copy those fields.
+An explicitly registered callback still runs and can reject the principal;
+Bearer routes continue to require their application validator. Do not remove an
+Account validator while legacy Bearer routes still depend on database revalidation.

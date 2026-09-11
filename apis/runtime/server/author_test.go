@@ -98,3 +98,18 @@ func TestAuthInjectorFailsWhenNotConfigured(t *testing.T) {
 		t.Fatalf("LoginStatus error = %v, want ErrAuthBackendUnavailable", ls.Err)
 	}
 }
+
+func TestBrowserInjectorRejectsInvalidPrincipalWithoutCallback(t *testing.T) {
+	for _, mode := range []auth.AuthMode{auth.AuthModeBearer, auth.AuthModeBrowserSession} {
+		ctx, _ := gin.CreateTestContext(nil)
+		ls := &auth.LoginStatus{
+			State: auth.StateSucc, AuthMode: mode,
+			Claim: &auth.UserClaims{UserID: 1, UIN: 2, CompanyID: 3},
+		}
+		ctx.Set(constants.CtxKeyLoginStatus, ls)
+		new(authInjector).injectBrowser(ctx)
+		if ls.State != auth.StateFailed || !errors.Is(ls.Err, auth.ErrInvalidPrincipal) || ctx.GetUint(constants.CtxKeyUserID) != 0 {
+			t.Fatal("invalid browser principal was accepted")
+		}
+	}
+}
