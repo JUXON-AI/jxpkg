@@ -20,6 +20,7 @@ import (
 
 	"github.com/JUXON-AI/jxpkg/apis/runtime/auth"
 	"github.com/JUXON-AI/jxpkg/apis/runtime/server"
+	"github.com/gin-gonic/gin"
 )
 
 func TestValidPrefix(t *testing.T) {
@@ -127,6 +128,56 @@ func TestLoadEnvBuildsBrowserSessionRuntime(t *testing.T) {
 			if test.status == 204 && (recorder.Header().Get("Access-Control-Allow-Origin") != test.origin || recorder.Header().Get("Access-Control-Allow-Credentials") != "true") {
 				t.Fatal("preflight lost exact origin or credentials")
 			}
+		}
+	})
+	t.Run("internal requests retain route authentication", func(t *testing.T) {
+		router := server.NewRouter("/v1/", runtime.RouterOption())
+		workerCalls := 0
+		router.Post("worker", gin.HandlerFunc(func(ctx *gin.Context) {
+			workerCalls++
+			if ctx.GetHeader("Authorization") != "Bearer test-workload-credential" {
+				ctx.AbortWithStatus(http.StatusUnauthorized)
+				return
+			}
+			ctx.Status(http.StatusNoContent)
+		}))
+		router.PRequireBrowserSession("browser", gin.HandlerFunc(func(ctx *gin.Context) { t.Fatal("unknown browser Host reached business handler") }))
+		router.PRequireBearer("bearer", gin.HandlerFunc(func(ctx *gin.Context) { t.Fatal("missing Bearer reached business handler") }))
+		for _, test := range []struct {
+			name, path, host, authorization string
+			origins                         []string
+			status, calls                   int
+		}{
+			{name: "internal worker host", path: "worker", host: "juxonone-api:8080", authorization: "Bearer test-workload-credential", status: http.StatusNoContent, calls: 1},
+			{name: "unknown worker host", path: "worker", host: "unknown.example.com", authorization: "Bearer test-workload-credential", status: http.StatusNoContent, calls: 1},
+			{name: "worker rejects missing credentials", path: "worker", host: "juxonone-api:8080", status: http.StatusUnauthorized, calls: 1},
+			{name: "unknown host with origin", path: "worker", host: "unknown.example.com", origins: []string{"https://one.example.com"}, status: http.StatusForbidden},
+			{name: "empty origin is not absent", path: "worker", host: "juxonone-api:8080", origins: []string{""}, status: http.StatusForbidden},
+			{name: "unknown browser host", path: "browser", host: "unknown.example.com", status: http.StatusUnauthorized},
+			{name: "internal browser host", path: "browser", host: "juxonone-api:8080", status: http.StatusUnauthorized},
+			{name: "internal bearer remains protected", path: "bearer", host: "juxonone-api:8080", status: http.StatusUnauthorized},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				before := workerCalls
+				request := httptest.NewRequest(http.MethodPost, "http://"+test.host+"/v1/"+test.path, nil)
+				if test.authorization != "" {
+					request.Header.Set("Authorization", test.authorization)
+				}
+				for _, origin := range test.origins {
+					request.Header.Add("Origin", origin)
+				}
+				recorder := httptest.NewRecorder()
+				router.GinEngine().ServeHTTP(recorder, request)
+				if recorder.Code != test.status || workerCalls-before != test.calls {
+					t.Fatalf("status/calls = %d/%d, want %d/%d", recorder.Code, workerCalls-before, test.status, test.calls)
+				}
+				if len(test.origins) == 0 && !strings.Contains(recorder.Header().Get("Vary"), "Origin") {
+					t.Fatal("no-Origin response lost Vary")
+				}
+				if recorder.Header().Get("Access-Control-Allow-Origin") != "" {
+					t.Fatal("internal or denied response exposed CORS origin")
+				}
+			})
 		}
 	})
 	t.Run("origin must be canonical and registered", func(t *testing.T) {

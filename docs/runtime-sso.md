@@ -105,6 +105,10 @@ configuration retain their existing behavior.
 `LoadEnv` still requires `EXTERNAL_ORIGIN`, checks its Host belongs to
 `BROWSER_ALLOWED_HOSTS_JSON`, then generates each explicit Host's origin using that
 same scheme (`scheme://host`). CORS also selects the Host's exact origin.
+Requests without an `Origin` header retain ordinary CORS pass-through, including
+internal Worker service Hosts; their route's authentication still applies. A present
+but empty `Origin` is not treated as absent. Browser routes continue to enforce
+their own Host binding and CSRF checks independently of CORS.
 Only low-level bindings may omit `ExternalOrigin` to derive it from direct TLS/Host;
 trusted proxy deployments should always supply it. The earlier Account example
 above describes its pre-migration call; the next Account change must instead build

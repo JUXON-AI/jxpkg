@@ -131,6 +131,12 @@ func LoadEnv(getenv func(string) string, prefix string) (*Runtime, error) {
 		corsByHost[binding.Host] = cors
 	}
 	cors := func(ctx *gin.Context) {
+		// Internal service requests have no browser Origin. Preserve the original
+		// CORS behavior and let the route's own authentication boundary decide.
+		if len(ctx.Request.Header.Values("Origin")) == 0 {
+			primaryCORS(ctx)
+			return
+		}
 		handler, ok := corsByHost[ctx.Request.Host]
 		if !ok {
 			ctx.AbortWithStatus(http.StatusForbidden)
