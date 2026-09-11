@@ -18,10 +18,10 @@ git log --oneline HEAD..origin/main
 
 | 仓库 | `origin/main` 至少应包含 | 作用 |
 | --- | --- | --- |
-| `jxpkg` | `fbaafaea11397b928d0344b7e837478ec94dbcfc` | 多 Host Browser binding 与无 Origin 内部请求边界 |
-| `jxaccount` | `5ab5fa012f425152f44aa4a4c8fa34f6ed70597e` | Account Provider、Client registry 多 Host 接线 |
-| `jxone` | `3c5b7c6538b12002152c49826de6aebf7b2f95a6` | 最小 Consumer 接入与新版 runtime pin |
-| `k3syaml` | `01afaf396974ca09bfc6f449d13155b9a217c3c5` | 对应不可变镜像和测试集群 release set |
+| `jxpkg` | `53a9318278c6ea10405cc1b0bd8a78dd93f2d80a` | PR #17：多 Host Browser binding 与开箱即用 runtime |
+| `jxaccount` | `898c3afaace25d716ab5510017ee1d0d954fcea9` | PR #3：Account Provider、Client registry 多 Host 接线 |
+| `jxone` | `bc11c5503976c10ea88aa73d071cfd863e5e9b6d` | PR #7：最小 Consumer 接入与新版 runtime pin |
+| `k3syaml` | `4f26809b63dbf317f01d6d1720faf9990000b188` | PR #7：最终 main release set 与部署入口 |
 
 下面的退出码为 0 才表示当前分支包含基线：
 
@@ -336,6 +336,32 @@ Provider 环境包含 `ACCOUNT_SESSION_RESOLVER_ADDR`、`CALLERS_JSON`、server 
 - Secret 通过 `envFrom` 或只读 volume 注入；不要提交 Secret YAML，也不要在排障命令中打印 `.data`。
 - mTLS 负责工作负载身份，Browser Cookie 负责用户身份，两者缺一不可。
 - 项目/company RBAC 仍属于业务服务；通过 SSO 不等于自动拥有业务权限。
+
+### Account 使用独立 namespace 时
+
+namespace 拆分不改变 Go API、Cookie 或 OIDC Client 注册，但会改变服务发现、Secret
+归属和网络策略：
+
+- Consumer 的 resolver endpoint 改为完整跨 namespace DNS，例如
+  `account-session-resolver.<account-namespace>.svc.cluster.local:8443`；server certificate
+  SAN 必须覆盖实际使用的 DNS 名。
+- Provider 的 server key/证书 Secret 留在 Account namespace；每个 Consumer 的
+  client key/证书 Secret 留在自己的 namespace。Secret 是 namespaced resource，不能
+  假设迁移后仍可被原 Pod 引用。
+- Account resolver 的 NetworkPolicy ingress rule 必须允许目标 Consumer namespace/Pod；Consumer
+  egress policy 必须允许 Account namespace 的 `8443`，两侧 selector 都要按真实 label
+  验证。
+- 标准 Kubernetes Ingress backend 不能直接引用另一个 namespace 的 Service。
+  `/auth` 与 `/v1/account` 应由 Account namespace 内的 Ingress/Route 暴露，或使用经过
+  `ReferenceGrant` 明确授权的 Gateway API 方案；不要写一个无效的跨 namespace
+  `service.name`。
+- 终止公网 TLS 的 Ingress/Route 必须能在自己的 namespace 读取对应证书 Secret。
+  同一业务 Host 被多个资源分路径接管时，要验证当前 ingress controller 的合并规则、
+  路由优先级和证书选择。
+
+迁移期间先区分“namespace/DNS/NetworkPolicy/Secret 未对齐”和“SSO 代码回归”。只有在
+release-set digest、Service endpoint、证书 SAN、caller principal 与网络连通性均确认后，
+才进入 Cookie/CSRF/OIDC 层排障。
 
 ## Bearer 的当前边界
 

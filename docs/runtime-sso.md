@@ -196,9 +196,12 @@ Bearer is a separate workload credential and is not deprecated.
 
 ## Validation and handoff
 
-The implementation commit is SDK `fbaafaea11397b928d0344b7e837478ec94dbcfc`;
-Account adoption is `5ab5fa012f425152f44aa4a4c8fa34f6ed70597e` and
-JXOne adoption is `3c5b7c6538b12002152c49826de6aebf7b2f95a6`. Both
+The implementation commit is SDK `fbaafaea11397b928d0344b7e837478ec94dbcfc`,
+merged to `main` as `53a9318278c6ea10405cc1b0bd8a78dd93f2d80a`.
+Account adoption `5ab5fa012f425152f44aa4a4c8fa34f6ed70597e` was merged as
+`898c3afaace25d716ab5510017ee1d0d954fcea9`; JXOne adoption
+`3c5b7c6538b12002152c49826de6aebf7b2f95a6` was merged as
+`bc11c5503976c10ea88aa73d071cfd863e5e9b6d`. Both
 applications require the official pseudo-version
 `v0.0.14-0.20260911085822-fbaafaea1139`; neither source tree nor final image
 uses a `replace` directive.
@@ -209,11 +212,12 @@ JXOne module verification, build and SSO/router/startup/collaboration race tests
 passed. Its full suite still has the unchanged, unrelated
 `devcanvas/TestWorkshopNumbersRetainValidation` numeric-boundary failure.
 
-The final JX-LAN rollout is recorded by `k3syaml` commit
-`01afaf396974ca09bfc6f449d13155b9a217c3c5` and deploy run `34584065918`.
-Account/JXOne/Worker ready replicas were 1/1/2, all four current Pods had zero
-restarts, runtime release-set validation passed, module smoke passed 22/22 and
-the JXOne graceful-rollout probe passed with two Workers and eight heartbeats.
+The post-merge JX-LAN acceptance snapshot, taken before the separate Account
+namespace migration began, is recorded by `k3syaml` merge commit
+`4f26809b63dbf317f01d6d1720faf9990000b188` and deploy run `34588106613`.
+Account/JXOne/Worker ready replicas were 1/1/2; release-set validation, database
+migrations, runtime digest checks, module smoke and the JXOne graceful-rollout
+probe all passed.
 
 These are deployment and protocol checks, not a credentialed browser login
 acceptance. No real user credential interaction was performed. Digest prefixes,
