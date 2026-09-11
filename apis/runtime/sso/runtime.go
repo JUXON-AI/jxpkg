@@ -91,17 +91,11 @@ func LoadEnv(getenv func(string) string, prefix string) (*Runtime, error) {
 
 // Origin returns the normalized external origin after LoadEnv has validated it.
 func (runtime *Runtime) Origin() string {
-	if runtime == nil {
-		return ""
-	}
 	return runtime.origin
 }
 
 // RouterOptions returns the complete browser-session security stack.
 func (runtime *Runtime) RouterOptions() []server.RouterOption {
-	if runtime == nil {
-		return nil
-	}
 	return []server.RouterOption{
 		server.WithCORS(runtime.cors),
 		server.WithBrowserSecurity(runtime.security),
@@ -112,15 +106,12 @@ func (runtime *Runtime) RouterOptions() []server.RouterOption {
 // directory client. Business services must still make their own domain-level
 // authorization decisions from these snapshots.
 func (runtime *Runtime) CompanyIdentityResolver() auth.CompanyIdentityResolver {
-	if runtime == nil {
-		return nil
-	}
 	return runtime.resolver
 }
 
 // Close releases idle resolver connections during application shutdown.
 func (runtime *Runtime) Close() {
-	if runtime != nil && runtime.transport != nil {
+	if runtime.transport != nil {
 		runtime.transport.CloseIdleConnections()
 	}
 }
