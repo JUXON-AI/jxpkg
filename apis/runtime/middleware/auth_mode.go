@@ -63,6 +63,14 @@ func bearerLoginStatusMiddleware(cookieName string) gin.HandlerFunc {
 	}
 }
 
+func browserBearerMiddleware(bindings map[string]BrowserSessionBinding) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		// Unbound Hosts have no browser cookie; Bearer authentication still applies.
+		binding := bindings[ctx.Request.Host]
+		bearerLoginStatusMiddleware(binding.CookieName)(ctx)
+	}
+}
+
 func failedLoginStatusMiddleware(mode auth.AuthMode, err error) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		ls := &auth.LoginStatus{AuthMode: mode}

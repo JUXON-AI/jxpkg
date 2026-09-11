@@ -43,8 +43,9 @@ make clean       # 清理 Go test cache
 | [`apis/errcode`](#apiserrcode) | 业务错误码注册和消息查询 | `Register`、`GetMessage` |
 | [`apis/runtime`](#apisruntime) | HTTP 响应与已验证身份读取 | `Success`、`BadRequest`、`UserID` |
 | [`apis/runtime/auth`](#apisruntimeauth) | Bearer/JWT、Browser Session 的共享认证契约 | `TokenSigner`、`TokenVerifier`、`SessionResolver` |
-| [`apis/runtime/middleware`](#apisruntimemiddleware) | Gin 日志、恢复、CORS、认证与 CSRF 中间件 | `NewCORS`、`NewBrowserSessionMiddleware` |
+| [`apis/runtime/middleware`](#apisruntimemiddleware) | Gin 日志、恢复、CORS、认证与 CSRF 中间件 | `NewCORS`、`NewBrowserSessionHandlers` |
 | [`apis/runtime/server`](#apisruntimeserver) | Gin Router、路由认证模式和 API 适配 | `NewRouter`、`API` |
+| [`apis/runtime/sso`](docs/sso-integration-guide.md) | 开箱即用的 Consumer runtime 与 Account Provider | `LoadEnv`、`LoadProviderEnv` |
 | [`config`](#config) | YAML 和环境变量配置加载 | `LoadCoreConfigFromEnv` |
 | [`dbtools`](#dbtools) | GORM 多数据库连接和显式迁移 | `InitDBConn`、`DoInitModels` |
 | [`dbtools/redispool`](#dbtoolsredispool) | Redis 连接及常用数据结构操作 | `InitRedisWithConfig`、`Redis` |
@@ -171,9 +172,7 @@ verified, err := verifier.Verify(ctx, raw, "https://issuer.example.com", "orders
 
 ### `apis/runtime/middleware`
 
-提供请求日志、panic 恢复、自定义 header、显式 Bearer、Browser Session、CORS 和 CSRF 中间件。
-
-Browser Session 通过 `NewBrowserSessionMiddleware` 构造，并与 `NewCSRFMiddleware` 共用 `BrowserSessionOptions`。Cookie 和 Bearer 互斥，不会在失败时互相回退。副作用请求必须通过 CSRF token 校验。
+提供请求日志、panic 恢复、自定义 header、显式 Bearer、Browser Session、CORS 和 CSRF 中间件。应用不应自行拼接 Browser Session 中间件；`sso.Runtime.RouterOption()` 会安装完整且已校验的顺序。Cookie 和 Bearer 互斥，不会在失败时互相回退。副作用请求必须通过 CSRF token 校验。
 
 `NewCORS` 只接受精确 HTTP(S) origin，不接受通配符、域名后缀、路径或动态反射。CORS 决定浏览器能否读取响应，不是 CSRF 防护。位于可信反向代理之后时，CORS 与 Browser Session 必须配置同一个 `ExternalOrigin`；两者都不会信任客户端提供的 `X-Forwarded-Host`/`X-Forwarded-Proto`。
 
@@ -185,30 +184,30 @@ corsMiddleware, err := middleware.NewCORS(middleware.CORSOptions{
 })
 ```
 
-`LoginStatus` 和 `CORS()` 是兼容旧代码的入口。新代码应优先使用显式构造器并处理配置错误。
+`CORS()` 是兼容旧代码的入口。新代码应优先使用显式构造器并处理配置错误。
 
 ### `apis/runtime/server`
 
 `Router` 在 Gin 之上统一 API prefix、DTO 适配和逐路由认证模式：
 
 - `Post`、`G`：匿名路由，不解析认证凭据。
-- `PRequireBrowserSession`、`GRequireBrowserSession`：只接受配置的 Browser Session。
-- `PRequireBearer`、`GRequireBearer`：只接受 Bearer，并拒绝浏览器 Session Cookie。
-- `PRequireLogin`、`GRequireLogin`：兼容旧代码的 Bearer 别名。
+- `PRequireBrowserSession`：只接受配置的 Browser Session，并固定执行 Session、主体发布、认证要求和 CSRF。
+- `PRequireBearer`：只接受 Bearer，并拒绝浏览器 Session Cookie。
+- `PRequireLogin`：兼容旧代码的 Bearer 别名；新代码不应使用。
 
 ```go
-router := server.NewRouter("/v1/",
-    server.WithCORS(corsMiddleware),
-    server.WithBrowserSession(middleware.BrowserSessionOptions{
-        Service:        "api",
-        CookieName:     "__Host-api_session",
-        AllowedHosts:   map[string]struct{}{"api.example.com": {}},
-        ExternalOrigin: externalOrigin,
-        Resolver:       resolver,
-    }),
-)
+runtime, err := sso.LoadEnv(os.Getenv, "API")
+if err != nil {
+    return err
+}
+defer runtime.Close()
+router := server.NewRouter("/v1/", runtime.RouterOption())
 router.PRequireBrowserSession("profile.Get", server.API(handler.GetProfile))
 ```
+
+新业务域名和新 JXX 服务请按 [JX SSO 接入指南](docs/sso-integration-guide.md)
+同步完成 Go 依赖、Account Client/caller 注册、Ingress、公网 TLS、resolver mTLS、
+Secret 与验证。不要只复制上面的 Go 代码后跳过部署身份和证书配置。
 
 Browser Session 路由顺序固定为 Session Resolve、业务身份注入、登录要求、unsafe-method CSRF、业务 handler。`API` 支持请求体大小限制；不要在 handler 中重新实现认证分支。
 

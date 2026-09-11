@@ -31,7 +31,7 @@ func resolverResponse(status int, contentType, body string) *http.Response {
 func validResolverResponse(t *testing.T) string {
 	t.Helper()
 	hash := sha256.Sum256([]byte("csrf"))
-	document, err := json.Marshal(sessionResolveWireResponse{
+	document, err := json.Marshal(SessionResolveResponse{
 		UserID: 11, UIN: 12, CompanyID: 13, MembershipEpoch: 14,
 		Host: "app.example.com", ClientID: "juxonone-web", SessionVersion: 15,
 		AuthenticatedAt: 1_700_000_000, IdleExpiresAt: 1_700_000_600,
@@ -66,13 +66,13 @@ func TestInternalSessionResolverClientResolve(t *testing.T) {
 		if request.Header.Get("Content-Type") != "application/json" || request.Header.Get("Accept") != "application/json" || request.Header.Get("Cache-Control") != "no-store" {
 			t.Fatalf("headers = %#v", request.Header)
 		}
-		var body sessionResolveWireRequest
+		var body SessionResolveRequest
 		decoder := json.NewDecoder(request.Body)
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&body); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		if body != (sessionResolveWireRequest{Host: "app.example.com", Service: "juxonone", SessionID: "opaque-sid"}) {
+		if body != (SessionResolveRequest{Host: "app.example.com", Service: "juxonone", SessionID: "opaque-sid"}) {
 			t.Fatalf("body = %#v", body)
 		}
 		return resolverResponse(http.StatusOK, "application/json; charset=utf-8", validResolverResponse(t)), nil

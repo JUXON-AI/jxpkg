@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestSessionMetadataIsImmutable(t *testing.T) {
+func TestBrowserSessionMetadataIsImmutable(t *testing.T) {
 	hash := sha256.Sum256([]byte("csrf-token"))
 	wantHash := append([]byte(nil), hash[:]...)
 	principal := SessionPrincipal{
@@ -19,19 +19,12 @@ func TestSessionMetadataIsImmutable(t *testing.T) {
 		CSRFTokenHash:     hash[:],
 	}
 
-	metadata := NewSessionMetadata(principal)
+	status := NewBrowserSessionLoginStatus(principal)
 	principal.CSRFTokenHash[0] ^= 0xff
-	gotHash := metadata.CSRFTokenHash()
-	gotHash[1] ^= 0xff
-
-	if metadata.Host() != "app.example.com" || metadata.ClientID() != "web-client" {
-		t.Fatalf("metadata identity = %q/%q", metadata.Host(), metadata.ClientID())
+	if status.BrowserSessionExpiresAt() != 200 {
+		t.Fatalf("BrowserSessionExpiresAt() = %d, want 200", status.BrowserSessionExpiresAt())
 	}
-	if metadata.SessionVersion() != 7 || metadata.AuthenticatedAt() != 100 ||
-		metadata.IdleExpiresAt() != 200 || metadata.AbsoluteExpiresAt() != 300 {
-		t.Fatalf("metadata timestamps/version were not preserved")
-	}
-	if !bytes.Equal(metadata.CSRFTokenHash(), wantHash) {
+	if !status.MatchesBrowserCSRF("csrf-token") || bytes.Equal(principal.CSRFTokenHash, wantHash) {
 		t.Fatal("CSRF hash changed through an external slice")
 	}
 }

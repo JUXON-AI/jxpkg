@@ -83,8 +83,8 @@ type Router struct {
 	// browserCSRFMiddleware 保存浏览器会话 CSRF 中间件。
 	browserCSRFMiddleware gin.HandlerFunc
 
-	// browserSessionCookieName 保存 Bearer 路由必须拒绝的 Session Cookie 名称。
-	browserSessionCookieName string
+	// browserBearerMiddleware selects the current Host's Cookie rejection boundary.
+	browserBearerMiddleware gin.HandlerFunc
 
 	// browserSessionErr 保存浏览器会话中间件的静态配置错误。
 	browserSessionErr error
@@ -135,16 +135,23 @@ func WithCORS(corsMiddleware gin.HandlerFunc) RouterOption {
 	}
 }
 
-// WithBrowserSession 配置显式浏览器 Cookie Session 路由链。
-func WithBrowserSession(options middleware.BrowserSessionOptions) RouterOption {
+// NewBrowserSessionOption validates and installs the complete browser Session
+// route boundary. Applications normally receive this option from sso.Runtime;
+// they do not assemble the Session and CSRF middleware themselves.
+func NewBrowserSessionOption(options middleware.BrowserSessionOptions) (RouterOption, error) {
+	handlers, err := middleware.NewBrowserSessionHandlers(options)
+	if err != nil {
+		return nil, err
+	}
 	return func(svr *Router) {
-		svr.browserSessionCookieName = options.CookieName
-		svr.browserSessionMiddleware, svr.browserSessionErr = middleware.NewBrowserSessionMiddleware(options)
-		if svr.browserSessionErr != nil {
+		if svr == nil {
 			return
 		}
-		svr.browserCSRFMiddleware, svr.browserSessionErr = middleware.NewCSRFMiddleware(options)
-	}
+		svr.browserBearerMiddleware = handlers.Bearer
+		svr.browserSessionMiddleware = handlers.Session
+		svr.browserCSRFMiddleware = handlers.CSRF
+		svr.browserSessionErr = nil
+	}, nil
 }
 
 // WithGracefulShutdownTimeout sets the maximum time Close waits for active HTTP
@@ -280,51 +287,34 @@ func (svr *Router) G(action string, hdrs ...interface{}) {
 	}
 }
 
-// PRequireBrowserSession 注册仅接受浏览器 Cookie Session 的 POST 路由。
-func (svr *Router) PRequireBrowserSession(action string, hdrs ...interface{}) {
-	parser, csrf := svr.browserSessionHandlers()
-	newhdrs := append([]interface{}{parser, svr.Inject, middleware.AuthMiddleWare, csrf}, hdrs...)
-	svr.Post(action, newhdrs...)
-}
-
-// GRequireBrowserSession 注册仅接受浏览器 Cookie Session 的 GET 路由。
-func (svr *Router) GRequireBrowserSession(action string, hdrs ...interface{}) {
-	parser, csrf := svr.browserSessionHandlers()
-	newhdrs := append([]interface{}{parser, svr.Inject, middleware.AuthMiddleWare, csrf}, hdrs...)
-	svr.G(action, newhdrs...)
+// PRequireBrowserSession registers a POST route behind the complete browser
+// authentication boundary: resolve Session, publish the verified principal,
+// require authentication, validate Origin/CSRF, then run business handlers.
+func (svr *Router) PRequireBrowserSession(action string, handlers ...interface{}) {
+	resolveSession, validateCSRF := svr.browserSessionHandlers()
+	chain := []interface{}{
+		resolveSession,
+		svr.publishBrowserPrincipal,
+		middleware.RequireAuthenticated,
+		validateCSRF,
+	}
+	svr.Post(action, append(chain, handlers...)...)
 }
 
 // PRequireBearer 注册仅接受 Bearer Token 的 POST 路由。
 func (svr *Router) PRequireBearer(action string, hdrs ...interface{}) {
-	parser := middleware.BearerLoginStatusMiddleware(svr.browserSessionCookieName)
-	newhdrs := append([]interface{}{parser, svr.Inject, middleware.AuthMiddleWare}, hdrs...)
+	parser := svr.browserBearerMiddleware
+	if parser == nil {
+		parser = middleware.BearerLoginStatusMiddleware("")
+	}
+	newhdrs := append([]interface{}{parser, svr.Inject, middleware.RequireAuthenticated}, hdrs...)
 	svr.Post(action, newhdrs...)
-}
-
-// GRequireBearer 注册仅接受 Bearer Token 的 GET 路由。
-func (svr *Router) GRequireBearer(action string, hdrs ...interface{}) {
-	parser := middleware.BearerLoginStatusMiddleware(svr.browserSessionCookieName)
-	newhdrs := append([]interface{}{parser, svr.Inject, middleware.AuthMiddleWare}, hdrs...)
-	svr.G(action, newhdrs...)
 }
 
 // PRequireLogin 注册保持旧版 Bearer 语义的 POST 路由。
-// Deprecated: 请显式使用 PRequireBearer 或 PRequireBrowserSession。
+// Deprecated: 请显式使用 PRequireBearer。
 func (svr *Router) PRequireLogin(action string, hdrs ...interface{}) {
 	svr.PRequireBearer(action, hdrs...)
-}
-
-// PRequireEmployee 注册需要员工权限且仅接受 Bearer Token 的 POST 路由。
-func (svr *Router) PRequireEmployee(action string, hdrs ...interface{}) {
-	parser := middleware.BearerLoginStatusMiddleware(svr.browserSessionCookieName)
-	newhdrs := append([]interface{}{parser, svr.Inject, middleware.AuthMiddleWareEmployee}, hdrs...)
-	svr.Post(action, newhdrs...)
-}
-
-// GRequireLogin 注册保持旧版 Bearer 语义的 GET 路由。
-// Deprecated: 请显式使用 GRequireBearer 或 GRequireBrowserSession。
-func (svr *Router) GRequireLogin(action string, hdrs ...interface{}) {
-	svr.GRequireBearer(action, hdrs...)
 }
 
 func (svr *Router) browserSessionHandlers() (gin.HandlerFunc, gin.HandlerFunc) {

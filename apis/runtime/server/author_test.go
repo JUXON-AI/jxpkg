@@ -12,7 +12,7 @@ import (
 func TestAuthInjectorPublishesIdentityAfterSuccess(t *testing.T) {
 	ctx, _ := gin.CreateTestContext(nil)
 	ls := &auth.LoginStatus{
-		State: auth.StateSucc,
+		State: auth.StateSucc, AuthMode: auth.AuthModeBearer,
 		Claim: &auth.UserClaims{UserID: 42, UIN: 84, CompanyID: 126, MembershipEpoch: 7},
 	}
 	ctx.Set(constants.CtxKeyLoginStatus, ls)
@@ -50,13 +50,17 @@ func TestAuthInjectorDoesNotPublishUserIDAfterFailure(t *testing.T) {
 	ctx.Set(constants.CtxKeyCompanyID, uint(97))
 	ctx.Set(constants.CtxKeyMembershipEpoch, uint64(96))
 	ls := &auth.LoginStatus{
-		State: auth.StateSucc,
+		State: auth.StateSucc, AuthMode: auth.AuthModeBearer,
 		Claim: &auth.UserClaims{UserID: 42, UIN: 84, CompanyID: 126},
 	}
 	ctx.Set(constants.CtxKeyLoginStatus, ls)
 	wantErr := errors.New("user lookup failed")
 
 	ai := &authInjector{injector: func(_ *gin.Context, _ *auth.LoginStatus) error {
+		ctx.Set(constants.CtxKeyUserID, uint(42))
+		ctx.Set(constants.CtxKeyUIN, uint(84))
+		ctx.Set(constants.CtxKeyCompanyID, uint(126))
+		ctx.Set(constants.CtxKeyMembershipEpoch, uint64(7))
 		return wantErr
 	}}
 	ai.Inject(ctx)
@@ -84,7 +88,7 @@ func TestAuthInjectorDoesNotPublishUserIDAfterFailure(t *testing.T) {
 func TestAuthInjectorFailsWhenNotConfigured(t *testing.T) {
 	ctx, _ := gin.CreateTestContext(nil)
 	ls := &auth.LoginStatus{
-		State: auth.StateSucc,
+		State: auth.StateSucc, AuthMode: auth.AuthModeBearer,
 		Claim: &auth.UserClaims{UserID: 42, UIN: 84, CompanyID: 126},
 	}
 	ctx.Set(constants.CtxKeyLoginStatus, ls)
@@ -96,5 +100,43 @@ func TestAuthInjectorFailsWhenNotConfigured(t *testing.T) {
 	}
 	if !errors.Is(ls.Err, auth.ErrAuthBackendUnavailable) {
 		t.Fatalf("LoginStatus error = %v, want ErrAuthBackendUnavailable", ls.Err)
+	}
+}
+
+func TestBrowserPublisherRejectsInvalidPrincipal(t *testing.T) {
+	for _, mode := range []auth.AuthMode{auth.AuthModeBearer, auth.AuthModeBrowserSession} {
+		ctx, _ := gin.CreateTestContext(nil)
+		ls := &auth.LoginStatus{
+			State: auth.StateSucc, AuthMode: mode,
+			Claim: &auth.UserClaims{UserID: 1, UIN: 2, CompanyID: 3},
+		}
+		ctx.Set(constants.CtxKeyLoginStatus, ls)
+		new(authInjector).publishBrowserPrincipal(ctx)
+		if ls.State != auth.StateFailed || !errors.Is(ls.Err, auth.ErrInvalidPrincipal) || ctx.GetUint(constants.CtxKeyUserID) != 0 {
+			t.Fatal("invalid browser principal was accepted")
+		}
+	}
+}
+
+func TestBrowserPrincipalDoesNotCallBearerInjector(t *testing.T) {
+	ctx, _ := gin.CreateTestContext(nil)
+	ls := &auth.LoginStatus{State: auth.StateSucc, AuthMode: auth.AuthModeBrowserSession,
+		Claim: &auth.UserClaims{UserID: 1, UIN: 2, CompanyID: 3, MembershipEpoch: 4}}
+	ctx.Set(constants.CtxKeyLoginStatus, ls)
+	injectorCalls := 0
+	ai := &authInjector{injector: func(_ *gin.Context, _ *auth.LoginStatus) error {
+		injectorCalls++
+		return auth.ErrAuthBackendUnavailable
+	}}
+
+	ai.publishBrowserPrincipal(ctx)
+
+	if injectorCalls != 0 {
+		t.Fatalf("Bearer injector calls = %d, want 0", injectorCalls)
+	}
+	if ls.State != auth.StateSucc || ctx.GetUint(constants.CtxKeyUserID) != 1 ||
+		ctx.GetUint(constants.CtxKeyUIN) != 2 || ctx.GetUint(constants.CtxKeyCompanyID) != 3 ||
+		ctx.GetUint64(constants.CtxKeyMembershipEpoch) != 4 {
+		t.Fatal("verified browser principal was not published")
 	}
 }

@@ -20,19 +20,22 @@ const (
 	DefaultCSRFHeader = "X-CSRF-Token"
 )
 
-// BrowserSessionOptions 配置浏览器 Cookie Session 和 CSRF 中间件。
-type BrowserSessionOptions struct {
-	// Service 表示传给会话解析器的静态服务标识。
+// BrowserSessionBinding binds one exact canonical Host to its browser identity boundary.
+type BrowserSessionBinding struct {
+	// Host includes an explicit port when that port is part of the boundary.
+	Host string
+	// Service is the authoritative resolver's registered service identifier.
 	Service string
-
-	// CookieName 表示当前业务 Host 唯一允许的 __Host- Session Cookie 名称。
+	// CookieName is the Host-only __Host- session cookie for this Host.
 	CookieName string
-
-	// AllowedHosts 表示该服务精确允许的规范 Host 集合。
-	AllowedHosts map[string]struct{}
-
 	// ExternalOrigin 表示应用确认的外部同源 Origin；为空时根据 TLS 和 Request.Host 判定。
 	ExternalOrigin string
+}
+
+// BrowserSessionOptions 配置浏览器 Cookie Session 和 CSRF 中间件。
+type BrowserSessionOptions struct {
+	// Bindings is copied and validated at construction; Hosts must be unique.
+	Bindings []BrowserSessionBinding
 
 	// Resolver 表示受信任的会话主体解析器。
 	Resolver auth.SessionResolver
@@ -48,17 +51,8 @@ type BrowserSessionOptions struct {
 }
 
 type normalizedBrowserSessionOptions struct {
-	// service 保存已校验的静态服务标识。
-	service string
-
-	// cookieName 保存已校验的 Session Cookie 名称。
-	cookieName string
-
-	// allowedHosts 保存调用方无法再修改的 Host Allowlist 副本。
-	allowedHosts map[string]struct{}
-
-	// externalOrigin 保存应用确认的规范外部同源 Origin。
-	externalOrigin string
+	// bindings owns immutable value copies indexed by exact Host.
+	bindings map[string]BrowserSessionBinding
 
 	// resolver 保存受信任的会话主体解析器。
 	resolver auth.SessionResolver
@@ -73,13 +67,32 @@ type normalizedBrowserSessionOptions struct {
 	unsafeMethods map[string]struct{}
 }
 
-// NewBrowserSessionMiddleware 创建严格解析当前 Host Cookie Session 的中间件。
-func NewBrowserSessionMiddleware(options BrowserSessionOptions) (gin.HandlerFunc, error) {
-	normalized, err := normalizeBrowserSessionOptions(options, true)
-	if err != nil {
-		return nil, err
-	}
+// BrowserSessionHandlers contains the three route boundaries sharing one
+// immutable, startup-validated Host directory.
+type BrowserSessionHandlers struct {
+	// Session resolves the current Host's browser principal.
+	Session gin.HandlerFunc
+	// CSRF verifies unsafe requests against that Host's origin and session token.
+	CSRF gin.HandlerFunc
+	// Bearer rejects the current Host's browser cookie before token verification.
+	Bearer gin.HandlerFunc
+}
 
+// NewBrowserSessionHandlers validates once and shares one frozen Host directory
+// across the Session, CSRF and Bearer route boundaries.
+func NewBrowserSessionHandlers(options BrowserSessionOptions) (BrowserSessionHandlers, error) {
+	normalized, err := normalizeBrowserSessionOptions(options)
+	if err != nil {
+		return BrowserSessionHandlers{}, err
+	}
+	return BrowserSessionHandlers{
+		Session: browserSessionMiddleware(normalized),
+		CSRF:    csrfMiddleware(normalized),
+		Bearer:  browserBearerMiddleware(normalized.bindings),
+	}, nil
+}
+
+func browserSessionMiddleware(normalized normalizedBrowserSessionOptions) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		ls := &auth.LoginStatus{AuthMode: auth.AuthModeBrowserSession}
 		ctx.Set(constants.CtxKeyLoginStatus, ls)
@@ -89,13 +102,14 @@ func NewBrowserSessionMiddleware(options BrowserSessionOptions) (gin.HandlerFunc
 			return
 		}
 
-		host, err := allowedCanonicalHost(ctx.Request.Host, normalized.allowedHosts)
-		if err != nil {
-			failLoginStatus(ls, err)
+		host := ctx.Request.Host
+		binding, ok := normalized.bindings[host]
+		if !ok {
+			failLoginStatus(ls, auth.ErrInvalidCredential)
 			return
 		}
 
-		cookies := matchingCookies(ctx.Request, normalized.cookieName)
+		cookies := matchingCookies(ctx.Request, binding.CookieName)
 		if len(cookies) == 0 {
 			return
 		}
@@ -106,7 +120,7 @@ func NewBrowserSessionMiddleware(options BrowserSessionOptions) (gin.HandlerFunc
 
 		principal, err := normalized.resolver.Resolve(ctx.Request.Context(), auth.SessionResolveRequest{
 			Host:      host,
-			Service:   normalized.service,
+			Service:   binding.Service,
 			SessionID: cookies[0].Value,
 		})
 		if err != nil {
@@ -119,46 +133,24 @@ func NewBrowserSessionMiddleware(options BrowserSessionOptions) (gin.HandlerFunc
 		}
 
 		ctx.Set(constants.CtxKeyLoginStatus, auth.NewBrowserSessionLoginStatus(*principal))
-	}, nil
+	}
 }
 
-func normalizeBrowserSessionOptions(options BrowserSessionOptions, requireResolver bool) (normalizedBrowserSessionOptions, error) {
-	service := strings.TrimSpace(options.Service)
-	if service == "" || service != options.Service {
-		return normalizedBrowserSessionOptions{}, fmt.Errorf("%w: service must be a non-empty canonical value", auth.ErrAuthBackendUnavailable)
+func normalizeBrowserSessionOptions(options BrowserSessionOptions) (normalizedBrowserSessionOptions, error) {
+	if len(options.Bindings) == 0 {
+		return normalizedBrowserSessionOptions{}, fmt.Errorf("%w: browser bindings are empty", auth.ErrAuthBackendUnavailable)
 	}
-	if !strings.HasPrefix(options.CookieName, "__Host-") || len(options.CookieName) == len("__Host-") {
-		return normalizedBrowserSessionOptions{}, fmt.Errorf("%w: browser session cookie must use __Host- prefix", auth.ErrAuthBackendUnavailable)
-	}
-	if err := validateCookieName(options.CookieName); err != nil {
-		return normalizedBrowserSessionOptions{}, err
-	}
-	if len(options.AllowedHosts) == 0 {
-		return normalizedBrowserSessionOptions{}, fmt.Errorf("%w: allowed hosts are empty", auth.ErrAuthBackendUnavailable)
-	}
-	allowedHosts := make(map[string]struct{}, len(options.AllowedHosts))
-	for host := range options.AllowedHosts {
-		if err := validateCanonicalHost(host); err != nil {
-			return normalizedBrowserSessionOptions{}, fmt.Errorf("%w: invalid allowed host", auth.ErrAuthBackendUnavailable)
+	bindings := make(map[string]BrowserSessionBinding, len(options.Bindings))
+	for _, binding := range options.Bindings {
+		if err := validateBrowserSessionBinding(binding); err != nil {
+			return normalizedBrowserSessionOptions{}, err
 		}
-		allowedHosts[host] = struct{}{}
+		if _, exists := bindings[binding.Host]; exists {
+			return normalizedBrowserSessionOptions{}, fmt.Errorf("%w: duplicate browser binding host", auth.ErrAuthBackendUnavailable)
+		}
+		bindings[binding.Host] = binding
 	}
-	externalOrigin := ""
-	if options.ExternalOrigin != "" {
-		var err error
-		externalOrigin, err = canonicalOrigin(options.ExternalOrigin)
-		if err != nil {
-			return normalizedBrowserSessionOptions{}, fmt.Errorf("%w: invalid external origin", auth.ErrAuthBackendUnavailable)
-		}
-		parsed, err := url.Parse(externalOrigin)
-		if err != nil {
-			return normalizedBrowserSessionOptions{}, fmt.Errorf("%w: invalid external origin", auth.ErrAuthBackendUnavailable)
-		}
-		if _, ok := allowedHosts[parsed.Host]; !ok {
-			return normalizedBrowserSessionOptions{}, fmt.Errorf("%w: external origin host is not allowed", auth.ErrAuthBackendUnavailable)
-		}
-	}
-	if requireResolver && options.Resolver == nil {
+	if options.Resolver == nil {
 		return normalizedBrowserSessionOptions{}, fmt.Errorf("%w: session resolver is nil", auth.ErrAuthBackendUnavailable)
 	}
 
@@ -188,15 +180,38 @@ func normalizeBrowserSessionOptions(options BrowserSessionOptions, requireResolv
 	}
 
 	return normalizedBrowserSessionOptions{
-		service:        service,
-		cookieName:     options.CookieName,
-		allowedHosts:   allowedHosts,
-		externalOrigin: externalOrigin,
-		resolver:       options.Resolver,
-		clock:          clock,
-		csrfHeader:     csrfHeader,
-		unsafeMethods:  unsafeMethods,
+		bindings:      bindings,
+		resolver:      options.Resolver,
+		clock:         clock,
+		csrfHeader:    csrfHeader,
+		unsafeMethods: unsafeMethods,
 	}, nil
+}
+
+func validateBrowserSessionBinding(binding BrowserSessionBinding) error {
+	if binding.Service == "" || strings.TrimSpace(binding.Service) != binding.Service {
+		return fmt.Errorf("%w: invalid browser binding service", auth.ErrAuthBackendUnavailable)
+	}
+	if err := validateCanonicalHost(binding.Host); err != nil {
+		return fmt.Errorf("%w: invalid browser binding host", auth.ErrAuthBackendUnavailable)
+	}
+	if !strings.HasPrefix(binding.CookieName, "__Host-") || len(binding.CookieName) == len("__Host-") {
+		return fmt.Errorf("%w: browser session cookie must use __Host- prefix", auth.ErrAuthBackendUnavailable)
+	}
+	if err := validateCookieName(binding.CookieName); err != nil {
+		return err
+	}
+	if binding.ExternalOrigin != "" {
+		origin, err := canonicalOrigin(binding.ExternalOrigin)
+		if err != nil {
+			return fmt.Errorf("%w: invalid external origin", auth.ErrAuthBackendUnavailable)
+		}
+		parsed, err := url.Parse(origin)
+		if err != nil || parsed.Host != binding.Host {
+			return fmt.Errorf("%w: external origin host differs from binding host", auth.ErrAuthBackendUnavailable)
+		}
+	}
+	return nil
 }
 
 func resolverError(err error) error {
@@ -228,16 +243,6 @@ func validateSessionPrincipal(principal *auth.SessionPrincipal, host string, now
 		return auth.ErrInvalidCredential
 	}
 	return nil
-}
-
-func allowedCanonicalHost(host string, allowedHosts map[string]struct{}) (string, error) {
-	if err := validateCanonicalHost(host); err != nil {
-		return "", auth.ErrInvalidCredential
-	}
-	if _, ok := allowedHosts[host]; !ok {
-		return "", auth.ErrInvalidCredential
-	}
-	return host, nil
 }
 
 func validateCanonicalHost(host string) error {

@@ -58,7 +58,7 @@ type Task struct {
 	// Payload 任务数据
 	Payload string `gorm:"type:longtext;column:payload;comment:task payload" json:"payload"`
 	// Result 任务结果
-	Result string `gorm:"type:text;column:result;comment:task result" json:"result"`
+	Result string `gorm:"type:longtext;column:result;comment:task result" json:"result"`
 	// AppGroup 任务分组
 	AppGroup string `gorm:"type:varchar(32);column:app_group;comment:task app group" json:"app_group"`
 
