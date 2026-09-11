@@ -44,7 +44,7 @@ func (ai *authInjector) Inject(ctx *gin.Context) {
 	if err == nil && (ls.State != auth.StateSucc || ls.Claim == nil || ls.Claim.UserID == 0 || ls.Claim.UIN == 0 || ls.Claim.CompanyID == 0) {
 		err = auth.ErrInvalidPrincipal
 	}
-		if err != nil {
+	if err != nil {
 		rejectPrincipal(ctx, ls, err)
 		ctx.Next()
 		return
