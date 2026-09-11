@@ -8,11 +8,11 @@
 
 ## 冻结版本
 
-| 仓库 | 当前实现提交 | 作用 |
+| 仓库 | 实现提交 / `main` merge | 作用 |
 | --- | --- | --- |
-| JXpKG | `fbaafaea11397b928d0344b7e837478ec94dbcfc` | Consumer/Provider、路由边界、Browser 与 Bearer 隔离 |
-| Account | `5ab5fa012f425152f44aa4a4c8fa34f6ed70597e` | 唯一 Authority、Provider 接入、legacy Bearer 弃用标记 |
-| JXOne | `3c5b7c6538b12002152c49826de6aebf7b2f95a6` | 最小 Consumer 接入、业务 accessor 使用 |
+| JXpKG | `fbaafaea1139` / `53a9318278c6` | Consumer/Provider、路由边界、Browser 与 Bearer 隔离 |
+| Account | `5ab5fa012f42` / `898c3afaace2` | 唯一 Authority、Provider 接入、legacy Bearer 弃用标记 |
+| JXOne | `3c5b7c6538b1` / `bc11c5503976` | 最小 Consumer 接入、业务 accessor 使用 |
 
 Account 与 JXOne 固定官方 pseudo-version
 `github.com/JUXON-AI/jxpkg v0.0.14-0.20260911085822-fbaafaea1139`。
@@ -194,22 +194,22 @@ release set 并由正常 promote workflow 部署。旧 `ACCOUNT_BUSINESS_HOST` S
 
 ## 最终部署证据
 
-namespace `jxone` 当前 candidate：
+以下是 2026-09-11 18:16、Account 独立 namespace 迁移开始前的最终验收快照：
 
 | Workload | Source | Immutable image |
 | --- | --- | --- |
-| Account API | `5ab5fa012f42` | `account-api@sha256:fabe5118cc4b853dbb15d63a983f4979601811262bc8aece9dc3e65e61738d70` |
-| JXOne API | `3c5b7c6538b1` | `juxonone-api@sha256:3eb95dc0bb70a49a056458233c208a8acd5b8848d6cf7b267e03bd7b84eac364` |
-| JXWorker | `3c5b7c6538b1` | `jxworker-api@sha256:6961d617641c96073781f71c09bfb40f5604ae9d3588c9e2d522ff1185253d31` |
+| Account API | `898c3afaace2` | `account-api@sha256:8ad6675f508d60e5bd0a47cf390a9bdbe7f0397a69b8e691a54d35a40b70933c` |
+| JXOne API | `bc11c5503976` | `juxonone-api@sha256:3eb95dc060ad809ab72083d417d0200e2078c8f4e82ffc82eefa3f6400440d1a` |
+| JXWorker | `bc11c5503976` | `jxworker-api@sha256:606a28109131821219098aeb67c16a5209ead4fbe0cee085a83aa551a961cdda` |
 
 镜像 buildinfo 均包含 JXpKG pseudo-version `...-fbaafaea1139`。Account 还直接记录
-`vcs.revision=5ab5fa0...` 和 `vcs.modified=false`；JXOne Docker build context 排除
+`vcs.revision=898c3af...` 和 `vcs.modified=false`；JXOne Docker build context 排除
 `.git`，因此其 app binary 无 VCS setting，源码身份由 CI checkout SHA 与不可变 tag/digest
 共同固定。
 
 验证结果：
 
-- release set：`k3syaml` `01afaf396974`，deploy run `34584065918` 成功；
+- release set：`k3syaml` merge `4f26809b63db`，deploy run `34588106613` 成功；
 - rollout：Account/JXOne/Worker Ready 为 1/1/2；4 个当前 Pod 均 0 restart；
 - 日志：未发现 panic、fatal、x509、resolver 或 Redis 错误；
 - `k3syaml` `module` smoke：`pass=22 fail=0 blocked=0 manual=0`；
@@ -222,6 +222,9 @@ namespace `jxone` 当前 candidate：
 
 以上不是使用真实用户凭据完成的浏览器验收，不能替代登录、身份切换、权限、CSRF、
 跨源拒绝和退出失效的人工作业。
+
+此快照之后的 Pod、Service、DNS、NetworkPolicy 或证书变化可能来自独立进行的 Account
+namespace 迁移，不应未经 release-set 与集群拓扑核对就判定为 SSO 代码回归。
 
 ## 测试与已知限制
 
