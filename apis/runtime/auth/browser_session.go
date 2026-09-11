@@ -5,13 +5,13 @@ import "context"
 // SessionResolveRequest 描述业务服务解析浏览器会话所需的最小输入。
 type SessionResolveRequest struct {
 	// Host 表示经过严格校验的当前请求 Host。
-	Host string
+	Host string `json:"host"`
 
 	// Service 表示调用会话解析器的静态服务标识。
-	Service string
+	Service string `json:"service"`
 
 	// SessionID 表示当前 Host Cookie 中的原始不透明会话 ID。
-	SessionID string
+	SessionID string `json:"session_id"`
 }
 
 // SessionPrincipal 表示会话解析器返回的最小认证主体快照。

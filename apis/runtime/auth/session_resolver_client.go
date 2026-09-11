@@ -51,18 +51,8 @@ type InternalSessionResolverClient struct {
 
 var _ SessionResolver = (*InternalSessionResolverClient)(nil)
 
-type sessionResolveWireRequest struct {
-	// Host 表示浏览器请求的规范 Host。
-	Host string `json:"host"`
-
-	// Service 表示调用方静态服务标识。
-	Service string `json:"service"`
-
-	// SessionID 表示 Host-only Cookie 中的不透明会话标识。
-	SessionID string `json:"session_id"`
-}
-
-type sessionResolveWireResponse struct {
+// SessionResolveResponse is the fixed JSON representation shared by resolver peers.
+type SessionResolveResponse struct {
 	// UserID 表示系统全局用户标识。
 	UserID uint `json:"user_id"`
 
@@ -137,7 +127,7 @@ func (client *InternalSessionResolverClient) Resolve(ctx context.Context, reques
 	if !validSessionResolveHost(request.Host) || !validOpaqueSessionID(request.SessionID) {
 		return nil, ErrInvalidCredential
 	}
-	body, err := json.Marshal(sessionResolveWireRequest{
+	body, err := json.Marshal(SessionResolveRequest{
 		Host: request.Host, Service: client.service, SessionID: request.SessionID,
 	})
 	if err != nil {
@@ -182,7 +172,7 @@ func (client *InternalSessionResolverClient) Resolve(ctx context.Context, reques
 	if err := validateJSONObject(document); err != nil {
 		return nil, fmt.Errorf("%w: invalid session resolve response", ErrAuthBackendUnavailable)
 	}
-	var wire sessionResolveWireResponse
+	var wire SessionResolveResponse
 	decoder := json.NewDecoder(bytes.NewReader(document))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&wire); err != nil {

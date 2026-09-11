@@ -19,7 +19,7 @@ func TestInternalSessionResolverClientResolvesCompanyIdentities(t *testing.T) {
 			request.Header.Get("Cache-Control") != "no-store" {
 			t.Fatalf("headers = %#v", request.Header)
 		}
-		var body companyIdentityResolveWireRequest
+		var body CompanyIdentityResolveRequest
 		decoder := json.NewDecoder(request.Body)
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&body); err != nil {

@@ -39,34 +39,34 @@ const (
 // CompanyIdentity 表示业务服务执行成员授权所需的最小 Account 身份快照。
 type CompanyIdentity struct {
 	// UIN 表示身份在 Account 中的公司内标识。
-	UIN uint
+	UIN uint `json:"uin"`
 
 	// MembershipEpoch 表示身份重新加入公司时单调递增的授权代次。
-	MembershipEpoch uint64
+	MembershipEpoch uint64 `json:"membership_epoch"`
 
 	// Username 表示身份在公司内的显示名称。
-	Username string
+	Username string `json:"username"`
 
 	// AvatarURL 表示身份在公司内的头像地址。
-	AvatarURL string
+	AvatarURL string `json:"avatar_url"`
 
 	// Status 表示身份当前是否可用于访问业务资源。
-	Status CompanyIdentityStatus
+	Status CompanyIdentityStatus `json:"status"`
 
 	// IsCompanyOwner 表示该身份是否是公司的当前权威所有者。
-	IsCompanyOwner bool
+	IsCompanyOwner bool `json:"is_company_owner"`
 }
 
 // CompanyIdentityResolveRequest 描述业务服务批量解析公司身份所需的输入。
 type CompanyIdentityResolveRequest struct {
 	// Service 表示调用方在 Account 工作负载注册表中的静态服务标识。
-	Service string
+	Service string `json:"service"`
 
 	// CompanyID 表示所有目标身份必须所属的公司。
-	CompanyID uint
+	CompanyID uint `json:"company_id"`
 
 	// UINs 表示待解析的去重公司身份标识，最多允许 256 个。
-	UINs []uint
+	UINs []uint `json:"uins"`
 }
 
 // CompanyIdentityResolver 批量返回 Account 权威的最小公司身份快照。
@@ -74,24 +74,12 @@ type CompanyIdentityResolver interface {
 	ResolveCompanyIdentities(context.Context, CompanyIdentityResolveRequest) ([]CompanyIdentity, error)
 }
 
-type companyIdentityResolveWireRequest struct {
-	Service   string `json:"service"`
-	CompanyID uint   `json:"company_id"`
-	UINs      []uint `json:"uins"`
-}
-
-type companyIdentityResolveWireResponse struct {
-	CompanyID  uint                                 `json:"company_id"`
-	Identities []companyIdentityResolveWireIdentity `json:"identities"`
-}
-
-type companyIdentityResolveWireIdentity struct {
-	UIN             uint                  `json:"uin"`
-	MembershipEpoch uint64                `json:"membership_epoch"`
-	Username        string                `json:"username"`
-	AvatarURL       string                `json:"avatar_url"`
-	Status          CompanyIdentityStatus `json:"status"`
-	IsCompanyOwner  bool                  `json:"is_company_owner"`
+// CompanyIdentityResolveResponse binds the returned identity list to its company.
+type CompanyIdentityResolveResponse struct {
+	// CompanyID identifies the company requested by the authenticated caller.
+	CompanyID uint `json:"company_id"`
+	// Identities contains existing requested identities and never placeholder rows.
+	Identities []CompanyIdentity `json:"identities"`
 }
 
 var _ CompanyIdentityResolver = (*InternalSessionResolverClient)(nil)
@@ -117,7 +105,7 @@ func (client *InternalSessionResolverClient) ResolveCompanyIdentities(
 		}
 		requested[uin] = struct{}{}
 	}
-	body, err := json.Marshal(companyIdentityResolveWireRequest{
+	body, err := json.Marshal(CompanyIdentityResolveRequest{
 		Service: client.service, CompanyID: request.CompanyID, UINs: request.UINs,
 	})
 	if err != nil {
@@ -159,7 +147,7 @@ func (client *InternalSessionResolverClient) ResolveCompanyIdentities(
 	if err := validateJSONObject(document); err != nil {
 		return nil, fmt.Errorf("%w: invalid company identity response", ErrAuthBackendUnavailable)
 	}
-	var wire companyIdentityResolveWireResponse
+	var wire CompanyIdentityResolveResponse
 	decoder := json.NewDecoder(bytes.NewReader(document))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&wire); err != nil || wire.CompanyID != request.CompanyID || len(wire.Identities) > len(request.UINs) {
