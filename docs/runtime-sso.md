@@ -21,9 +21,32 @@ router := server.NewRouter(
 )
 ```
 
+`Runtime.RouterOptions()` installs the public `middleware.BrowserSecurity`
+pair. Its Session resolver always executes before the CSRF validator, and
+`server.PRequireBrowserSession` then uses that same pair for every protected
+browser route.
+
 The application still registers its own routes and makes its own domain
 authorization decisions. For example, a project service must still decide
 which project roles may modify a project.
+
+## Account issuer integration
+
+Account does not use `LoadEnv`: it owns the authoritative SessionStore and
+builds an in-process `auth.SessionResolver`. It uses the same public middleware
+composition after creating its host-specific `BrowserSessionOptions`:
+
+```go
+security, err := middleware.NewBrowserSecurity(accountBrowserSessionOptions)
+if err != nil {
+    return err
+}
+router := server.NewRouter("/v1/", server.WithBrowserSecurity(security))
+```
+
+Account may retain a small domain adapter that selects a CORS origin from its
+registered Client host. The CORS algorithm, browser Session resolution, CSRF
+validation, and protected-route wiring remain jxpkg components.
 
 ## Required deployment keys
 

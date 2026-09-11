@@ -138,12 +138,35 @@ func WithCORS(corsMiddleware gin.HandlerFunc) RouterOption {
 // WithBrowserSession 配置显式浏览器 Cookie Session 路由链。
 func WithBrowserSession(options middleware.BrowserSessionOptions) RouterOption {
 	return func(svr *Router) {
-		svr.browserSessionCookieName = options.CookieName
-		svr.browserSessionMiddleware, svr.browserSessionErr = middleware.NewBrowserSessionMiddleware(options)
-		if svr.browserSessionErr != nil {
+		security, err := middleware.NewBrowserSecurity(options)
+		if err != nil {
+			svr.browserSessionCookieName = options.CookieName
+			svr.browserSessionErr = err
 			return
 		}
-		svr.browserCSRFMiddleware, svr.browserSessionErr = middleware.NewCSRFMiddleware(options)
+		WithBrowserSecurity(security)(svr)
+	}
+}
+
+// WithBrowserSecurity installs a pre-built browser Session and CSRF middleware
+// pair. It is the preferred option for shared SSO runtime integrations.
+func WithBrowserSecurity(security *middleware.BrowserSecurity) RouterOption {
+	return func(svr *Router) {
+		if svr == nil || security == nil {
+			if svr != nil {
+				svr.browserSessionErr = fmt.Errorf("%w: browser security middleware is not configured", auth.ErrAuthBackendUnavailable)
+			}
+			return
+		}
+		session, csrf := security.Handlers()
+		if session == nil || csrf == nil || security.CookieName() == "" {
+			svr.browserSessionErr = fmt.Errorf("%w: browser security middleware is not configured", auth.ErrAuthBackendUnavailable)
+			return
+		}
+		svr.browserSessionCookieName = security.CookieName()
+		svr.browserSessionMiddleware = session
+		svr.browserCSRFMiddleware = csrf
+		svr.browserSessionErr = nil
 	}
 }
 

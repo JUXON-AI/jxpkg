@@ -271,6 +271,26 @@ func TestRouterWithCORSWiresConfiguredOrigin(t *testing.T) {
 	}
 }
 
+func TestWithBrowserSecurityFailsClosedWhenMissing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	called := false
+	router := NewRouter("/v1/", WithBrowserSecurity(nil))
+	router.PRequireBrowserSession("resource", func(ctx *gin.Context) {
+		called = true
+		ctx.Status(http.StatusNoContent)
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "https://app.example.com/v1/resource", nil)
+	router.GinEngine().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	if called {
+		t.Fatal("protected handler was called without browser security")
+	}
+}
+
 func TestRouterWithCORSPreservesCustomMiddlewareOrder(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	order := make([]string, 0, 8)

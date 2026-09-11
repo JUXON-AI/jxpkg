@@ -31,7 +31,7 @@ const (
 type Runtime struct {
 	origin    string
 	resolver  *auth.InternalSessionResolverClient
-	session   middleware.BrowserSessionOptions
+	security  *middleware.BrowserSecurity
 	cors      gin.HandlerFunc
 	transport *http.Transport
 }
@@ -76,11 +76,8 @@ func LoadEnv(getenv func(string) string, prefix string) (*Runtime, error) {
 		ExternalOrigin: origin,
 		Resolver:       resolver,
 	}
-	if _, err := middleware.NewBrowserSessionMiddleware(session); err != nil {
-		transport.CloseIdleConnections()
-		return nil, err
-	}
-	if _, err := middleware.NewCSRFMiddleware(session); err != nil {
+	security, err := middleware.NewBrowserSecurity(session)
+	if err != nil {
 		transport.CloseIdleConnections()
 		return nil, err
 	}
@@ -89,7 +86,7 @@ func LoadEnv(getenv func(string) string, prefix string) (*Runtime, error) {
 		transport.CloseIdleConnections()
 		return nil, err
 	}
-	return &Runtime{origin: origin, resolver: resolver, session: session, cors: cors, transport: transport}, nil
+	return &Runtime{origin: origin, resolver: resolver, security: security, cors: cors, transport: transport}, nil
 }
 
 // Origin returns the normalized external origin after LoadEnv has validated it.
@@ -107,7 +104,7 @@ func (runtime *Runtime) RouterOptions() []server.RouterOption {
 	}
 	return []server.RouterOption{
 		server.WithCORS(runtime.cors),
-		server.WithBrowserSession(runtime.session),
+		server.WithBrowserSecurity(runtime.security),
 	}
 }
 

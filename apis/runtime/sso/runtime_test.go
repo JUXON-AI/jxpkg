@@ -1,6 +1,19 @@
 package sso
 
-import "testing"
+import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
 
 func TestValidPrefix(t *testing.T) {
 	for _, test := range []struct {
@@ -39,4 +52,75 @@ func TestLoadEnvFailsClosedBeforeReadingFiles(t *testing.T) {
 	if runtime, err := LoadEnv(func(string) string { return "" }, "juxonone"); err == nil || runtime != nil {
 		t.Fatalf("LoadEnv(invalid prefix) = %#v, %v", runtime, err)
 	}
+}
+
+func TestLoadEnvBuildsImmutableBrowserSecurityRuntime(t *testing.T) {
+	certFile, keyFile, caFile := writeTestTLSFiles(t)
+	values := map[string]string{
+		"JUXONONE_BROWSER_ALLOWED_HOSTS_JSON":     `["one.example.com"]`,
+		"JUXONONE_BROWSER_SESSION_COOKIE":         "__Host-juxonone_session",
+		"JUXONONE_EXTERNAL_ORIGIN":                "https://one.example.com",
+		"JUXONONE_SESSION_RESOLVER_ENDPOINT":      "https://account.example.com/internal/session/resolve",
+		"JUXONONE_SESSION_RESOLVER_SERVICE":       "juxonone",
+		"JUXONONE_SESSION_RESOLVER_TLS_CERT_FILE": certFile,
+		"JUXONONE_SESSION_RESOLVER_TLS_KEY_FILE":  keyFile,
+		"JUXONONE_SESSION_RESOLVER_CA_FILE":       caFile,
+	}
+	runtime, err := LoadEnv(func(key string) string { return values[key] }, "JUXONONE")
+	if err != nil {
+		t.Fatalf("LoadEnv() error = %v", err)
+	}
+	defer runtime.Close()
+	if runtime.Origin() != "https://one.example.com" || runtime.CompanyIdentityResolver() == nil || len(runtime.RouterOptions()) != 2 {
+		t.Fatalf("LoadEnv() returned an incomplete runtime")
+	}
+	if runtime.transport.Proxy != nil || runtime.transport.TLSClientConfig.MinVersion != tls.VersionTLS13 {
+		t.Fatal("resolver transport does not enforce its proxy and TLS policy")
+	}
+}
+
+// writeTestTLSFiles creates a matching client certificate, private key, and CA bundle.
+func writeTestTLSFiles(t *testing.T) (string, string, string) {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	template := x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "juxonone-test-client"},
+		NotBefore:    now.Add(-time.Minute),
+		NotAfter:     now.Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		IsCA:         true,
+	}
+	certificateDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKeyDER, err := x509.MarshalECPrivateKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	certFile := filepath.Join(directory, "client.crt")
+	keyFile := filepath.Join(directory, "client.key")
+	caFile := filepath.Join(directory, "ca.crt")
+	certificatePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificateDER})
+	if err := os.WriteFile(certFile, certificatePEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: privateKeyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(caFile, certificatePEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certFile, keyFile, caFile
 }
