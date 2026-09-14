@@ -40,30 +40,16 @@ git pull --ff-only
 
 ## Go 依赖
 
-当前 Account 和 JXOne 已验证的 JXpKG 版本是：
-
-```text
-github.com/JUXON-AI/jxpkg v0.0.14-0.20260911085822-fbaafaea1139
-```
-
-新服务在仓库根目录执行：
+新服务在仓库根目录解析最新正式版本，并把解析出的明确版本提交到 `go.mod`：
 
 ```bash
-go get github.com/JUXON-AI/jxpkg@v0.0.14-0.20260911085822-fbaafaea1139
+go get github.com/JUXON-AI/jxpkg@latest
 go mod tidy
 go mod verify
 ```
 
-仓库提交 vendor 时再执行 `go mod vendor`，并审阅完整 vendor diff。跨仓本地联调可以临时使用 `replace`，但提交前必须删除：
-
-```bash
-go mod edit -replace github.com/JUXON-AI/jxpkg=/absolute/path/to/jxpkg
-# 联调结束
-go mod edit -dropreplace github.com/JUXON-AI/jxpkg
-go mod tidy
-```
-
-任何 PR、镜像或发布分支都不得包含个人路径 `replace`。
+仓库提交 vendor 时再执行 `go mod vendor`，并审阅完整 vendor diff。应用开发、PR、
+镜像和发布分支统一使用正式 JXpKG 版本，不把个人路径 `replace` 作为接入步骤。
 
 ## 业务后端的最小代码
 
@@ -77,7 +63,12 @@ import (
     "github.com/JUXON-AI/jxpkg/apis/runtime/sso"
 )
 
-ssoRuntime, err := sso.LoadEnv(os.Getenv, "JXX")
+ssoRuntime, err := sso.LoadEnv(
+    os.Getenv,
+    "JXX",
+    sso.WithHTTPAddress(cfg.MainConf.HttpAddr),
+    sso.WithDevIdentity(devIdentity),
+)
 if err != nil {
     return err // 配置、证书或 Host 不完整时拒绝启动
 }
@@ -128,6 +119,55 @@ func UpdateProject(ctx *gin.Context) {
 ```
 
 可用 accessor 是 `UserID`、`UIN`、`CompanyID`、`MembershipEpoch`、`BrowserSessionExpiresAt` 和 `LoginWay`。这些函数不会自行认证，只能在正确的受保护路由内使用。
+
+## 最小本地调试
+
+本地业务开发不需要启动 Account。应用把一个 `sso.DevIdentity` 直接绑定到 Cobra：
+
+```go
+var devIdentity sso.DevIdentity
+
+rootCmd.Flags().Var(&devIdentity, "dev", "local identity as user_id:uin:company_id")
+```
+
+需要临时身份时直接启动，不读取文件：
+
+```bash
+go run ./apps/jxagent/cmd -c ./secrets/jxagent.yaml --dev=1:2:3
+```
+
+需要跨启动保留身份时，使用同一个 Runtime 的文件来源：
+
+```text
+JXX_SSO_MODE=local
+JXX_SSO_DEV_AUTH_FILE=.authjson
+JXX_HTTP_ADDR=127.0.0.1:8080
+JXX_EXTERNAL_ORIGIN=http://localhost:5173
+JXX_SESSION_RESOLVER_SERVICE=jxx
+```
+
+第一次启动会创建权限为 `0600` 的完整空模板并提示退出：
+
+```json
+{"user_id": 0, "uin": 0, "company_id": 0}
+```
+
+填入三个正整数并重新启动。之后 `curl` 只增加一个 Header，SDK 会让请求继续经过
+现有 `PRequireBrowserSession` 并发布同样的 verified Context：
+
+```bash
+curl --fail-with-body \
+  -H 'X-JX-Dev-UIN: active' \
+  -H 'Content-Type: application/json' \
+  --data '{"request":{}}' \
+  http://127.0.0.1:8080/v1/jxx.SomeAction
+```
+
+本地模式只接受 loopback listener、loopback Origin 和 loopback 请求，拒绝代理转发、
+Bearer 混用及 Kubernetes 环境。它只提供现有前端启动所需的 `/auth/session`，不签发
+Cookie、不模拟 `/v1/account.*`。前端 dev proxy 可向 `/auth/session` 与业务 API
+自动增加同一个 Header。要测试真实登录、Cookie、CSRF 或 TLS 链路，改用
+`JXX_SSO_MODE=account` 和下文的完整 Account 配置。
 
 ## 前端接入
 
@@ -214,7 +254,7 @@ await fetch("/v1/jxx.UpdateProject", {
 
 ## Consumer 环境变量
 
-`sso.LoadEnv(os.Getenv, "JXX")` 要求以下八项全部存在：
+Account 模式下，`sso.LoadEnv(os.Getenv, "JXX")` 要求以下八项全部存在：
 
 ```text
 JXX_BROWSER_ALLOWED_HOSTS_JSON=["jxx.example.com"]

@@ -26,22 +26,86 @@ const (
 	resolverResponseHeaderTimeout = 2 * time.Second
 )
 
-// Runtime is the immutable Account SSO integration for one business service.
-// It owns the mTLS client and exposes only the already-validated dependencies
-// that a business service needs to construct its router and authorize members.
+// Runtime is the immutable SSO integration for one business service. Account
+// mode owns an mTLS client; local mode supplies the same application contracts
+// from one loopback-only development identity.
 type Runtime struct {
+	httpAddress  string
 	origin       string
-	resolver     *auth.InternalSessionResolverClient
+	resolver     auth.CompanyIdentityResolver
 	routerOption server.RouterOption
 	transport    *http.Transport
 }
 
-// LoadEnv creates a Runtime from the established <PREFIX>_* deployment keys.
-// Prefix must omit its trailing underscore; for example, JUXONONE reads
-// JUXONONE_BROWSER_ALLOWED_HOSTS_JSON and JUXONONE_SESSION_RESOLVER_ENDPOINT.
-func LoadEnv(getenv func(string) string, prefix string) (*Runtime, error) {
+type runtimeOptions struct {
+	httpAddress string
+	devIdentity *DevIdentity
+}
+
+// RuntimeOption customizes Runtime construction without changing the
+// environment contract used by existing services.
+type RuntimeOption func(*runtimeOptions) error
+
+// WithHTTPAddress supplies the application's configured HTTP listener. Local
+// development narrows wildcard listeners to IPv4 loopback; an explicit
+// <PREFIX>_HTTP_ADDR still takes precedence.
+func WithHTTPAddress(address string) RuntimeOption {
+	return func(options *runtimeOptions) error {
+		if address == "" || address != strings.TrimSpace(address) {
+			return fmt.Errorf("%w: invalid application HTTP address", auth.ErrAuthBackendUnavailable)
+		}
+		options.httpAddress = address
+		return nil
+	}
+}
+
+// WithDevIdentity selects the loopback-only local Runtime when identity is
+// non-zero. The zero value leaves mode selection to <PREFIX>_SSO_MODE.
+func WithDevIdentity(identity DevIdentity) RuntimeOption {
+	return func(options *runtimeOptions) error {
+		if identity.isZero() {
+			return nil
+		}
+		if !identity.valid() {
+			return fmt.Errorf("%w: invalid development identity", auth.ErrAuthBackendUnavailable)
+		}
+		identityCopy := identity
+		options.devIdentity = &identityCopy
+		return nil
+	}
+}
+
+// LoadEnv creates a Runtime from <PREFIX>_* keys and optional process-local
+// settings. WithDevIdentity selects the loopback-only development identity;
+// otherwise SSO_MODE=local reads the configured file, while omitted or account
+// selects Account mTLS. Prefix must omit its trailing underscore; for example,
+// JUXONONE.
+func LoadEnv(getenv func(string) string, prefix string, optionList ...RuntimeOption) (*Runtime, error) {
 	if getenv == nil || !validPrefix(prefix) {
 		return nil, auth.ErrAuthBackendUnavailable
+	}
+	options := runtimeOptions{}
+	for _, option := range optionList {
+		if option == nil {
+			return nil, auth.ErrAuthBackendUnavailable
+		}
+		if err := option(&options); err != nil {
+			return nil, err
+		}
+	}
+	mode := getenv(env(prefix, "SSO_MODE"))
+	if options.devIdentity != nil {
+		return loadLocalEnv(getenv, prefix, options)
+	}
+	if mode == "local" {
+		return loadLocalEnv(getenv, prefix, options)
+	}
+	if mode != "" && mode != "account" {
+		return nil, fmt.Errorf("%w: invalid %s", auth.ErrAuthBackendUnavailable, env(prefix, "SSO_MODE"))
+	}
+	httpAddress, err := accountHTTPAddress(getenv(env(prefix, "HTTP_ADDR")), options.httpAddress)
+	if err != nil {
+		return nil, err
 	}
 	// Validate required deployment keys before opening certificate files. Error
 	// messages identify only the key or stage, never configured values.
@@ -148,7 +212,20 @@ func LoadEnv(getenv func(string) string, prefix string) (*Runtime, error) {
 		server.WithCORS(cors)(router)
 		browserSession(router)
 	}
-	return &Runtime{origin: origin, resolver: resolver, routerOption: routerOption, transport: transport}, nil
+	return &Runtime{
+		httpAddress:  httpAddress,
+		origin:       origin,
+		resolver:     resolver,
+		routerOption: routerOption,
+		transport:    transport,
+	}, nil
+}
+
+// HTTPAddress returns the validated listener selected during Runtime
+// construction. It is non-empty when WithHTTPAddress was supplied or
+// <PREFIX>_HTTP_ADDR was configured.
+func (runtime *Runtime) HTTPAddress() string {
+	return runtime.httpAddress
 }
 
 // Origin returns the normalized external origin after LoadEnv has validated it.
@@ -162,9 +239,8 @@ func (runtime *Runtime) RouterOption() server.RouterOption {
 	return runtime.routerOption
 }
 
-// CompanyIdentityResolver returns Account's authoritative, mTLS-protected
-// directory client. Business services must still make their own domain-level
-// authorization decisions from these snapshots.
+// CompanyIdentityResolver returns the identity directory selected by LoadEnv.
+// Business services still make their own domain authorization decisions.
 func (runtime *Runtime) CompanyIdentityResolver() auth.CompanyIdentityResolver {
 	return runtime.resolver
 }

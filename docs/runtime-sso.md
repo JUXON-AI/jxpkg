@@ -9,7 +9,12 @@ or protocol replacement is introduced.
 ## Minimal application code
 
 ```go
-runtime, err := sso.LoadEnv(os.Getenv, "JUXONONE")
+runtime, err := sso.LoadEnv(
+    os.Getenv,
+    "JUXONONE",
+    sso.WithHTTPAddress(cfg.MainConf.HttpAddr),
+    sso.WithDevIdentity(devIdentity),
+)
 if err != nil {
     return err // startup fails closed
 }
@@ -31,6 +36,37 @@ route registrar and fixes their execution order.
 The application still registers its own routes and makes its own domain
 authorization decisions. For example, a project service must still decide
 which project roles may modify a project.
+
+## Local identity mode
+
+Applications may bind a `sso.DevIdentity` directly to Cobra's `--dev` flag and
+pass it through `sso.WithDevIdentity`. An explicit `--dev=1:2:3` selects local
+mode without reading a file. `WithHTTPAddress` supplies the YAML listener; the
+runtime narrows wildcard listeners to IPv4 loopback and exposes the selected
+value through `Runtime.HTTPAddress()`.
+
+For a persistent identity, set `<PREFIX>_SSO_MODE=local`, bind the HTTP listener
+and external origin to loopback, and point `<PREFIX>_SSO_DEV_AUTH_FILE` at
+`.authjson`. The first startup creates a `0600` template containing `user_id`,
+`uin`, and `company_id`; fill the three positive IDs and restart. The explicit
+flag takes precedence over the file.
+
+Requests opt in with one header:
+
+```bash
+curl --fail-with-body \
+  -H 'X-JX-Dev-UIN: active' \
+  -H 'Content-Type: application/json' \
+  --data '{"request":{}}' \
+  http://127.0.0.1:8080/v1/juxonone.ListProjects
+```
+
+The SDK routes that request through the existing `PRequireBrowserSession`
+chain and publishes the same verified runtime identity. Local mode does not
+issue cookies or emulate Account business APIs. It rejects Kubernetes,
+non-loopback, forwarded, ambiguous Bearer, and missing-identity requests.
+See the maintained [integration guide](sso-integration-guide.md#最小本地调试)
+for environment keys and frontend proxy behavior.
 
 ## Account issuer integration
 
@@ -127,7 +163,7 @@ and unavailable/missing companies to `auth.ErrCompanyIdentityNotFound` for the
 directory endpoint. Provider preserves 401/503/404 respectively. Domain errors
 are logged once with safe stage/type information; raw session IDs are never logged.
 
-## Required deployment keys
+## Required Account-mode deployment keys
 
 For prefix `JUXONONE`, the SDK reads these existing keys:
 
