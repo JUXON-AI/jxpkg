@@ -196,7 +196,12 @@ corsMiddleware, err := middleware.NewCORS(middleware.CORSOptions{
 - `PRequireLogin`：兼容旧代码的 Bearer 别名；新代码不应使用。
 
 ```go
-runtime, err := sso.LoadEnv(os.Getenv, "API")
+runtime, err := sso.LoadEnv(
+    os.Getenv,
+    "API",
+    sso.WithHTTPAddress(cfg.HTTPAddr),
+    sso.WithDevIdentity(devIdentity),
+)
 if err != nil {
     return err
 }
@@ -204,6 +209,11 @@ defer runtime.Close()
 router := server.NewRouter("/v1/", runtime.RouterOption())
 router.PRequireBrowserSession("profile.Get", server.API(handler.GetProfile))
 ```
+
+`DevIdentity` 可以直接绑定 Cobra 的 `--dev=user_id:uin:company_id`；不传 flag 且
+`<PREFIX>_SSO_MODE=local` 时，runtime 也可从 `.authjson` 读取同一种身份。两种来源共用
+同一个 loopback-only Runtime，`curl` 只需增加 `X-JX-Dev-UIN: active`。完整说明见
+[JX SSO 接入指南：最小本地调试](docs/sso-integration-guide.md#最小本地调试)。
 
 新业务域名和新 JXX 服务请按 [JX SSO 接入指南](docs/sso-integration-guide.md)
 同步完成 Go 依赖、Account Client/caller 注册、Ingress、公网 TLS、resolver mTLS、
@@ -214,7 +224,7 @@ Browser Session 路由顺序固定为 Session Resolve、业务身份注入、登
 应用创建 listener 后调用 `Run`，再交给同一个进程级 lifecycle 等待退出信号：
 
 ```go
-listener, err := net.Listen("tcp", cfg.HTTPAddr)
+listener, err := net.Listen("tcp", runtime.HTTPAddress())
 if err != nil {
     return err
 }
