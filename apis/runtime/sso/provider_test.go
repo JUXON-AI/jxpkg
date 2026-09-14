@@ -49,6 +49,21 @@ type providerTestAuthority struct {
 	allowed    func(service, host string) bool
 }
 
+func (authority *providerTestAuthority) ResolveAuthorizationSubjects(_ context.Context, input auth.AuthorizationSubjectsResolveRequest) (*auth.AuthorizationSubjectsResolveResponse, error) {
+	return &auth.AuthorizationSubjectsResolveResponse{
+		CompanyID: input.CompanyID, UIN: input.UIN, MembershipEpoch: input.MembershipEpoch,
+		Users:       []auth.AuthorizationUser{{UIN: input.UIN, Username: "测试成员"}},
+		Departments: []auth.AuthorizationSubjectDepartment{{ID: 7, Name: "研发部", Path: "/7"}},
+	}, nil
+}
+
+func (authority *providerTestAuthority) ResolveAuthorizationContext(_ context.Context, input auth.AuthorizationContextResolveRequest) (*auth.AuthorizationContextResolveResponse, error) {
+	return &auth.AuthorizationContextResolveResponse{
+		CompanyID: input.CompanyID, UIN: input.UIN, MembershipEpoch: input.MembershipEpoch,
+		Departments: []auth.AuthorizationDepartment{}, AllowedPermissions: append([]auth.PermissionCode(nil), input.Permissions...),
+	}, nil
+}
+
 func (authority *providerTestAuthority) Resolve(ctx context.Context, input auth.SessionResolveRequest) (*auth.SessionPrincipal, error) {
 	return authority.sessions(ctx, input)
 }
@@ -215,6 +230,28 @@ func TestProviderDirectoryProtocol(t *testing.T) {
 				t.Fatal("empty directory must encode an array")
 			}
 		})
+	}
+}
+
+func TestProviderAuthorizationContextProtocol(t *testing.T) {
+	authority := newProviderTestAuthority()
+	request := providerTestRequest(`{"service":"app","company_id":3,"uin":2,"membership_epoch":4,"permissions":["agent.create"]}`)
+	request.URL.Path = auth.InternalAuthorizationContextResolvePath
+	writer := httptest.NewRecorder()
+	providerTestHandler(t, authority).serveHTTP(writer, request)
+	if writer.Code != http.StatusOK || !strings.Contains(writer.Body.String(), `"allowed_permissions":["agent.create"]`) {
+		t.Fatalf("status/body = %d/%s", writer.Code, writer.Body.String())
+	}
+}
+
+func TestProviderAuthorizationSubjectsProtocol(t *testing.T) {
+	authority := newProviderTestAuthority()
+	request := providerTestRequest(`{"service":"app","company_id":3,"uin":2,"membership_epoch":4}`)
+	request.URL.Path = auth.InternalAuthorizationSubjectsResolvePath
+	writer := httptest.NewRecorder()
+	providerTestHandler(t, authority).serveHTTP(writer, request)
+	if writer.Code != http.StatusOK || !strings.Contains(writer.Body.String(), `"username":"测试成员"`) || !strings.Contains(writer.Body.String(), `"name":"研发部"`) {
+		t.Fatalf("status/body = %d/%s", writer.Code, writer.Body.String())
 	}
 }
 

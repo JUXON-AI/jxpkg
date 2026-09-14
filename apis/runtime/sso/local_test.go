@@ -217,6 +217,18 @@ func TestLocalRuntimeProvidesFrontendBootstrapAndCompanyIdentity(t *testing.T) {
 	if err != nil || len(identities) != 1 || identities[0].UIN != 22 || identities[0].Status != auth.CompanyIdentityStatusActive {
 		t.Fatalf("ResolveCompanyIdentities() = %#v, %v", identities, err)
 	}
+	authorization, err := localRuntime.AuthorizationContextResolver().ResolveAuthorizationContext(context.Background(), auth.AuthorizationContextResolveRequest{
+		Service: "jxagent", CompanyID: 33, UIN: 22, MembershipEpoch: 1, Permissions: []auth.PermissionCode{"agent.create"},
+	})
+	if err != nil || !authorization.IsCompanyOwner || !authorization.Allows("agent.create") {
+		t.Fatalf("ResolveAuthorizationContext() = %#v, %v", authorization, err)
+	}
+	subjects, err := localRuntime.AuthorizationSubjectsResolver().ResolveAuthorizationSubjects(context.Background(), auth.AuthorizationSubjectsResolveRequest{
+		Service: "jxagent", CompanyID: 33, UIN: 22, MembershipEpoch: 1,
+	})
+	if err != nil || len(subjects.Users) != 1 || subjects.Users[0].UIN != 22 {
+		t.Fatalf("ResolveAuthorizationSubjects() = %#v, %v", subjects, err)
+	}
 }
 
 func TestLocalRuntimeFailsClosedOutsideExplicitLoopbackMode(t *testing.T) {

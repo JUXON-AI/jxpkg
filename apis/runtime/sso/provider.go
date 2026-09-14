@@ -42,7 +42,7 @@ type providerCaller struct {
 	AllowedHosts []string `json:"allowed_hosts"`
 }
 
-// Provider owns the internal TLS listener and exposes the two fixed resolver paths.
+// Provider owns the internal TLS listener and exposes the fixed Account resolver paths.
 // Its authority adapters remain application-owned and are never closed by Provider.
 type Provider struct {
 	authority ProviderAuthority

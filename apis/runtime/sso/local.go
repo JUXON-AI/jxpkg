@@ -90,8 +90,10 @@ type localResolver struct {
 }
 
 var (
-	_ auth.SessionResolver         = (*localResolver)(nil)
-	_ auth.CompanyIdentityResolver = (*localResolver)(nil)
+	_ auth.SessionResolver               = (*localResolver)(nil)
+	_ auth.CompanyIdentityResolver       = (*localResolver)(nil)
+	_ auth.AuthorizationContextResolver  = (*localResolver)(nil)
+	_ auth.AuthorizationSubjectsResolver = (*localResolver)(nil)
 )
 
 func loadLocalEnv(getenv func(string) string, prefix string, options runtimeOptions) (*Runtime, error) {
@@ -294,6 +296,29 @@ func (resolver *localResolver) ResolveCompanyIdentities(_ context.Context, reque
 		}
 	}
 	return result, nil
+}
+
+// ResolveAuthorizationContext 为显式的本地身份提供与 Account 模式相同的授权上下文契约。
+func (resolver *localResolver) ResolveAuthorizationContext(_ context.Context, request auth.AuthorizationContextResolveRequest) (*auth.AuthorizationContextResolveResponse, error) {
+	if request.CompanyID != resolver.identity.CompanyID || request.UIN != resolver.identity.UIN || request.MembershipEpoch != 1 {
+		return nil, auth.ErrAuthorizationDenied
+	}
+	return &auth.AuthorizationContextResolveResponse{
+		CompanyID: request.CompanyID, UIN: request.UIN, MembershipEpoch: request.MembershipEpoch,
+		IsCompanyOwner: true, Departments: []auth.AuthorizationDepartment{}, AllowedPermissions: append([]auth.PermissionCode(nil), request.Permissions...),
+	}, nil
+}
+
+// ResolveAuthorizationSubjects 为本地授权页返回唯一配置身份。
+func (resolver *localResolver) ResolveAuthorizationSubjects(_ context.Context, request auth.AuthorizationSubjectsResolveRequest) (*auth.AuthorizationSubjectsResolveResponse, error) {
+	if request.CompanyID != resolver.identity.CompanyID || request.UIN != resolver.identity.UIN || request.MembershipEpoch != 1 {
+		return nil, auth.ErrAuthorizationDenied
+	}
+	return &auth.AuthorizationSubjectsResolveResponse{
+		CompanyID: request.CompanyID, UIN: request.UIN, MembershipEpoch: request.MembershipEpoch,
+		Users:       []auth.AuthorizationUser{{UIN: resolver.identity.UIN, Username: fmt.Sprintf("Dev User %d", resolver.identity.UserID)}},
+		Departments: []auth.AuthorizationSubjectDepartment{},
+	}, nil
 }
 
 func validLocalHTTPAddress(address string) bool {
