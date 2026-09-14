@@ -200,6 +200,10 @@ func (resolver *localResolver) injectLocalIdentity(ctx *gin.Context) {
 	}
 	values := ctx.Request.Header.Values(localIdentityHeader)
 	if len(values) == 0 {
+		if hasCookie(ctx.Request, localCookieName) {
+			ctx.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
 		ctx.Next()
 		return
 	}

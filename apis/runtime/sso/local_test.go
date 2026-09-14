@@ -138,6 +138,7 @@ func TestLocalRuntimeAuthenticatesExistingBrowserRoutes(t *testing.T) {
 		name          string
 		header        []string
 		authorization string
+		cookie        bool
 		remoteAddress string
 		wantStatus    int
 	}{
@@ -147,6 +148,7 @@ func TestLocalRuntimeAuthenticatesExistingBrowserRoutes(t *testing.T) {
 		{name: "wrong UIN", header: []string{"23"}, remoteAddress: "127.0.0.1:54321", wantStatus: http.StatusUnauthorized},
 		{name: "duplicate header", header: []string{"active", "active"}, remoteAddress: "127.0.0.1:54321", wantStatus: http.StatusUnauthorized},
 		{name: "ambiguous bearer", header: []string{"active"}, authorization: "Bearer token", remoteAddress: "127.0.0.1:54321", wantStatus: http.StatusUnauthorized},
+		{name: "synthetic cookie without header", cookie: true, remoteAddress: "127.0.0.1:54321", wantStatus: http.StatusUnauthorized},
 		{name: "remote request", header: []string{"active"}, remoteAddress: "192.0.2.1:54321", wantStatus: http.StatusForbidden},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -157,6 +159,9 @@ func TestLocalRuntimeAuthenticatesExistingBrowserRoutes(t *testing.T) {
 			}
 			if test.authorization != "" {
 				request.Header.Set("Authorization", test.authorization)
+			}
+			if test.cookie {
+				request.AddCookie(&http.Cookie{Name: localCookieName, Value: localSessionID})
 			}
 			recorder := httptest.NewRecorder()
 			router.GinEngine().ServeHTTP(recorder, request)
