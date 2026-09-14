@@ -32,6 +32,13 @@ func MembershipEpoch(ctx *gin.Context) uint64 {
 	return ctx.GetUint64(constants.CtxKeyMembershipEpoch)
 }
 
+// AuthorizationContext 返回当前请求已解析的 Account 权威授权上下文。
+func AuthorizationContext(ctx *gin.Context) (*auth.AuthorizationContextResolveResponse, bool) {
+	value, exists := ctx.Get(constants.CtxKeyAuthorizationContext)
+	result, ok := value.(*auth.AuthorizationContextResolveResponse)
+	return result, exists && ok && result != nil
+}
+
 // LoginWay returns the authentication method carried by the verified request
 // principal. Unknown means no complete principal was established.
 func LoginWay(ctx *gin.Context) auth.LoginWay {

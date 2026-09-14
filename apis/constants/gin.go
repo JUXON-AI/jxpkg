@@ -25,4 +25,7 @@ const (
 
 	// CtxKeyMembershipEpoch 表示当前成员身份代次的上下文键。
 	CtxKeyMembershipEpoch = "membershipepoch"
+
+	// CtxKeyAuthorizationContext 表示 Account 权威授权上下文的键。
+	CtxKeyAuthorizationContext = "authorizationcontext"
 )

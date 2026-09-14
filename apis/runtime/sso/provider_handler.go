@@ -22,7 +22,7 @@ func (provider *Provider) serveHTTP(writer http.ResponseWriter, request *http.Re
 		providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
 		return
 	}
-	if request.Method != http.MethodPost || (request.URL.Path != auth.InternalSessionResolvePath && request.URL.Path != auth.InternalCompanyIdentityResolvePath) || request.URL.RawPath != "" || request.URL.RawQuery != "" {
+	if request.Method != http.MethodPost || !internalResolverPath(request.URL.Path) || request.URL.RawPath != "" || request.URL.RawQuery != "" {
 		providerError(writer, http.StatusNotFound, "not_found")
 		return
 	}
@@ -53,7 +53,19 @@ func (provider *Provider) serveHTTP(writer http.ResponseWriter, request *http.Re
 		provider.resolveIdentities(writer, request, caller)
 		return
 	}
+	if request.URL.Path == auth.InternalAuthorizationContextResolvePath {
+		provider.resolveAuthorizationContext(writer, request, caller)
+		return
+	}
+	if request.URL.Path == auth.InternalAuthorizationSubjectsResolvePath {
+		provider.resolveAuthorizationSubjects(writer, request, caller)
+		return
+	}
 	provider.resolveSession(writer, request, caller)
+}
+
+func internalResolverPath(path string) bool {
+	return path == auth.InternalSessionResolvePath || path == auth.InternalCompanyIdentityResolvePath || path == auth.InternalAuthorizationContextResolvePath || path == auth.InternalAuthorizationSubjectsResolvePath
 }
 
 func (provider *Provider) caller(request *http.Request) (providerCaller, bool) {
@@ -155,6 +167,62 @@ func (provider *Provider) resolveIdentities(writer http.ResponseWriter, request 
 func validProviderIdentity(identity auth.CompanyIdentity) bool {
 	status := identity.Status
 	return (status == auth.CompanyIdentityStatusActive || status == auth.CompanyIdentityStatusPending || status == auth.CompanyIdentityStatusDisabled || status == auth.CompanyIdentityStatusLeft) && (!identity.IsCompanyOwner || status == auth.CompanyIdentityStatusActive)
+}
+
+func (provider *Provider) resolveAuthorizationContext(writer http.ResponseWriter, request *http.Request, caller providerCaller) {
+	input, err := auth.DecodeAuthorizationContextResolveRequest(request.Body)
+	if err != nil || input.Service != caller.Service {
+		providerError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	resolver, ok := provider.authority.(auth.AuthorizationContextResolver)
+	if !ok {
+		providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
+		return
+	}
+	result, err := resolver.ResolveAuthorizationContext(request.Context(), input)
+	if err != nil {
+		if errors.Is(err, auth.ErrAuthorizationDenied) {
+			providerError(writer, http.StatusForbidden, "permission_denied")
+		} else {
+			providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
+		}
+		return
+	}
+	if result == nil || !auth.ValidAuthorizationContextResponse(input, *result) {
+		providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(result)
+}
+
+func (provider *Provider) resolveAuthorizationSubjects(writer http.ResponseWriter, request *http.Request, caller providerCaller) {
+	input, err := auth.DecodeAuthorizationSubjectsResolveRequest(request.Body)
+	if err != nil || input.Service != caller.Service {
+		providerError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	resolver, ok := provider.authority.(auth.AuthorizationSubjectsResolver)
+	if !ok {
+		providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
+		return
+	}
+	result, err := resolver.ResolveAuthorizationSubjects(request.Context(), input)
+	if err != nil {
+		if errors.Is(err, auth.ErrAuthorizationDenied) {
+			providerError(writer, http.StatusForbidden, "permission_denied")
+		} else {
+			providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
+		}
+		return
+	}
+	if result == nil || !auth.ValidAuthorizationSubjectsResponse(input, *result) {
+		providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(result)
 }
 
 func providerError(writer http.ResponseWriter, status int, code string) {

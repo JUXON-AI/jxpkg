@@ -42,8 +42,8 @@ make clean       # 清理 Go test cache
 | [`apis/constants`](#apisconstants) | Gin Context 的稳定键名 | `CtxKeyRequestID`、`CtxKeyUserID` |
 | [`apis/errcode`](#apiserrcode) | 业务错误码注册和消息查询 | `Register`、`GetMessage` |
 | [`apis/runtime`](#apisruntime) | HTTP 响应与已验证身份读取 | `Success`、`BadRequest`、`UserID` |
-| [`apis/runtime/auth`](#apisruntimeauth) | Bearer/JWT、Browser Session 的共享认证契约 | `TokenSigner`、`TokenVerifier`、`SessionResolver` |
-| [`apis/runtime/middleware`](#apisruntimemiddleware) | Gin 日志、恢复、CORS、认证与 CSRF 中间件 | `NewCORS`、`NewBrowserSessionHandlers` |
+| [`apis/runtime/auth`](#apisruntimeauth) | Bearer/JWT、Browser Session 和授权上下文的共享契约 | `TokenSigner`、`SessionResolver`、`AuthorizationContextResolver` |
+| [`apis/runtime/middleware`](#apisruntimemiddleware) | Gin 日志、恢复、CORS、认证、CSRF 与权限中间件 | `NewCORS`、`ResolveAuthorizationContext`、`RequirePermission` |
 | [`apis/runtime/server`](#apisruntimeserver) | Gin Router、路由认证模式和 API 适配 | `NewRouter`、`API` |
 | [`apis/runtime/sso`](docs/sso-integration-guide.md) | 开箱即用的 Consumer runtime 与 Account Provider | `LoadEnv`、`LoadProviderEnv` |
 | [`config`](#config) | YAML 和环境变量配置加载 | `LoadCoreConfigFromEnv` |
@@ -140,6 +140,12 @@ Origin，不增加第二组凭据；它不会接受浏览器 Cookie、Bearer 或
 身份作为认证依据。响应只包含 UIN、成员代次、显示资料、状态和公司 Owner 标记，
 不返回邮箱、Token、Session 或 Account 数据库对象。
 
+同一客户端还实现 `AuthorizationContextResolver` 和
+`AuthorizationSubjectsResolver`。前者按已认证的公司、UIN 和 MembershipEpoch
+解析公司所有者标记、有效部门路径以及调用方请求的组织权限子集；后者返回资源授权
+界面使用的有效公司身份和部门目录。两种响应都必须与原请求作用域完全一致，否则客户端
+按授权服务故障默认拒绝。
+
 #### EdDSA JWT
 
 ```go
@@ -173,6 +179,11 @@ verified, err := verifier.Verify(ctx, raw, "https://issuer.example.com", "orders
 ### `apis/runtime/middleware`
 
 提供请求日志、panic 恢复、自定义 header、显式 Bearer、Browser Session、CORS 和 CSRF 中间件。应用不应自行拼接 Browser Session 中间件；`sso.Runtime.RouterOption()` 会安装完整且已校验的顺序。Cookie 和 Bearer 互斥，不会在失败时互相回退。副作用请求必须通过 CSRF token 校验。
+
+`ResolveAuthorizationContext` 在登录中间件之后调用 Account 权威服务并把结果写入
+Gin Context；`RequirePermission` 只检查该权威结果。具体权限常量和路由映射由业务服务
+维护，`jxpkg` 不保存业务权限名，也不从数据库动态装载路由规则。业务服务必须提供失败
+响应转换函数，并区分无权限和授权服务不可用。
 
 `NewCORS` 只接受精确 HTTP(S) origin，不接受通配符、域名后缀、路径或动态反射。CORS 决定浏览器能否读取响应，不是 CSRF 防护。位于可信反向代理之后时，CORS 与 Browser Session 必须配置同一个 `ExternalOrigin`；两者都不会信任客户端提供的 `X-Forwarded-Host`/`X-Forwarded-Proto`。
 

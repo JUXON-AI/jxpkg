@@ -32,9 +32,15 @@ const (
 type Runtime struct {
 	httpAddress  string
 	origin       string
-	resolver     auth.CompanyIdentityResolver
+	resolver     authorizationResolver
 	routerOption server.RouterOption
 	transport    *http.Transport
+}
+
+type authorizationResolver interface {
+	auth.CompanyIdentityResolver
+	auth.AuthorizationContextResolver
+	auth.AuthorizationSubjectsResolver
 }
 
 type runtimeOptions struct {
@@ -242,6 +248,16 @@ func (runtime *Runtime) RouterOption() server.RouterOption {
 // CompanyIdentityResolver returns the identity directory selected by LoadEnv.
 // Business services still make their own domain authorization decisions.
 func (runtime *Runtime) CompanyIdentityResolver() auth.CompanyIdentityResolver {
+	return runtime.resolver
+}
+
+// AuthorizationContextResolver 返回 Account 的权威授权上下文解析客户端。
+func (runtime *Runtime) AuthorizationContextResolver() auth.AuthorizationContextResolver {
+	return runtime.resolver
+}
+
+// AuthorizationSubjectsResolver 返回 Account 的权威同组织授权主体目录客户端。
+func (runtime *Runtime) AuthorizationSubjectsResolver() auth.AuthorizationSubjectsResolver {
 	return runtime.resolver
 }
 
