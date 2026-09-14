@@ -105,6 +105,7 @@ func (client *InternalSessionResolverClient) ResolveAuthorizationContext(
 		return nil, fmt.Errorf("%w: authorization resolver client is not configured", ErrAuthBackendUnavailable)
 	}
 	request.Service = client.service
+	request.Permissions = append([]PermissionCode{}, request.Permissions...)
 	if err := validateAuthorizationRequest(request); err != nil {
 		return nil, err
 	}
