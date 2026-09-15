@@ -149,3 +149,61 @@ jobs:
           fi
           printf 'trusted=%s untrusted=%s\n' "$TRUSTED_RESULT" "$UNTRUSTED_RESULT" >&2
           exit 1
+
+  notify:
+    name: Notify Feishu
+    needs: required
+    if: ${{ always() && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - name: Send result to Feishu
+        shell: bash
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_CICD_WEBHOOK_URL }}
+          RESULT: ${{ needs.required.result }}
+          SOURCE_REF: ${{ inputs.ref || github.ref_name }}
+          SOURCE_SHA: ${{ github.event_name == 'push' && github.sha || '' }}
+        run: |
+          set -euo pipefail
+          test -n "$FEISHU_WEBHOOK_URL" || {
+            echo '::warning::FEISHU_CICD_WEBHOOK_URL is empty; notification was not sent'
+            exit 1
+          }
+          echo "::add-mask::$FEISHU_WEBHOOK_URL"
+
+          case "$RESULT" in
+            success) result_label='✅ 成功' ;;
+            failure) result_label='❌ 失败' ;;
+            cancelled) result_label='⏹️ 已取消' ;;
+            skipped) result_label='⏭️ 已跳过' ;;
+            *) result_label='⚠️ 状态未知' ;;
+          esac
+
+          message="[CI][$result_label]
+          仓库: $GITHUB_REPOSITORY
+          行为: JXpKG 源码验证
+          来源: $SOURCE_REF
+          提交: ${SOURCE_SHA:0:12}
+          事件: $GITHUB_EVENT_NAME
+          执行者: $GITHUB_ACTOR
+          详情: 仅表示 CI 完成，不代表镜像已发布或已部署
+          运行: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          payload=$(jq -cn --arg text "$message" '{msg_type:"text",content:{text:$text}}')
+          response_file=$(mktemp "$RUNNER_TEMP/feishu-response.XXXXXX")
+          trap 'rm -f "$response_file"' EXIT
+          http_status=$(curl \
+            --silent \
+            --show-error \
+            --output "$response_file" \
+            --write-out '%{http_code}' \
+            --connect-timeout 10 \
+            --max-time 20 \
+            --retry 2 \
+            --retry-all-errors \
+            --header 'Content-Type: application/json; charset=utf-8' \
+            --data "$payload" \
+            "$FEISHU_WEBHOOK_URL")
+          test "$http_status" = 200
+          jq -e '(.StatusCode? == 0) or (.code? == 0)' "$response_file" >/dev/null
