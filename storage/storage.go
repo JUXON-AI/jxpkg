@@ -56,6 +56,25 @@ type Storager interface {
 	DeleteFile(ctx context.Context, storagePath string) error
 }
 
+// MultipartUploadPart 表示一个已上传或待合并的对象分片。
+type MultipartUploadPart struct {
+	// PartNumber 是从 1 开始的分片序号，最大为 10000。
+	PartNumber int32
+	// ETag 是对象存储返回的分片实体标签，不包含外围双引号。
+	ETag string
+}
+
+// MultipartStorager 是对象存储可选的分片上传能力。
+//
+// 保持该能力独立于 Storager，已有自定义 Storager 实现无需同步增加分片方法。
+type MultipartStorager interface {
+	CreateMultipartUpload(ctx context.Context, storagePath, contentType string) (string, error)
+	GetMultipartUploadPartPresignedURL(ctx context.Context, storagePath, uploadID string, partNumber int32) (string, error)
+	ListMultipartUploadParts(ctx context.Context, storagePath, uploadID string) ([]MultipartUploadPart, error)
+	CompleteMultipartUpload(ctx context.Context, storagePath, uploadID string, parts map[int32]string) error
+	AbortMultipartUpload(ctx context.Context, storagePath, uploadID string) error
+}
+
 // LoadStorager 获取存储器
 func LoadStorager(ctx context.Context, purpose string) (Storager, error) {
 	if s, ok := storagerMap.Load(purpose); ok {
