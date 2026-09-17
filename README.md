@@ -315,7 +315,9 @@ logs.Infow("request complete", "request_id", requestID)
 
 ### `storage`
 
-提供 S3-compatible `Storager`、`S3Fs` 和 `core_upload_files` 元数据。`NewS3Fs` 构造明确配置的实例；`LoadStorager`/`NewStorage` 使用 settings 中的 purpose 配置。使用文件模型前显式调用 `InitDB`。
+提供 S3-compatible `Storager`、`S3Fs` 和 `core_upload_files` 元数据。`NewS3Fs` 构造明确配置的实例；`LoadStorager`/`NewStorage` 使用 settings 中的 purpose 配置。使用文件模型前显式调用 `InitDB`。`S3Fs` 同时实现可选的 `MultipartStorager`，提供创建会话、签发分片 PUT URL、列出分片、完成合并和中止上传；业务可通过类型断言启用大文件直传，而无需改变已有 `Storager` 实现。
+
+浏览器分片直传时，对象存储 CORS 必须允许前端 Origin 的 `PUT`，并在 `ExposeHeaders` 中暴露 `ETag`；否则浏览器即使上传成功，也无法取得完成合并所需的分片标签。
 
 对象 key 生成、内容 hash 与数据库元数据不能代替上传权限、内容类型校验、病毒扫描或下载授权，这些由业务服务负责。
 

@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -16,9 +17,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 var _ Storager = (*S3Fs)(nil)
+var _ MultipartStorager = (*S3Fs)(nil)
 
 // S3StorageConfig S3通用存储
 type S3StorageConfig struct {
@@ -157,6 +160,145 @@ func (s3fs *S3Fs) GetPresignedURL(ctx context.Context, method, storagePath strin
 	}
 
 	return url.URL, nil
+}
+
+// CreateMultipartUpload 创建一个私有对象的分片上传会话。
+func (s3fs *S3Fs) CreateMultipartUpload(ctx context.Context, storagePath, contentType string) (string, error) {
+	if strings.TrimSpace(storagePath) == "" {
+		return "", fmt.Errorf("storage path is empty")
+	}
+	input := &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(s3fs.s3fsCfg.Bucket),
+		Key:    aws.String(storagePath),
+	}
+	if strings.TrimSpace(contentType) != "" {
+		input.ContentType = aws.String(contentType)
+	}
+	result, err := s3fs.client.CreateMultipartUpload(ctx, input)
+	if err != nil {
+		return "", err
+	}
+	uploadID := strings.TrimSpace(aws.ToString(result.UploadId))
+	if uploadID == "" {
+		return "", fmt.Errorf("multipart upload ID is empty")
+	}
+	return uploadID, nil
+}
+
+// GetMultipartUploadPartPresignedURL 返回单个分片的预签名 PUT URL。
+func (s3fs *S3Fs) GetMultipartUploadPartPresignedURL(ctx context.Context, storagePath, uploadID string, partNumber int32) (string, error) {
+	if err := validateMultipartReference(storagePath, uploadID, partNumber); err != nil {
+		return "", err
+	}
+	result, err := s3.NewPresignClient(s3fs.client).PresignUploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(s3fs.s3fsCfg.Bucket),
+		Key:        aws.String(storagePath),
+		UploadId:   aws.String(uploadID),
+		PartNumber: aws.Int32(partNumber),
+	}, func(opts *s3.PresignOptions) {
+		opts.Expires = s3fs.opt.PresignedTimeout
+	})
+	if err != nil {
+		return "", err
+	}
+	return result.URL, nil
+}
+
+// ListMultipartUploadParts 返回对象存储中已经接收的全部分片。
+func (s3fs *S3Fs) ListMultipartUploadParts(ctx context.Context, storagePath, uploadID string) ([]MultipartUploadPart, error) {
+	if err := validateMultipartReference(storagePath, uploadID, 1); err != nil {
+		return nil, err
+	}
+	paginator := s3.NewListPartsPaginator(s3fs.client, &s3.ListPartsInput{
+		Bucket:   aws.String(s3fs.s3fsCfg.Bucket),
+		Key:      aws.String(storagePath),
+		UploadId: aws.String(uploadID),
+	})
+	parts := make([]MultipartUploadPart, 0)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, part := range page.Parts {
+			parts = append(parts, MultipartUploadPart{
+				PartNumber: aws.ToInt32(part.PartNumber),
+				ETag:       normalizeETag(aws.ToString(part.ETag)),
+			})
+		}
+	}
+	return parts, nil
+}
+
+// CompleteMultipartUpload 按分片序号合并已上传对象。
+func (s3fs *S3Fs) CompleteMultipartUpload(ctx context.Context, storagePath, uploadID string, parts map[int32]string) error {
+	if err := validateMultipartReference(storagePath, uploadID, 1); err != nil {
+		return err
+	}
+	completed, err := completedMultipartParts(parts)
+	if err != nil {
+		return err
+	}
+	_, err = s3fs.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(s3fs.s3fsCfg.Bucket),
+		Key:      aws.String(storagePath),
+		UploadId: aws.String(uploadID),
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: completed,
+		},
+	})
+	return err
+}
+
+// AbortMultipartUpload 终止未完成的分片上传并释放对象存储资源。
+func (s3fs *S3Fs) AbortMultipartUpload(ctx context.Context, storagePath, uploadID string) error {
+	if err := validateMultipartReference(storagePath, uploadID, 1); err != nil {
+		return err
+	}
+	_, err := s3fs.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket: aws.String(s3fs.s3fsCfg.Bucket), Key: aws.String(storagePath), UploadId: aws.String(uploadID),
+	})
+	return err
+}
+
+func validateMultipartReference(storagePath, uploadID string, partNumber int32) error {
+	if strings.TrimSpace(storagePath) == "" {
+		return fmt.Errorf("storage path is empty")
+	}
+	if strings.TrimSpace(uploadID) == "" {
+		return fmt.Errorf("multipart upload ID is empty")
+	}
+	if partNumber < 1 || partNumber > 10000 {
+		return fmt.Errorf("multipart part number must be between 1 and 10000")
+	}
+	return nil
+}
+
+func completedMultipartParts(parts map[int32]string) ([]types.CompletedPart, error) {
+	if len(parts) == 0 || len(parts) > 10000 {
+		return nil, fmt.Errorf("multipart parts count is invalid")
+	}
+	values := make([]MultipartUploadPart, 0, len(parts))
+	for partNumber, etag := range parts {
+		values = append(values, MultipartUploadPart{PartNumber: partNumber, ETag: etag})
+	}
+	sort.Slice(values, func(i, j int) bool { return values[i].PartNumber < values[j].PartNumber })
+	completed := make([]types.CompletedPart, 0, len(values))
+	for _, part := range values {
+		etag := normalizeETag(part.ETag)
+		if part.PartNumber < 1 || part.PartNumber > 10000 || etag == "" {
+			return nil, fmt.Errorf("multipart part is invalid")
+		}
+		completed = append(completed, types.CompletedPart{
+			PartNumber: aws.Int32(part.PartNumber),
+			ETag:       aws.String(`"` + etag + `"`),
+		})
+	}
+	return completed, nil
+}
+
+func normalizeETag(value string) string {
+	return strings.Trim(strings.TrimSpace(value), `"`)
 }
 
 // HeadFile 获取对象的原始元数据，避免读取可能经过转换的对象内容。

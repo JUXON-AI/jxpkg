@@ -94,3 +94,29 @@ func testS3Config(t *testing.T) S3StorageConfig {
 	}
 	return cfg
 }
+
+func TestCompletedMultipartParts(t *testing.T) {
+	parts, err := completedMultipartParts(map[int32]string{
+		2: `"etag-2"`,
+		1: "etag-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != 2 || *parts[0].PartNumber != 1 || *parts[0].ETag != `"etag-1"` || *parts[1].PartNumber != 2 {
+		t.Fatalf("completed parts = %#v", parts)
+	}
+}
+
+func TestCompletedMultipartPartsRejectsInvalidInput(t *testing.T) {
+	tests := []map[int32]string{
+		nil,
+		{0: "etag"},
+		{1: ""},
+	}
+	for _, parts := range tests {
+		if _, err := completedMultipartParts(parts); err == nil {
+			t.Fatalf("completedMultipartParts(%#v) succeeded", parts)
+		}
+	}
+}
