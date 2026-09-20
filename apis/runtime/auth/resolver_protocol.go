@@ -12,6 +12,10 @@ import (
 // Providers map it to the existing internal HTTP 404 response.
 var ErrCompanyIdentityNotFound = errors.New("company identity not found")
 
+// ErrCompanyNotFound means the authoritative company directory has no such available company.
+// Providers map it to the existing internal HTTP 404 response.
+var ErrCompanyNotFound = errors.New("company not found")
+
 // DecodeSessionResolveRequest enforces the fixed resolver JSON request contract.
 // Duplicate, unknown, missing, null and trailing values are rejected before use.
 func DecodeSessionResolveRequest(reader io.Reader) (SessionResolveRequest, error) {

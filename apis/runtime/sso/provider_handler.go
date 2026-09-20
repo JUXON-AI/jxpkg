@@ -61,11 +61,20 @@ func (provider *Provider) serveHTTP(writer http.ResponseWriter, request *http.Re
 		provider.resolveAuthorizationSubjects(writer, request, caller)
 		return
 	}
+	if request.URL.Path == auth.InternalCompanySearchPath {
+		provider.resolveCompanySearch(writer, request, caller)
+		return
+	}
+	if request.URL.Path == auth.InternalCompanyResolvePath {
+		provider.resolveCompanyResolve(writer, request, caller)
+		return
+	}
 	provider.resolveSession(writer, request, caller)
 }
 
 func internalResolverPath(path string) bool {
-	return path == auth.InternalSessionResolvePath || path == auth.InternalCompanyIdentityResolvePath || path == auth.InternalAuthorizationContextResolvePath || path == auth.InternalAuthorizationSubjectsResolvePath
+	return path == auth.InternalSessionResolvePath || path == auth.InternalCompanyIdentityResolvePath || path == auth.InternalAuthorizationContextResolvePath || path == auth.InternalAuthorizationSubjectsResolvePath ||
+		path == auth.InternalCompanySearchPath || path == auth.InternalCompanyResolvePath
 }
 
 func (provider *Provider) caller(request *http.Request) (providerCaller, bool) {
@@ -218,6 +227,67 @@ func (provider *Provider) resolveAuthorizationSubjects(writer http.ResponseWrite
 		return
 	}
 	if result == nil || !auth.ValidAuthorizationSubjectsResponse(input, *result) {
+		providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(result)
+}
+
+func (provider *Provider) resolveCompanySearch(writer http.ResponseWriter, request *http.Request, caller providerCaller) {
+	input, err := auth.DecodeCompanySearchRequest(request.Body)
+	if err != nil || input.Service != caller.Service {
+		providerError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	resolver, ok := provider.authority.(auth.CompanyResolver)
+	if !ok {
+		providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
+		return
+	}
+	result, err := resolver.SearchCompanies(request.Context(), input)
+	if err != nil {
+		if errors.Is(err, auth.ErrAuthorizationDenied) {
+			providerError(writer, http.StatusForbidden, "permission_denied")
+		} else {
+			providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
+		}
+		return
+	}
+	if result == nil || !auth.ValidCompanySearchResponse(input, *result) {
+		providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
+		return
+	}
+	if result.Companies == nil {
+		result.Companies = []auth.CompanySummary{}
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(result)
+}
+
+func (provider *Provider) resolveCompanyResolve(writer http.ResponseWriter, request *http.Request, caller providerCaller) {
+	input, err := auth.DecodeCompanyResolveRequest(request.Body)
+	if err != nil || input.Service != caller.Service {
+		providerError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	resolver, ok := provider.authority.(auth.CompanyResolver)
+	if !ok {
+		providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
+		return
+	}
+	result, err := resolver.ResolveCompany(request.Context(), input)
+	if err != nil {
+		if errors.Is(err, auth.ErrCompanyNotFound) {
+			providerError(writer, http.StatusNotFound, "not_found")
+		} else if errors.Is(err, auth.ErrAuthorizationDenied) {
+			providerError(writer, http.StatusForbidden, "permission_denied")
+		} else {
+			providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
+		}
+		return
+	}
+	if result == nil || !auth.ValidCompanyResolveResponse(input, *result) {
 		providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
 		return
 	}

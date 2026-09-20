@@ -72,6 +72,17 @@ func (authority *providerTestAuthority) ResolveCompanyIdentities(ctx context.Con
 	return authority.identities(ctx, input)
 }
 
+func (authority *providerTestAuthority) SearchCompanies(_ context.Context, input auth.CompanySearchRequest) (*auth.CompanySearchResponse, error) {
+	return &auth.CompanySearchResponse{Companies: []auth.CompanySummary{{CompanyID: 3, Name: "目标公司"}}}, nil
+}
+
+func (authority *providerTestAuthority) ResolveCompany(_ context.Context, input auth.CompanyResolveRequest) (*auth.CompanyResolveResponse, error) {
+	if input.CompanyID != 3 {
+		return nil, auth.ErrCompanyNotFound
+	}
+	return &auth.CompanyResolveResponse{CompanyID: input.CompanyID, Name: "目标公司"}, nil
+}
+
 func (authority *providerTestAuthority) ServiceHostAllowed(service, host string) bool {
 	return authority.allowed(service, host)
 }
@@ -252,6 +263,31 @@ func TestProviderAuthorizationSubjectsProtocol(t *testing.T) {
 	providerTestHandler(t, authority).serveHTTP(writer, request)
 	if writer.Code != http.StatusOK || !strings.Contains(writer.Body.String(), `"username":"测试成员"`) || !strings.Contains(writer.Body.String(), `"name":"研发部"`) {
 		t.Fatalf("status/body = %d/%s", writer.Code, writer.Body.String())
+	}
+}
+
+func TestProviderCompanyDirectoryProtocol(t *testing.T) {
+	authority := newProviderTestAuthority()
+	search := providerTestRequest(`{"service":"app","query":"目标","limit":5}`)
+	search.URL.Path = auth.InternalCompanySearchPath
+	writer := httptest.NewRecorder()
+	providerTestHandler(t, authority).serveHTTP(writer, search)
+	if writer.Code != http.StatusOK || !strings.Contains(writer.Body.String(), `"name":"目标公司"`) {
+		t.Fatalf("search status/body = %d/%s", writer.Code, writer.Body.String())
+	}
+	resolve := providerTestRequest(`{"service":"app","company_id":3}`)
+	resolve.URL.Path = auth.InternalCompanyResolvePath
+	writer = httptest.NewRecorder()
+	providerTestHandler(t, authority).serveHTTP(writer, resolve)
+	if writer.Code != http.StatusOK || !strings.Contains(writer.Body.String(), `"company_id":3`) {
+		t.Fatalf("resolve status/body = %d/%s", writer.Code, writer.Body.String())
+	}
+	missing := providerTestRequest(`{"service":"app","company_id":9}`)
+	missing.URL.Path = auth.InternalCompanyResolvePath
+	writer = httptest.NewRecorder()
+	providerTestHandler(t, authority).serveHTTP(writer, missing)
+	if writer.Code != http.StatusNotFound {
+		t.Fatalf("missing status = %d", writer.Code)
 	}
 }
 
