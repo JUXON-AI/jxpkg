@@ -92,6 +92,7 @@ type localResolver struct {
 var (
 	_ auth.SessionResolver               = (*localResolver)(nil)
 	_ auth.CompanyIdentityResolver       = (*localResolver)(nil)
+	_ auth.CompanyResolver               = (*localResolver)(nil)
 	_ auth.AuthorizationContextResolver  = (*localResolver)(nil)
 	_ auth.AuthorizationSubjectsResolver = (*localResolver)(nil)
 )
@@ -296,6 +297,24 @@ func (resolver *localResolver) ResolveCompanyIdentities(_ context.Context, reque
 		}
 	}
 	return result, nil
+}
+
+// SearchCompanies 在本地模式下只返回唯一配置公司。
+func (resolver *localResolver) SearchCompanies(_ context.Context, request auth.CompanySearchRequest) (*auth.CompanySearchResponse, error) {
+	if request.Service != resolver.service || strings.TrimSpace(request.Query) == "" || request.Limit <= 0 {
+		return nil, auth.ErrInvalidCredential
+	}
+	return &auth.CompanySearchResponse{Companies: []auth.CompanySummary{{
+		CompanyID: resolver.identity.CompanyID, Name: fmt.Sprintf("Dev Company %d", resolver.identity.CompanyID),
+	}}}, nil
+}
+
+// ResolveCompany 在本地模式下只解析唯一配置公司。
+func (resolver *localResolver) ResolveCompany(_ context.Context, request auth.CompanyResolveRequest) (*auth.CompanyResolveResponse, error) {
+	if request.Service != resolver.service || request.CompanyID != resolver.identity.CompanyID {
+		return nil, auth.ErrCompanyNotFound
+	}
+	return &auth.CompanyResolveResponse{CompanyID: request.CompanyID, Name: fmt.Sprintf("Dev Company %d", resolver.identity.CompanyID)}, nil
 }
 
 // ResolveAuthorizationContext 为显式的本地身份提供与 Account 模式相同的授权上下文契约。

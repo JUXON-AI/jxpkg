@@ -218,16 +218,31 @@ func TestLocalRuntimeProvidesFrontendBootstrapAndCompanyIdentity(t *testing.T) {
 		t.Fatalf("ResolveCompanyIdentities() = %#v, %v", identities, err)
 	}
 	authorization, err := localRuntime.AuthorizationContextResolver().ResolveAuthorizationContext(context.Background(), auth.AuthorizationContextResolveRequest{
-		Service: "jxagent", CompanyID: 33, UIN: 22, MembershipEpoch: 1, Permissions: []auth.PermissionCode{"agent.create"},
+		Service: "juxonone", CompanyID: 33, UIN: 22, MembershipEpoch: 1, Permissions: []auth.PermissionCode{"agent.create"},
 	})
 	if err != nil || !authorization.IsCompanyOwner || !authorization.Allows("agent.create") {
 		t.Fatalf("ResolveAuthorizationContext() = %#v, %v", authorization, err)
 	}
 	subjects, err := localRuntime.AuthorizationSubjectsResolver().ResolveAuthorizationSubjects(context.Background(), auth.AuthorizationSubjectsResolveRequest{
-		Service: "jxagent", CompanyID: 33, UIN: 22, MembershipEpoch: 1,
+		Service: "juxonone", CompanyID: 33, UIN: 22, MembershipEpoch: 1,
 	})
 	if err != nil || len(subjects.Users) != 1 || subjects.Users[0].UIN != 22 {
 		t.Fatalf("ResolveAuthorizationSubjects() = %#v, %v", subjects, err)
+	}
+	companies, err := localRuntime.CompanyResolver().SearchCompanies(context.Background(), auth.CompanySearchRequest{
+		Service: "juxonone", Query: "Dev", Limit: 5,
+	})
+	if err != nil || len(companies.Companies) != 1 || companies.Companies[0].CompanyID != 33 {
+		t.Fatalf("SearchCompanies() = %#v, %v", companies, err)
+	}
+	resolved, err := localRuntime.CompanyResolver().ResolveCompany(context.Background(), auth.CompanyResolveRequest{
+		Service: "juxonone", CompanyID: 33,
+	})
+	if err != nil || resolved.CompanyID != 33 {
+		t.Fatalf("ResolveCompany() = %#v, %v", resolved, err)
+	}
+	if _, err := localRuntime.CompanyResolver().ResolveCompany(context.Background(), auth.CompanyResolveRequest{Service: "juxonone", CompanyID: 44}); !errors.Is(err, auth.ErrCompanyNotFound) {
+		t.Fatalf("ResolveCompany(unknown) error = %v", err)
 	}
 }
 

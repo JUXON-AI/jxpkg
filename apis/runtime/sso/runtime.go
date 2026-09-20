@@ -39,6 +39,7 @@ type Runtime struct {
 
 type authorizationResolver interface {
 	auth.CompanyIdentityResolver
+	auth.CompanyResolver
 	auth.AuthorizationContextResolver
 	auth.AuthorizationSubjectsResolver
 }
@@ -248,6 +249,11 @@ func (runtime *Runtime) RouterOption() server.RouterOption {
 // CompanyIdentityResolver returns the identity directory selected by LoadEnv.
 // Business services still make their own domain authorization decisions.
 func (runtime *Runtime) CompanyIdentityResolver() auth.CompanyIdentityResolver {
+	return runtime.resolver
+}
+
+// CompanyResolver 返回 Account 权威的可用公司目录客户端。
+func (runtime *Runtime) CompanyResolver() auth.CompanyResolver {
 	return runtime.resolver
 }
 
