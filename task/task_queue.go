@@ -29,6 +29,34 @@ func PushTaskQueue(ctx context.Context, taskType string) error {
 	return nil
 }
 
+// pushTaskQueues 批量推入任务队列唤醒通知，每条任务一条。
+//
+// 逐条调用 PushTaskQueue 与它产生完全相同的 stream 内容，只是 N 次 XADD 走一次往返。
+// 这里刻意不按类型去重：stream 里的消息不是任务本身而是「该类型有活」的唤醒信号，认领
+// 从 core_task 读，所以条数不承担正确性；但 CheckQueueCount 会把 stream 长度补齐到待处理
+// 任务数，去重省下的条数会被它在下一次扫描时逐条补回来，白省。
+//
+// 暂不导出：包外目前没有任何地方推队列（连单个的 PushTaskQueue 也没有包外调用者），
+// 批量路径的入口是 CreateTasks。等真的出现绕过 CreateTasks 建行、需要自己唤醒的场景
+// 再导出，那时才知道它该长什么样。
+func pushTaskQueues(ctx context.Context, taskTypes []string) error {
+	if len(taskTypes) == 0 {
+		return errors.New("task types cannot be empty")
+	}
+	pipe := redispool.Redis().Pipeline()
+	for _, taskType := range taskTypes {
+		pipe.XAdd(ctx, &redis.XAddArgs{
+			Stream: TaskQueryPrefix + taskType,
+			Values: map[string]interface{}{"task_type": taskType},
+		})
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return err
+	}
+	logs.InfoContextf(ctx, "push task queue batch success, count: %d", len(taskTypes))
+	return nil
+}
+
 // PopTaskQueue 从任务队列中取出一个任务返回当前任务id
 func PopTaskQueue(ctx context.Context, taskType, workerid string) (string, error) {
 	// 创建消费组（如果不存在）

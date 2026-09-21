@@ -3,6 +3,7 @@ package task
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"sort"
@@ -209,8 +210,14 @@ func DeleteTask(id uint) error {
 	return nil
 }
 
-// CreateTask 创建任务
-func CreateTask(ctx context.Context, tsk *Task) error {
+// validateNewTask 校验一条待创建的任务，不合法时返回拒绝原因。
+//
+// CreateTask 与 CreateTasks 共用这一处检查：两条路径的拒绝条件必须逐字一致，
+// 否则批量创建会接受逐条创建拒绝的任务（或反过来），调用方无法在两者之间安全切换。
+func validateNewTask(tsk *Task) error {
+	if tsk == nil {
+		return errors.New("task is nil")
+	}
 	if tsk.AppGroup == "" {
 		return errors.New("app_group cannot be empty")
 	}
@@ -229,11 +236,57 @@ func CreateTask(ctx context.Context, tsk *Task) error {
 	if tsk.TaskConfigRedo < 0 {
 		return errors.New("task_config_redo cannot be negative")
 	}
+	return nil
+}
+
+// CreateTask 创建任务
+func CreateTask(ctx context.Context, tsk *Task) error {
+	if err := validateNewTask(tsk); err != nil {
+		return err
+	}
 	err := dbtools.Core().Create(tsk).Error
 	if err != nil {
 		return err
 	}
 	return PushTaskQueue(ctx, tsk.TaskType)
+}
+
+// CreateTasks 批量创建任务。
+//
+// 与逐条调用 CreateTask 语义相同——同一套拒绝条件，同样把数据库分配的 id 写回入参
+// （tasks 是 []*Task，故调用方持有切片即可读到 id），同样为每条任务推一次队列唤醒。
+// 区别只在实现：一次批插入取代 N 次单条插入，一次 pipeline 取代 N 次 XADD。
+//
+// 全有全无：任意一条不合法都在写库之前返回，错误里带上它的下标，此时一条任务都没有落库。
+// 生产者需要这个性质——一次扇出建出的任务是有依赖关系的（同一张图的定位任务与 embedding
+// 任务，下游按张计数收口），部分成功会让计数永远等不到缺的那几条，而补数只能靠删掉已写入
+// 的行重来。
+//
+// 原子性来自 dbtools 给每个连接配的 CreateBatchSize（200，见 dbtools/datasource.go）：
+// 因为它是正数，dbtools.Core().Create 实际分派到 gorm 的 CreateInBatches，而后者在条数
+// 超过批大小时用 tx.Transaction 把全部批次裹在一起——超过 200 条时发出去的不是一条多行
+// INSERT 而是多条，但要么全提交要么全回滚。若哪天有人把 CreateBatchSize 去掉，Create
+// 会退回单条语句的路径，原子性还在；真正的风险是把 SkipDefaultTransaction 打开，
+// 那会让 CreateInBatches 走无事务分支，届时本函数的承诺不再成立。
+//
+// 调用方不要拿它承载没有共同失败语义的任务：整批共用一个事务，一条坏数据会让整批回滚。
+func CreateTasks(ctx context.Context, tasks []*Task) error {
+	if len(tasks) == 0 {
+		return errors.New("tasks cannot be empty")
+	}
+	for at, tsk := range tasks {
+		if err := validateNewTask(tsk); err != nil {
+			return fmt.Errorf("tasks[%d]: %w", at, err)
+		}
+	}
+	if err := dbtools.Core().Create(tasks).Error; err != nil {
+		return err
+	}
+	taskTypes := make([]string, 0, len(tasks))
+	for _, tsk := range tasks {
+		taskTypes = append(taskTypes, tsk.TaskType)
+	}
+	return pushTaskQueues(ctx, taskTypes)
 }
 
 // GetNextStepTask 获取下一个步骤的任务
