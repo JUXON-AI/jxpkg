@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -78,29 +77,39 @@ func TrimList[T any](v []T) any {
 //
 // 键类型受限于 cmp.Ordered（string / 整数 / 浮点）：排序需要它。
 // 键是其它可比较类型时，用 `JSON` 或 `TrimText(fmt.Sprint(m))`。
+//
+// **已知边界：浮点键里的 NaN 排不稳定。** NaN 不与任何值相等（包括它自己），
+// 所以「多个 NaN 键之间」的先后没有确定答案，而 slices.SortFunc 不是稳定排序。
+// 日志里用 float 键的 map 请改走 `JSON`。非 NaN 的浮点键没有这个问题。
+//
+// 值一律从 range 里成对取，而不是「先排序键、再 m[key] 取回」——
+// 后者对 NaN 键会取到零值（NaN != NaN，查不到）。
 func TrimMap[K cmp.Ordered, V any](m map[K]V) string {
-	var b strings.Builder
-	if len(m) <= listLimit {
-		fmt.Fprintf(&b, "map[")
-		writeSortedEntries(&b, m, len(m))
-		b.WriteByte(']')
-		return b.String()
+	type entry struct {
+		key   K
+		value V
 	}
-	fmt.Fprintf(&b, "len=%d head=map[", len(m))
-	writeSortedEntries(&b, m, listHead)
-	b.WriteByte(']')
-	return b.String()
-}
+	entries := make([]entry, 0, len(m))
+	for key, value := range m {
+		entries = append(entries, entry{key: key, value: value})
+	}
+	slices.SortFunc(entries, func(a, b entry) int { return cmp.Compare(a.key, b.key) })
+	if len(entries) > listLimit {
+		entries = entries[:listHead]
+	}
 
-func writeSortedEntries[K cmp.Ordered, V any](b *strings.Builder, m map[K]V, limit int) {
-	keys := slices.Sorted(maps.Keys(m))
-	if len(keys) > limit {
-		keys = keys[:limit]
+	var b strings.Builder
+	if len(m) > listLimit {
+		fmt.Fprintf(&b, "len=%d head=map[", len(m))
+	} else {
+		b.WriteString("map[")
 	}
-	for i, key := range keys {
+	for i, e := range entries {
 		if i > 0 {
 			b.WriteByte(' ')
 		}
-		fmt.Fprintf(b, "%v:%v", key, m[key])
+		fmt.Fprintf(&b, "%v:%v", e.key, e.value)
 	}
+	b.WriteByte(']')
+	return b.String()
 }

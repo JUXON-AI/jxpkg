@@ -52,9 +52,11 @@ func TestTrimTextToleratesInvalidBytes(t *testing.T) {
 	if !ok {
 		t.Fatalf("TrimText 的输出没有 head= 段：%q", got)
 	}
-	// 尾部的 0xff 被剥掉，前面 199 个 'a' 必须还在。
-	if !strings.HasPrefix(head, strings.Repeat("a", textHead-1)) {
-		t.Fatalf("前缀被吃掉了：%q", head)
+	// 断言**恰好**：尾部的 0xff 被剥掉，前面 199 个 'a' 一个不少也不多。
+	// 只断言 HasPrefix 的话，一个把前缀截得更短、或把 0xff 留在里面的实现也会通过。
+	want := strings.Repeat("a", textHead-1)
+	if head != want {
+		t.Fatalf("head 长度 %d, want %d；实际内容 %q", len(head), len(want), head)
 	}
 }
 
@@ -105,18 +107,61 @@ func TestTrimMapIsDeterministic(t *testing.T) {
 	}
 }
 
+// 断言**完全相等**，不是 Contains：用 Contains 时，一个多输出了几项的实现
+// （例如把 11 项全打出来）也会通过，那就是假绿。
 func TestTrimMapSummarizesLongMaps(t *testing.T) {
 	in := map[string]int{}
-	for _, k := range []string{"e", "d", "c", "b", "a", "k", "j", "i", "h", "g", "f"} {
-		in[k] = len(in)
+	for i, k := range []string{"e", "d", "c", "b", "a", "k", "j", "i", "h", "g", "f"} {
+		in[k] = i
 	}
 	got := TrimMap(in)
-	if !strings.HasPrefix(got, "len=11 head=map[") {
-		t.Fatalf("TrimMap(长) = %q, want len=11 head=map[...", got)
+	want := "len=11 head=map[a:4 b:3 c:2 d:1 e:0]"
+	if got != want {
+		t.Fatalf("TrimMap(长) = %q, want %q", got, want)
 	}
-	// 前 5 个键必须按排序取，而不是按遍历顺序。
-	if !strings.Contains(got, "a:4 b:3 c:2 d:1 e:0") {
-		t.Fatalf("TrimMap(长) 取的 5 项不是排序后的前 5：%q", got)
+}
+
+// 边界：恰好等于门槛时必须原样（不打 len= 前缀），恰好超一项时必须裁。
+func TestTrimMapAtExactBoundary(t *testing.T) {
+	atLimit := map[string]int{}
+	for i := 0; i < listLimit; i++ {
+		atLimit[string(rune('a'+i))] = i
+	}
+	if got := TrimMap(atLimit); !strings.HasPrefix(got, "map[") {
+		t.Fatalf("TrimMap(%d 键) 应当原样渲染，实际 %q", listLimit, got)
+	}
+	overLimit := map[string]int{}
+	for i := 0; i <= listLimit; i++ {
+		overLimit[string(rune('a'+i))] = i
+	}
+	if got := TrimMap(overLimit); !strings.HasPrefix(got, "len=11 head=map[") {
+		t.Fatalf("TrimMap(%d 键) 应当裁，实际 %q", listLimit+1, got)
+	}
+}
+
+// nil 与空 map 都要能被交给 %v，不能 panic，也不该打出 len= 前缀。
+func TestTrimMapHandlesNilAndEmpty(t *testing.T) {
+	var nilMap map[string]int
+	if got := TrimMap(nilMap); got != "map[]" {
+		t.Fatalf("TrimMap(nil) = %q, want map[]", got)
+	}
+	if got := TrimMap(map[string]int{}); got != "map[]" {
+		t.Fatalf("TrimMap(empty) = %q, want map[]", got)
+	}
+}
+
+func TestTrimListHandlesNilAndEmpty(t *testing.T) {
+	var nilSlice []int
+	got := TrimList(nilSlice)
+	typed, ok := got.([]int)
+	if !ok {
+		t.Fatalf("TrimList(nil) 返回 %T, want []int", got)
+	}
+	if len(typed) != 0 {
+		t.Fatalf("TrimList(nil) 应当原样返回，实际 %v", typed)
+	}
+	if got := TrimList([]string{}); len(got.([]string)) != 0 {
+		t.Fatalf("TrimList(empty) 应当原样返回，实际 %v", got)
 	}
 }
 
