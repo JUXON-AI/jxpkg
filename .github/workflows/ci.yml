@@ -16,6 +16,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   # A same-repository branch push and its pull_request event share this key,
@@ -165,6 +166,8 @@ jobs:
           RESULT: ${{ needs.required.result }}
           SOURCE_REF: ${{ inputs.ref || github.ref_name }}
           SOURCE_SHA: ${{ github.event_name == 'push' && github.sha || '' }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
         run: |
           set -euo pipefail
           test -n "$FEISHU_WEBHOOK_URL" || {
@@ -181,15 +184,38 @@ jobs:
             *) result_label='⚠️ 状态未知' ;;
           esac
 
-          message="[CI][$result_label]
-          仓库: $GITHUB_REPOSITORY
-          行为: JXpKG 源码验证
-          来源: $SOURCE_REF
-          提交: ${SOURCE_SHA:0:12}
-          事件: $GITHUB_EVENT_NAME
-          执行者: $GITHUB_ACTOR
-          详情: 仅表示 CI 完成，不代表镜像已发布或已部署
-          运行: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          clean_line() {
+            printf '%s' "$1" | tr '\r\n' '  ' | cut -c1-500
+          }
+
+          pr_url=''
+          pr_title=''
+          if [[ "$SOURCE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            pr_json=$(curl --silent --show-error --fail \
+              --retry 2 \
+              --retry-all-errors \
+              --connect-timeout 10 \
+              --max-time 20 \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer $GITHUB_TOKEN" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/commits/$SOURCE_SHA/pulls" || true)
+            if [[ -n "$pr_json" ]]; then
+              pr_url=$(jq -r '.[0].html_url // empty' <<<"$pr_json")
+              pr_title=$(jq -r '.[0].title // empty' <<<"$pr_json")
+            fi
+          fi
+
+          message="[CI][$result_label] JXpKG 源码验证
+          仓库: $GITHUB_REPOSITORY"
+          if [[ -n "$pr_title" ]]; then
+            message+=$'\n'"PR: $(clean_line "$pr_title")"
+          else
+            message+=$'\n'"PR: 未关联（手工运行或未能定位来源 PR）"
+          fi
+          if [[ -n "$pr_url" ]]; then
+            message+=$'\n'"PR 链接: $pr_url"
+          fi
+          message+=$'\n'"运行: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           payload=$(jq -cn --arg text "$message" '{msg_type:"text",content:{text:$text}}')
           response_file=$(mktemp "$RUNNER_TEMP/feishu-response.XXXXXX")
           trap 'rm -f "$response_file"' EXIT
