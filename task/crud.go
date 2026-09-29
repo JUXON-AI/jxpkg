@@ -43,7 +43,26 @@ func InitTaskDBStauts() {
 // correlated NOT EXISTS rescanned the task table for every pending candidate
 // without an appropriate deployment index. This is the same dependency rule,
 // including negative steps and exhausted failures, with one grouped scan.
-const readyTaskJoin = "JOIN (SELECT subject_id, app_group, MIN(step) AS ready_step FROM core_task WHERE deleted_at IS NULL AND task_status NOT IN ('cancel', 'success') GROUP BY subject_id, app_group) ready ON ready.subject_id = core_task.subject_id AND ready.app_group = core_task.app_group AND ready.ready_step = core_task.step"
+//
+// # Why the inner scan steers away from one index
+//
+// The deployment's `idx_core_task_dependency (subject_id, app_group, step, deleted_at,
+// task_status)` is the one shape that answers this subquery in a single pass: its leading
+// columns satisfy the GROUP BY and the MIN(step) in index order, and its trailing ones
+// carry the filter, so the whole thing is a covering scan with neither a temporary table
+// nor a sort. The optimizer does not pick it on its own -- it prefers the single-column
+// `deleted_at` index, which reaches the same rows but costs a row lookup each and then
+// sorts them (EXPLAIN: "Using index condition; Using where; Using temporary; Using
+// filesort", 13.4k rows on a 29.7k-row table). Naming that index as one to ignore is what
+// moves the plan.
+//
+// IGNORE and not FORCE, and that is the safety half of the choice. FORCE INDEX fails with
+// error 1176 on a deployment where schema/20260929-task-throughput.sql has not been
+// applied, which would stop every claim on the platform instead of making it slow. What
+// this ignores is the index the plan without the hint already uses, so a deployment where
+// that one is absent was not using it either: the blast radius of this line is a plan
+// choice, never a refusal.
+const readyTaskJoin = "JOIN (SELECT subject_id, app_group, MIN(step) AS ready_step FROM core_task IGNORE INDEX (idx_core_task_deleted_at) WHERE deleted_at IS NULL AND task_status NOT IN ('cancel', 'success') GROUP BY subject_id, app_group) ready ON ready.subject_id = core_task.subject_id AND ready.app_group = core_task.app_group AND ready.ready_step = core_task.step"
 
 // GetOnePendingTask 获取一个待处理的任务并标记为 Running
 func GetOnePendingTask(task_type, worker_id string) (*Task, error) {
