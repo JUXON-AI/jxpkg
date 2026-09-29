@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/JUXON-AI/jxpkg/apis/errcode"
+	"github.com/JUXON-AI/jxpkg/dbtools"
 	"github.com/JUXON-AI/jxpkg/logs"
 	"github.com/gin-gonic/gin"
 )
@@ -54,7 +55,7 @@ func GetPendingTask(ctx *gin.Context, req *GetPendingTestRequest, resp *GetPendi
 		resp.Message = "task_request_canceled" // 请求已取消
 		return
 	}
-	tsk, err = GetOnePendingTask(req.Request.TaskType, req.Request.WorkerID)
+	tsk, err = claimPendingTask(ctx.Request.Context(), dbtools.Core(), req.Request.TaskType, req.Request.WorkerID)
 	if err != nil {
 		logs.ErrorContextf(ctx, "GetPendingTest GetOnePendingTask task_type: %v, worker_id: %v, error: %v", req.Request.TaskType, req.Request.WorkerID, err)
 		resp.Code = errcode.ErrCode_InternalError
@@ -80,9 +81,14 @@ func TaskCallBack(ctx *gin.Context, req *TaskCallBackRequest, resp *TaskCallBack
 	logs.InfoContextf(ctx, "task callback task_id: %v, status: %v", req.Request.TaskID, req.Request.Status)
 	tsk, err := GetTaskByIDAndWorkerID(req.Request.TaskID, req.Request.WorkerID)
 	if err != nil {
-		logs.ErrorContextf(ctx, "TaskCallBack GetTaskByID task_type: %v, worker_id: %v, resault : %v,error: %v", req.Request.TaskID, req.Request.WorkerID, req.Request.Result, err)
+		logs.ErrorContextw(ctx.Request.Context(), "task.TaskCallBack lookup failed", "task_id", req.Request.TaskID)
 		resp.Code = errcode.ErrCode_InternalError
 		resp.Message = "task_get_task_failed_or_timeout" // 获取任务失败,或任务以超时
+		return
+	}
+	// Redelivery after a lost response is an acknowledgement, not a second
+	// application callback. A canceled or expired claim cannot be resurrected.
+	if tsk.TaskStatus != TaskStatusRunning {
 		return
 	}
 	tsk.TaskStatus = req.Request.Status
@@ -94,36 +100,47 @@ func TaskCallBack(ctx *gin.Context, req *TaskCallBackRequest, resp *TaskCallBack
 	if err == nil {
 		err := tc.CallBack(ctx, tsk)
 		if err != nil {
-			logs.ErrorContextf(ctx, "taskid %d, task_type: %d,callback err:%v", tsk.ID, tsk.TaskType, err)
+			logs.ErrorContextw(ctx.Request.Context(), "task.TaskCallBack application failed", "task_id", tsk.ID, "task_type", tsk.TaskType)
 			tsk.TaskStatus = TaskStatusFail
+			tsk.ErrMsg = "task_application_callback_failed"
 		}
 	}
 	if tsk.TaskStatus == TaskStatusFail {
-		tsk.ErrMsg = req.Request.ErrorMessage
 		tsk.Priority -= 1
 	}
-	err = SaveTask(tsk)
+	var saved bool
+	saved, err = finishClaim(ctx.Request.Context(), dbtools.Core(), tsk)
 	if err != nil {
-		logs.ErrorContextf(ctx, "TaskCallBack SaveTask task_type: %v, worker_id: %v, resault : %v,error: %v", req.Request.TaskID, req.Request.WorkerID, req.Request.Result, err)
+		logs.ErrorContextw(ctx.Request.Context(), "task.TaskCallBack save failed", "task_id", tsk.ID)
 		resp.Code = errcode.ErrCode_InternalError
 		resp.Message = "task_save_task_failed" // 保存任务失败
 		return
 	}
+	if !saved {
+		return
+	}
 	SetRedis(tsk.TaskType, req.Request.WorkerID, 0)
+	if tsk.TaskStatus == TaskStatusFail && tsk.Redo <= tsk.TaskConfigRedo {
+		if err := PushTaskQueue(ctx.Request.Context(), tsk.TaskType); err != nil {
+			logs.ErrorContextw(ctx.Request.Context(), "task.TaskCallBack retry wake failed", "task_id", tsk.ID)
+		}
+	}
 	if tsk.TaskStatus == TaskStatusSuccess {
 		// 检查有没有同组的下阶段任务加入队列
-		tasks, err := GetNextStepTask(tsk)
+		tasks, err := nextStepTasks(ctx.Request.Context(), dbtools.Core(), tsk)
 		if err != nil {
-			logs.ErrorContextf(ctx, "TaskCallBack GetNextStepTask task_type: %v, worker_id: %v, resault : %v,error: %v", req.Request.TaskID, req.Request.WorkerID, req.Request.Result, err)
+			logs.ErrorContextw(ctx.Request.Context(), "task.TaskCallBack next step failed", "task_id", tsk.ID)
 			resp.Code = errcode.ErrCode_InternalError
 			resp.Message = "task_get_next_task_failed" // 获取下阶段任务失败
 			return
 		}
-		for _, nextTask := range tasks {
-			err = PushTaskQueue(ctx.Request.Context(), nextTask.TaskType)
-			if err != nil {
-				logs.ErrorContextf(ctx, "TaskCallBack PushTaskQueue task_type: %v, worker_id: %v, resault : %v,error: %v", req.Request.TaskID, req.Request.WorkerID, req.Request.Result, err)
-				continue
+		if len(tasks) > 0 {
+			types := make([]string, len(tasks))
+			for i, next := range tasks {
+				types[i] = next.TaskType
+			}
+			if err := pushTaskQueues(ctx.Request.Context(), types); err != nil {
+				logs.ErrorContextw(ctx.Request.Context(), "task.TaskCallBack wake failed", "task_id", tsk.ID, "count", len(types))
 			}
 		}
 	}

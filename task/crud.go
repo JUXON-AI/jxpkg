@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"sort"
 	"time"
 
 	"github.com/JUXON-AI/jxpkg/dbtools"
@@ -40,18 +39,32 @@ func InitTaskDBStauts() {
 	}
 }
 
+// readyTaskJoin computes the first unfinished step once per group. The former
+// correlated NOT EXISTS rescanned the task table for every pending candidate
+// without an appropriate deployment index. This is the same dependency rule,
+// including negative steps and exhausted failures, with one grouped scan.
+const readyTaskJoin = "JOIN (SELECT subject_id, app_group, MIN(step) AS ready_step FROM core_task WHERE deleted_at IS NULL AND task_status NOT IN ('cancel', 'success') GROUP BY subject_id, app_group) ready ON ready.subject_id = core_task.subject_id AND ready.app_group = core_task.app_group AND ready.ready_step = core_task.step"
+
 // GetOnePendingTask 获取一个待处理的任务并标记为 Running
 func GetOnePendingTask(task_type, worker_id string) (*Task, error) {
+	return claimPendingTask(context.Background(), dbtools.Core(), task_type, worker_id)
+}
+
+func claimPendingTask(ctx context.Context, db *gorm.DB, task_type, worker_id string) (*Task, error) {
 	var (
 		tsk Task
-		ctx = context.TODO()
 	)
-	db := dbtools.Core().Session(&gorm.Session{Logger: customLogger})
+	db = db.WithContext(ctx).
+		Omit("result").Session(&gorm.Session{Logger: customLogger})
 	// 开启事务
 	tx := db.Begin()
+	if tx.Error != nil {
+		return nil, tx.Error
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			tx.Rollback()
+			panic(r)
 		}
 	}()
 	// 加锁查询，排除 step 更小但未成功的任务
@@ -60,16 +73,7 @@ func GetOnePendingTask(task_type, worker_id string) (*Task, error) {
 		Where("task_type = ?", task_type).
 		Where("task_status IN (?)", []TaskStatus{TaskStatusPending, TaskStatusFail}).
 		Where("redo <= task_config_redo").
-		Where(`
-			NOT EXISTS (
-				SELECT 1 FROM core_task t2
-				WHERE t2.subject_id = core_task.subject_id
-				  AND t2.app_group = core_task.app_group
-				  AND t2.step < core_task.step
-				  AND t2.deleted_at IS NULL
-			  AND t2.task_status NOT IN (?)
-			)
-		`, []TaskStatus{TaskStatusCancel, TaskStatusSuccess}).
+		Joins(readyTaskJoin).
 		Order("priority DESC, updated_at ASC").
 		Clauses(clause.Locking{Strength: "UPDATE", Options: clause.LockingOptionsSkipLocked}).
 		First(&tsk).Error
@@ -88,14 +92,18 @@ func GetOnePendingTask(task_type, worker_id string) (*Task, error) {
 	tsk.TaskStatus = TaskStatusRunning
 	tsk.StartAt = &now
 	tsk.WorkerID = worker_id
-	err = tx.Save(&tsk).Error
+	err = tx.Model(&Task{}).Where("id = ?", tsk.ID).Updates(map[string]interface{}{
+		"task_status": TaskStatusRunning, "start_at": now, "worker_id": worker_id, "end_at": nil, "cost": 0,
+	}).Error
 	if err != nil {
 		logs.ErrorContextf(ctx, "Failed to update task status to running: %v", err)
 		tx.Rollback()
 		return nil, err
 	}
 	// 提交事务
-	tx.Commit()
+	if err := tx.Commit().Error; err != nil {
+		return nil, err
+	}
 	return &tsk, nil
 }
 
@@ -144,6 +152,29 @@ func SaveTask(tsk *Task) error {
 		}
 	}
 	return nil
+}
+
+// finishClaim only persists an outcome while the same claim still owns the row.
+// Payload and scheduling identity are immutable here; rewriting them resends
+// megabytes and can overwrite a concurrent cancellation. start_at fences a
+// claim reclaimed between the callback lookup and its conditional update.
+func finishClaim(ctx context.Context, db *gorm.DB, tsk *Task) (bool, error) {
+	if tsk.StartAt == nil || tsk.EndAt == nil {
+		return false, errors.New("task outcome has no claim timestamps")
+	}
+	if tsk.StartAt.Before(*tsk.EndAt) {
+		tsk.Cost = int64(tsk.EndAt.Sub(*tsk.StartAt).Seconds())
+	}
+	if tsk.TaskStatus == TaskStatusFail {
+		tsk.Redo++
+	}
+	result := db.WithContext(ctx).Model(&Task{}).
+		Where("id = ? AND worker_id = ? AND start_at = ? AND task_status = ?", tsk.ID, tsk.WorkerID, tsk.StartAt, TaskStatusRunning).
+		Updates(map[string]interface{}{
+			"task_status": tsk.TaskStatus, "result": tsk.Result, "err_msg": tsk.ErrMsg,
+			"end_at": tsk.EndAt, "cost": tsk.Cost, "redo": tsk.Redo, "priority": tsk.Priority,
+		})
+	return result.RowsAffected == 1, result.Error
 }
 
 // CancelTask 取消任务
@@ -271,6 +302,12 @@ func CreateTask(ctx context.Context, tsk *Task) error {
 //
 // 调用方不要拿它承载没有共同失败语义的任务：整批共用一个事务，一条坏数据会让整批回滚。
 func CreateTasks(ctx context.Context, tasks []*Task) error {
+	return createTasks(ctx, tasks, func() *gorm.DB { return dbtools.Core() }, pushTaskQueues)
+}
+
+// The persistence and notification boundaries are separate: once the rows
+// commit, a notification outage must not turn a caller retry into duplicate work.
+func createTasks(ctx context.Context, tasks []*Task, database func() *gorm.DB, wake func(context.Context, []string) error) error {
 	if len(tasks) == 0 {
 		return errors.New("tasks cannot be empty")
 	}
@@ -279,67 +316,40 @@ func CreateTasks(ctx context.Context, tasks []*Task) error {
 			return fmt.Errorf("tasks[%d]: %w", at, err)
 		}
 	}
-	if err := dbtools.Core().Create(tasks).Error; err != nil {
+	if err := database().WithContext(ctx).Create(tasks).Error; err != nil {
 		return err
 	}
 	taskTypes := make([]string, 0, len(tasks))
 	for _, tsk := range tasks {
 		taskTypes = append(taskTypes, tsk.TaskType)
 	}
-	return pushTaskQueues(ctx, taskTypes)
+	if err := wake(ctx, taskTypes); err != nil {
+		// Rows are already durable. Reporting creation failure makes callers
+		// recreate the whole batch. CheckQueueCount repairs missing wake-ups.
+		logs.ErrorContextw(ctx, "task.CreateTasks wake failed", "task_count", len(tasks))
+	}
+	return nil
 }
 
-// GetNextStepTask 获取下一个步骤的任务
+// GetNextStepTask returns newly unblocked tasks in a strictly later step.
+// Peers already received their wake-ups at creation. Broadcasting them again
+// on every callback produces quadratic queue traffic for independent tasks.
 func GetNextStepTask(tsk *Task) ([]*Task, error) {
-	var allTasks []*Task
-	ctx := context.TODO()
-	err := dbtools.Core().Where("subject_id = ? AND app_group = ?", tsk.SubjectID, tsk.AppGroup).
-		Order("step ASC").
-		Find(&allTasks).Error
+	return nextStepTasks(context.Background(), dbtools.Core(), tsk)
+}
+
+func nextStepTasks(ctx context.Context, db *gorm.DB, tsk *Task) ([]*Task, error) {
+	var tasks []*Task
+	err := db.WithContext(ctx).Model(&Task{}).Select("id", "task_type", "step").
+		Where("subject_id = ? AND app_group = ? AND step > ?", tsk.SubjectID, tsk.AppGroup, tsk.Step).
+		Where("task_status IN ?", []TaskStatus{TaskStatusPending, TaskStatusFail}).
+		Where("redo <= task_config_redo").
+		Where("NOT EXISTS (SELECT 1 FROM core_task t2 WHERE t2.subject_id = core_task.subject_id AND t2.app_group = core_task.app_group AND t2.step < core_task.step AND t2.deleted_at IS NULL AND t2.task_status NOT IN (?, ?))", TaskStatusCancel, TaskStatusSuccess).
+		Order("step ASC, id ASC").Find(&tasks).Error
 	if err != nil {
-		logs.ErrorContextf(ctx, "GetNextStepTask error: %v", err)
-		return nil, err
+		return nil, fmt.Errorf("read unblocked task steps: %w", err)
 	}
-
-	// 按 step 分组
-	stepTaskMap := make(map[int][]*Task)
-	stepSet := map[int]struct{}{}
-	for _, task := range allTasks {
-		stepTaskMap[task.Step] = append(stepTaskMap[task.Step], task)
-		stepSet[task.Step] = struct{}{}
-	}
-
-	// 提取并排序所有 step
-	var steps []int
-	for step := range stepSet {
-		steps = append(steps, step)
-	}
-	sort.Ints(steps)
-
-	// 查找第一个未全部完成的 step
-	for _, step := range steps {
-		tasks := stepTaskMap[step]
-		allCompleted := true
-		for _, task := range tasks {
-			if task.TaskStatus != TaskStatusSuccess {
-				allCompleted = false
-				break
-			}
-		}
-		if !allCompleted {
-			var result []*Task
-			for _, task := range tasks {
-				if task.TaskStatus == TaskStatusPending || task.TaskStatus == TaskStatusFail || task.TaskStatus == TaskStatusRunning {
-					result = append(result, task)
-				}
-			}
-			logs.InfoContextf(ctx, "Next incomplete step: %d, pending tasks: %d", step, len(result))
-			return result, nil
-		}
-	}
-
-	// 所有任务都完成了
-	return nil, nil
+	return tasks, nil
 }
 
 // GetPendingTaskCount 获取待处理任务数量
@@ -349,16 +359,7 @@ func GetPendingTaskCount(ctx context.Context, task_type string) (int64, error) {
 		Where("task_type = ?", task_type).
 		Where("task_status IN (?)", []TaskStatus{TaskStatusPending, TaskStatusFail}).
 		Where("redo <= task_config_redo").
-		Where(`
-			NOT EXISTS (
-				SELECT 1 FROM core_task t2
-				WHERE t2.subject_id = core_task.subject_id
-				  AND t2.app_group = core_task.app_group
-				  AND t2.step < core_task.step
-				  AND t2.deleted_at IS NULL
-			  AND t2.task_status NOT IN (?)
-			)
-		`, []TaskStatus{TaskStatusCancel, TaskStatusSuccess}).
+		Joins(readyTaskJoin).
 		Count(&count).Error
 	if err != nil {
 		return 0, err
