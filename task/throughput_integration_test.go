@@ -194,7 +194,7 @@ func TestThroughputClaimSkipsLockedLeadingCandidateBatch(t *testing.T) {
 	db := throughputDB(t)
 	group := fmt.Sprintf("locked%d", time.Now().UnixNano())
 	var leading []uint
-	for range claimCandidateBatch {
+	for range 4 * claimCandidateBatch {
 		leading = append(leading, taskFixture(t, db, 0, TaskStatusPending, group, 19).ID)
 	}
 	next := taskFixture(t, db, 0, TaskStatusPending, group, 19)

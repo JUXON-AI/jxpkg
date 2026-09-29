@@ -54,10 +54,15 @@ func GetOnePendingTask(task_type, worker_id string) (*Task, error) {
 const claimCandidateBatch = 32
 
 func claimPendingTask(ctx context.Context, db *gorm.DB, taskType, workerID string) (*Task, error) {
+	// Bound one claim by time, not by a fixed prefix of the queue: a long
+	// transaction may lock many leading rows while later work remains runnable.
+	// Expiry is an error, distinct from an actually empty eligible queue.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	// Sorting an unindexed queue under FOR UPDATE locks scanned rows that will
 	// never be returned. Discover candidates without locks, then lock by primary key.
 	var attempted []uint
-	for scan := 0; scan < 3; scan++ {
+	for {
 		var ids []uint
 		query := db.WithContext(ctx).Model(&Task{}).Select("core_task.id").
 			Where("task_type = ?", taskType).
