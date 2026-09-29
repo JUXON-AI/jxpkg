@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/JUXON-AI/jxpkg/apis/errcode"
+	"github.com/JUXON-AI/jxpkg/dbtools"
 	"github.com/JUXON-AI/jxpkg/dbtools/redispool"
 	"github.com/JUXON-AI/jxpkg/logs"
 	"github.com/gin-gonic/gin"
@@ -185,11 +186,23 @@ func ChackWockerHealth() {
 					logs.WarnContextf(ctx, "get task error: %v, task_id: %v, worker_id: %v", err, taskid, worckerID)
 					continue
 				}
+				if task.TaskStatus != TaskStatusRunning {
+					continue
+				}
 				task.ErrMsg = "task_health_check_timeout" // health check timeout
 				task.TaskStatus = TaskStatusFail
 				now := time.Now()
 				task.EndAt = &now
-				SaveTask(task)
+				saved, err := finishClaim(ctx, dbtools.Core(), task)
+				if err != nil {
+					logs.ErrorContextw(ctx, "task.ChackWockerHealth expire failed", "task_id", taskid)
+					continue
+				}
+				if saved && task.Redo <= task.TaskConfigRedo {
+					if err := PushTaskQueue(ctx, task.TaskType); err != nil {
+						logs.ErrorContextw(ctx, "task.ChackWockerHealth retry wake failed", "task_id", taskid)
+					}
+				}
 			}
 		}
 	}
