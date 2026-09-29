@@ -50,57 +50,78 @@ func GetOnePendingTask(task_type, worker_id string) (*Task, error) {
 	return claimPendingTask(context.Background(), dbtools.Core(), task_type, worker_id)
 }
 
-func claimPendingTask(ctx context.Context, db *gorm.DB, task_type, worker_id string) (*Task, error) {
-	var (
-		tsk Task
-	)
-	db = db.WithContext(ctx).
-		Omit("result").Session(&gorm.Session{Logger: customLogger})
-	// 开启事务
-	tx := db.Begin()
+// claimCandidateBatch bounds work when other workers claim the same leading IDs.
+const claimCandidateBatch = 32
+
+func claimPendingTask(ctx context.Context, db *gorm.DB, taskType, workerID string) (*Task, error) {
+	// Sorting an unindexed queue under FOR UPDATE locks scanned rows that will
+	// never be returned. Discover candidates without locks, then lock by primary key.
+	var attempted []uint
+	for scan := 0; scan < 3; scan++ {
+		var ids []uint
+		query := db.WithContext(ctx).Model(&Task{}).Select("core_task.id").
+			Where("task_type = ?", taskType).
+			Where("task_status IN ?", []TaskStatus{TaskStatusPending, TaskStatusFail}).
+			Where("redo <= task_config_redo").Joins(readyTaskJoin)
+		if len(attempted) > 0 {
+			query = query.Where("core_task.id NOT IN ?", attempted)
+		}
+		err := query.Order("priority DESC, updated_at ASC, core_task.id ASC").Limit(claimCandidateBatch).Pluck("core_task.id", &ids).Error
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range ids {
+			tsk, err := claimCandidate(ctx, db, id, taskType, workerID)
+			if err != nil || tsk != nil {
+				return tsk, err
+			}
+		}
+		if len(ids) < claimCandidateBatch {
+			break
+		}
+		attempted = append(attempted, ids...)
+	}
+
+	return nil, nil
+}
+
+func claimCandidate(ctx context.Context, db *gorm.DB, id uint, taskType, workerID string) (*Task, error) {
+	tx := db.WithContext(ctx).Session(&gorm.Session{Logger: customLogger}).Begin()
 	if tx.Error != nil {
 		return nil, tx.Error
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
-			panic(r)
-		}
-	}()
-	// 加锁查询，排除 step 更小但未成功的任务
-	err := tx.
-		WithContext(ctx).
-		Where("task_type = ?", task_type).
-		Where("task_status IN (?)", []TaskStatus{TaskStatusPending, TaskStatusFail}).
+	defer tx.Rollback()
+	var tsk Task
+	err := tx.Omit("result").Where("id = ? AND task_type = ?", id, taskType).
+		Where("task_status IN ?", []TaskStatus{TaskStatusPending, TaskStatusFail}).
 		Where("redo <= task_config_redo").
-		Joins(readyTaskJoin).
-		Order("priority DESC, updated_at ASC").
-		Clauses(clause.Locking{Strength: "UPDATE", Options: clause.LockingOptionsSkipLocked}).
-		First(&tsk).Error
-
+		Clauses(clause.Locking{Strength: "UPDATE", Options: clause.LockingOptionsSkipLocked}).First(&tsk).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			tx.Rollback()
-			return nil, nil
-		}
-		logs.ErrorContextf(ctx, "Failed to find pending task: %v", err)
-		tx.Rollback()
 		return nil, err
+	}
+	// This is the short transaction's first consistent read. Recheck dependencies
+	// after locking: the unlocked candidate list may already be stale.
+	var blocker struct{ ID uint }
+	dependency := tx.Model(&Task{}).Select("id").
+		Where("subject_id = ? AND app_group = ? AND step < ?", tsk.SubjectID, tsk.AppGroup, tsk.Step).
+		Where("task_status NOT IN ?", []TaskStatus{TaskStatusCancel, TaskStatusSuccess}).Limit(1).Find(&blocker)
+	if dependency.Error != nil {
+		return nil, dependency.Error
+	}
+	if dependency.RowsAffected != 0 {
+		return nil, nil
 	}
 	now := time.Now()
-	// 更新任务状态为 Running
-	tsk.TaskStatus = TaskStatusRunning
-	tsk.StartAt = &now
-	tsk.WorkerID = worker_id
-	err = tx.Model(&Task{}).Where("id = ?", tsk.ID).Updates(map[string]interface{}{
-		"task_status": TaskStatusRunning, "start_at": now, "worker_id": worker_id, "end_at": nil, "cost": 0,
-	}).Error
-	if err != nil {
-		logs.ErrorContextf(ctx, "Failed to update task status to running: %v", err)
-		tx.Rollback()
+	tsk.TaskStatus, tsk.StartAt, tsk.WorkerID = TaskStatusRunning, &now, workerID
+	tsk.EndAt, tsk.Cost = nil, 0
+	if err := tx.Model(&Task{}).Where("id = ?", tsk.ID).Updates(map[string]interface{}{
+		"task_status": TaskStatusRunning, "start_at": now, "worker_id": workerID, "end_at": nil, "cost": 0,
+	}).Error; err != nil {
 		return nil, err
 	}
-	// 提交事务
 	if err := tx.Commit().Error; err != nil {
 		return nil, err
 	}

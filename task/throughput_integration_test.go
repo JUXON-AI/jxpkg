@@ -177,3 +177,40 @@ func TestThroughputTerminalAndReclaimedTasksCannotBeOverwritten(t *testing.T) {
 		t.Fatalf("old claim overwrote new claim: %v %v", saved, err)
 	}
 }
+
+func TestThroughputCandidateRechecksDependencyAfterSelection(t *testing.T) {
+	db := throughputDB(t)
+	group := fmt.Sprintf("stale%d", time.Now().UnixNano())
+	candidate := taskFixture(t, db, 1, TaskStatusPending, group, 17)
+	// A new unfinished predecessor appeared after the unlocked discovery read.
+	taskFixture(t, db, 0, TaskStatusPending, group, 17)
+	got, err := claimCandidate(context.Background(), db, candidate.ID, group, "late-worker")
+	if err != nil || got != nil {
+		t.Fatalf("stale candidate bypassed predecessor: %v %v", got, err)
+	}
+}
+
+func TestThroughputClaimSkipsLockedLeadingCandidateBatch(t *testing.T) {
+	db := throughputDB(t)
+	group := fmt.Sprintf("locked%d", time.Now().UnixNano())
+	var leading []uint
+	for range claimCandidateBatch {
+		leading = append(leading, taskFixture(t, db, 0, TaskStatusPending, group, 19).ID)
+	}
+	next := taskFixture(t, db, 0, TaskStatusPending, group, 19)
+	tx := db.Begin()
+	if tx.Error != nil {
+		t.Fatal(tx.Error)
+	}
+	defer tx.Rollback()
+	var locked []*Task
+	if err := tx.Raw("SELECT * FROM core_task WHERE id IN ? FOR UPDATE", leading).Scan(&locked).Error; err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := claimPendingTask(ctx, db, group, "next-worker")
+	if err != nil || got == nil || got.ID != next.ID {
+		t.Fatalf("locked leading candidates hid eligible work: %v %v", got, err)
+	}
+}
