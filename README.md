@@ -270,6 +270,15 @@ router := server.NewRouter("/v1/",
 
 管理命名 GORM 连接。`InitDBConn` 初始化单个连接，`InitMutilDBConn` 初始化多个连接，`DB(name)` 读取命名连接，`Core`/`Account`/`Jxone` 是约定名称的快捷入口。
 
+连接池可按数据库名通过环境变量配置。例如 `account` 使用
+`JX_DB_ACCOUNT_MAX_OPEN_CONNS=16`、`JX_DB_ACCOUNT_MAX_IDLE_CONNS=8`、
+`JX_DB_ACCOUNT_CONN_MAX_IDLE_TIME=10m`、`JX_DB_ACCOUNT_CONN_MAX_LIFETIME=30m`。
+数据库名转换为大写，连字符转换为下划线；空名称使用 `DEFAULT`。
+未配置时保持标准库默认值：打开连接不限、最多保留两个空闲连接、无空闲和寿命期限。
+显式 `0` 分别表示不限打开连接、不保留空闲连接或关闭相应期限。
+配置错误或空闲上限超过非零打开上限时，初始化失败。启动日志仅记录数据库名和池参数。
+按实例核算所有服务和副本的连接总额；不要对每个低频数据库套用繁忙数据库的参数。
+
 迁移必须由应用显式调用 `InitModel`/`DoInitModels`；导入包不会自动迁移。应用应在启动时校验连接和 migration 版本，并在部署流程中记录执行结果。
 
 ### `dbtools/redispool`

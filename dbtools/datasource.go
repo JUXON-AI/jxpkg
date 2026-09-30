@@ -3,6 +3,7 @@ package dbtools
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"sync"
 
 	"github.com/JUXON-AI/jxpkg/logs"
@@ -17,6 +18,10 @@ var (
 
 // InitDBConn 初始化数据库连接
 func InitDBConn(name, dburl string) (*gorm.DB, error) {
+	pool, err := databasePoolOptions(name, os.Getenv)
+	if err != nil {
+		return nil, err
+	}
 	dsn, err := url.Parse(dburl)
 	if err != nil {
 
@@ -46,6 +51,14 @@ func InitDBConn(name, dburl string) (*gorm.DB, error) {
 	if name == "" {
 		name = "default"
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("get database pool %s: %w", name, err)
+	}
+	pool.apply(sqlDB)
+	logs.Infow("dbtools.InitDBConn pool configured", "database", name,
+		"max_open_conns", pool.maxOpen, "max_idle_conns", pool.maxIdle,
+		"conn_max_idle_time", pool.idleTime.String(), "conn_max_lifetime", pool.lifetime.String())
 	dbsLocker.Lock()
 	dbs[name] = db
 	dbsLocker.Unlock()
