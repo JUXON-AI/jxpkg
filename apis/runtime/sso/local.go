@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -94,6 +95,7 @@ var (
 	_ auth.CompanyIdentityResolver       = (*localResolver)(nil)
 	_ auth.CompanyResolver               = (*localResolver)(nil)
 	_ auth.AuthorizationContextResolver  = (*localResolver)(nil)
+	_ auth.AuthorizedSessionResolver     = (*localResolver)(nil)
 	_ auth.AuthorizationSubjectsResolver = (*localResolver)(nil)
 )
 
@@ -143,7 +145,7 @@ func loadLocalEnv(getenv func(string) string, prefix string, options runtimeOpti
 			Host: host, Service: service, CookieName: localCookieName, ExternalOrigin: externalOrigin,
 		})
 	}
-	browserSession, err := server.NewBrowserSessionOption(middleware.BrowserSessionOptions{Bindings: bindings, Resolver: resolver})
+	browserSession, err := server.NewBrowserSessionOption(middleware.BrowserSessionOptions{Bindings: bindings, Resolver: resolver, AuthorizedResolver: resolver})
 	if err != nil {
 		return nil, fmt.Errorf("%w: configure local SSO middleware", auth.ErrAuthBackendUnavailable)
 	}
@@ -156,6 +158,7 @@ func loadLocalEnv(getenv func(string) string, prefix string, options runtimeOpti
 		server.WithMiddleware(resolver.injectLocalIdentity)(router)
 		browserSession(router)
 		router.GinEngine().GET("/auth/session", resolver.session)
+		router.GinEngine().POST("/auth/session/renew", resolver.renewSession)
 	}
 	return &Runtime{httpAddress: httpAddress, origin: origin, resolver: resolver, routerOption: routerOption}, nil
 }
@@ -253,6 +256,15 @@ func (resolver *localResolver) session(ctx *gin.Context) {
 	})
 }
 
+func (resolver *localResolver) renewSession(ctx *gin.Context) {
+	if ctx.Request.Header.Get("Origin") != "http://"+ctx.Request.Host ||
+		subtle.ConstantTimeCompare([]byte(ctx.Request.Header.Get(middleware.DefaultCSRFHeader)), []byte(resolver.csrfToken)) != 1 {
+		ctx.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	resolver.session(ctx)
+}
+
 // Resolve maps the private synthetic development cookie to the configured
 // identity while preserving the production browser middleware contract.
 func (resolver *localResolver) Resolve(_ context.Context, request auth.SessionResolveRequest) (*auth.SessionPrincipal, error) {
@@ -326,6 +338,28 @@ func (resolver *localResolver) ResolveAuthorizationContext(_ context.Context, re
 		CompanyID: request.CompanyID, UIN: request.UIN, MembershipEpoch: request.MembershipEpoch,
 		IsCompanyOwner: true, Departments: []auth.AuthorizationDepartment{}, AllowedPermissions: append([]auth.PermissionCode(nil), request.Permissions...),
 	}, nil
+}
+
+// ResolveAuthorized 在本地开发身份上返回与生产协议相同的组合上下文。
+func (resolver *localResolver) ResolveAuthorized(ctx context.Context, request auth.AuthorizedSessionResolveRequest) (*auth.AuthorizedSession, error) {
+	principal, err := resolver.Resolve(ctx, auth.SessionResolveRequest{Host: request.Host, Service: request.Service, SessionID: request.SessionID})
+	if err != nil {
+		return nil, err
+	}
+	if !request.IncludeAuthorization {
+		if len(request.Permissions) != 0 {
+			return nil, auth.ErrInvalidCredential
+		}
+		return &auth.AuthorizedSession{Principal: *principal}, nil
+	}
+	authorization, err := resolver.ResolveAuthorizationContext(ctx, auth.AuthorizationContextResolveRequest{
+		Service: request.Service, CompanyID: principal.Claims.CompanyID, UIN: principal.Claims.UIN,
+		MembershipEpoch: principal.Claims.MembershipEpoch, Permissions: request.Permissions,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &auth.AuthorizedSession{Principal: *principal, Authorization: *authorization}, nil
 }
 
 // ResolveAuthorizationSubjects 为本地授权页返回唯一配置身份。

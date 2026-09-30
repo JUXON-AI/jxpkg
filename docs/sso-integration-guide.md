@@ -97,6 +97,8 @@ router.PRequireBrowserSession("jxx.UpdateProject", UpdateProject)
 
 `PRequireBrowserSession` 固定执行：解析当前 Host 的不透明 Session Cookie、通过 mTLS 调 Account、发布 verified principal、要求已认证、对副作用请求校验 Origin/CSRF、进入业务 handler。
 
+需要组织授权上下文的路由使用 `PRequireAuthorizedBrowserSession(action, permissions, handlers...)`。它通过一次 `/internal/session/authorize` 请求取得已验证会话和权限快照；普通 `PRequireBrowserSession` 也调用这个端点的仅会话模式，不读取组织权限。现有 `SESSION_RESOLVER_ENDPOINT` 配置保持 `/internal/session/resolve`，SDK 会据此构造新端点地址。
+
 浏览器路由不要使用 `PRequireLogin` 或用户 Bearer。`PRequireBearer` 只用于仍在迁移的兼容接口或独立 workload credential。
 
 ### 3. handler 只读取已验证事实
@@ -164,7 +166,7 @@ curl --fail-with-body \
 ```
 
 本地模式只接受 loopback listener、loopback Origin 和 loopback 请求，拒绝代理转发、
-Bearer 混用及 Kubernetes 环境。它只提供现有前端启动所需的 `/auth/session`，不签发
+Bearer 混用及 Kubernetes 环境。它提供本地调试用的 `/auth/session` 和 `/auth/session/renew`，不签发
 Cookie、不模拟 `/v1/account.*`。前端 dev proxy 可向 `/auth/session` 与业务 API
 自动增加同一个 Header。要测试真实登录、Cookie、CSRF 或 TLS 链路，改用
 `JXX_SSO_MODE=account` 和下文的完整 Account 配置。
@@ -176,6 +178,7 @@ Cookie、不模拟 `/v1/account.*`。前端 dev proxy 可向 `/auth/session` 与
 - `GET /auth/login?return_to=%2Fprojects`：开始登录。
 - `GET /auth/callback`：Account 完成 code exchange、写入业务 Host-only Cookie，再 303 回 `return_to`。
 - `GET /auth/session`：读取当前身份和 `csrf_token`。
+- `POST /auth/session/renew`：在同源且 CSRF 校验成功的用户操作后延长空闲期限，受绝对期限约束。
 - `GET /auth/identities`：列出可切换身份。
 - `POST /auth/switch-identity`：切换身份并轮换 Session/CSRF。
 - `POST /auth/logout`：撤销并清理当前业务 Cookie，响应提供中央退出导航地址。

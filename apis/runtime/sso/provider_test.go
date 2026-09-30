@@ -68,6 +68,25 @@ func (authority *providerTestAuthority) Resolve(ctx context.Context, input auth.
 	return authority.sessions(ctx, input)
 }
 
+func (authority *providerTestAuthority) ResolveAuthorized(ctx context.Context, input auth.AuthorizedSessionResolveRequest) (*auth.AuthorizedSession, error) {
+	principal, err := authority.Resolve(ctx, auth.SessionResolveRequest{Host: input.Host, Service: input.Service, SessionID: input.SessionID})
+	if err != nil {
+		return nil, err
+	}
+	result := &auth.AuthorizedSession{Principal: *principal}
+	if input.IncludeAuthorization {
+		authorization, err := authority.ResolveAuthorizationContext(ctx, auth.AuthorizationContextResolveRequest{
+			Service: input.Service, CompanyID: principal.Claims.CompanyID, UIN: principal.Claims.UIN,
+			MembershipEpoch: principal.Claims.MembershipEpoch, Permissions: input.Permissions,
+		})
+		if err != nil {
+			return nil, err
+		}
+		result.Authorization = *authorization
+	}
+	return result, nil
+}
+
 func (authority *providerTestAuthority) ResolveCompanyIdentities(ctx context.Context, input auth.CompanyIdentityResolveRequest) ([]auth.CompanyIdentity, error) {
 	return authority.identities(ctx, input)
 }
@@ -118,6 +137,40 @@ func providerTestRequest(body string) *http.Request {
 	request.TLS = &tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{{URIs: []*url.URL{principal}}}}}
 	request.Header.Set("Content-Type", "application/json")
 	return request
+}
+
+func TestProviderAuthorizedSessionModes(t *testing.T) {
+	provider := providerTestHandler(t, newProviderTestAuthority())
+	for _, test := range []struct {
+		name, body        string
+		status            int
+		wantAuthorization bool
+	}{
+		{"session only", `{"host":"app.example.com","service":"app","session_id":"` + base64.RawURLEncoding.EncodeToString(make([]byte, 32)) + `","include_authorization":false,"permissions":[]}`, http.StatusOK, false},
+		{"with authorization", `{"host":"app.example.com","service":"app","session_id":"` + base64.RawURLEncoding.EncodeToString(make([]byte, 32)) + `","include_authorization":true,"permissions":["agent.create"]}`, http.StatusOK, true},
+		{"session only rejects permissions", `{"host":"app.example.com","service":"app","session_id":"` + base64.RawURLEncoding.EncodeToString(make([]byte, 32)) + `","include_authorization":false,"permissions":["agent.create"]}`, http.StatusBadRequest, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := providerTestRequest(test.body)
+			request.URL.Path = auth.InternalAuthorizedSessionResolvePath
+			recorder := httptest.NewRecorder()
+			provider.serveHTTP(recorder, request)
+			if recorder.Code != test.status {
+				t.Fatalf("status/body = %d/%s", recorder.Code, recorder.Body.String())
+			}
+			if test.status != http.StatusOK {
+				return
+			}
+			var response map[string]json.RawMessage
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			_, present := response["authorization"]
+			if len(response["session"]) == 0 || present != test.wantAuthorization {
+				t.Fatalf("response keys = %#v", response)
+			}
+		})
+	}
 }
 
 func TestProviderHandlerRejectsAmbiguousSessionRequests(t *testing.T) {

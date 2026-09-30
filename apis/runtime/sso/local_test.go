@@ -13,6 +13,7 @@ import (
 
 	"github.com/JUXON-AI/jxpkg/apis/runtime"
 	"github.com/JUXON-AI/jxpkg/apis/runtime/auth"
+	"github.com/JUXON-AI/jxpkg/apis/runtime/middleware"
 	"github.com/JUXON-AI/jxpkg/apis/runtime/server"
 	"github.com/gin-gonic/gin"
 )
@@ -209,6 +210,26 @@ func TestLocalRuntimeProvidesFrontendBootstrapAndCompanyIdentity(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &session); err != nil || !session.Authenticated || session.UserID != 11 ||
 		session.Identity.UIN != 22 || session.Identity.CompanyID != 33 || session.Identity.Username == "" || session.CSRFToken == "" {
 		t.Fatalf("session = %#v, %v", session, err)
+	}
+	for _, test := range []struct {
+		name       string
+		csrf       string
+		wantStatus int
+	}{
+		{name: "valid renewal", csrf: session.CSRFToken, wantStatus: http.StatusOK},
+		{name: "invalid CSRF", csrf: "invalid", wantStatus: http.StatusForbidden},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "http://localhost:5173/auth/session/renew", strings.NewReader("{}"))
+			request.RemoteAddr = "127.0.0.1:54321"
+			request.Header.Set(localIdentityHeader, "active")
+			request.Header.Set(middleware.DefaultCSRFHeader, test.csrf)
+			response := httptest.NewRecorder()
+			router.GinEngine().ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("renew status = %d, want %d; body = %s", response.Code, test.wantStatus, response.Body.String())
+			}
+		})
 	}
 
 	identities, err := localRuntime.CompanyIdentityResolver().ResolveCompanyIdentities(context.Background(), auth.CompanyIdentityResolveRequest{

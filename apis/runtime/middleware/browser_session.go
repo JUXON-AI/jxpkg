@@ -40,6 +40,9 @@ type BrowserSessionOptions struct {
 	// Resolver 表示受信任的会话主体解析器。
 	Resolver auth.SessionResolver
 
+	// AuthorizedResolver 在同一次请求中解析会话与组织权限。
+	AuthorizedResolver auth.AuthorizedSessionResolver
+
 	// Clock 提供会话期限校验使用的当前时间。
 	Clock func() time.Time
 
@@ -55,7 +58,8 @@ type normalizedBrowserSessionOptions struct {
 	bindings map[string]BrowserSessionBinding
 
 	// resolver 保存受信任的会话主体解析器。
-	resolver auth.SessionResolver
+	resolver           auth.SessionResolver
+	authorizedResolver auth.AuthorizedSessionResolver
 
 	// clock 保存会话期限校验使用的时钟。
 	clock func() time.Time
@@ -72,6 +76,8 @@ type normalizedBrowserSessionOptions struct {
 type BrowserSessionHandlers struct {
 	// Session resolves the current Host's browser principal.
 	Session gin.HandlerFunc
+	// AuthorizedSession 为指定路由权限生成一次解析的浏览器会话中间件。
+	AuthorizedSession func([]auth.PermissionCode) gin.HandlerFunc
 	// CSRF verifies unsafe requests against that Host's origin and session token.
 	CSRF gin.HandlerFunc
 	// Bearer rejects the current Host's browser cookie before token verification.
@@ -87,9 +93,67 @@ func NewBrowserSessionHandlers(options BrowserSessionOptions) (BrowserSessionHan
 	}
 	return BrowserSessionHandlers{
 		Session: browserSessionMiddleware(normalized),
-		CSRF:    csrfMiddleware(normalized),
-		Bearer:  browserBearerMiddleware(normalized.bindings),
+		AuthorizedSession: func(permissions []auth.PermissionCode) gin.HandlerFunc {
+			return browserAuthorizedSessionMiddleware(normalized, append([]auth.PermissionCode(nil), permissions...))
+		},
+		CSRF:   csrfMiddleware(normalized),
+		Bearer: browserBearerMiddleware(normalized.bindings),
 	}, nil
+}
+
+func browserAuthorizedSessionMiddleware(normalized normalizedBrowserSessionOptions, permissions []auth.PermissionCode) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		ls := &auth.LoginStatus{AuthMode: auth.AuthModeBrowserSession}
+		ctx.Set(constants.CtxKeyLoginStatus, ls)
+		if normalized.authorizedResolver == nil {
+			failLoginStatus(ls, auth.ErrAuthBackendUnavailable)
+			return
+		}
+		if len(ctx.Request.Header.Values("Authorization")) != 0 {
+			failLoginStatus(ls, auth.ErrInvalidCredential)
+			return
+		}
+		host := ctx.Request.Host
+		binding, ok := normalized.bindings[host]
+		if !ok {
+			failLoginStatus(ls, auth.ErrInvalidCredential)
+			return
+		}
+		cookies := matchingCookies(ctx.Request, binding.CookieName)
+		if len(cookies) == 0 {
+			return
+		}
+		if len(cookies) != 1 || cookies[0].Value == "" || strings.TrimSpace(cookies[0].Value) != cookies[0].Value {
+			failLoginStatus(ls, auth.ErrInvalidCredential)
+			return
+		}
+		resolved, err := normalized.authorizedResolver.ResolveAuthorized(ctx.Request.Context(), auth.AuthorizedSessionResolveRequest{
+			Host: host, Service: binding.Service, SessionID: cookies[0].Value,
+			IncludeAuthorization: true, Permissions: append([]auth.PermissionCode{}, permissions...),
+		})
+		if err != nil {
+			failLoginStatus(ls, resolverError(err))
+			return
+		}
+		if resolved == nil {
+			failLoginStatus(ls, auth.ErrAuthBackendUnavailable)
+			return
+		}
+		principal := &resolved.Principal
+		if err := validateSessionPrincipal(principal, host, normalized.clock()); err != nil {
+			failLoginStatus(ls, err)
+			return
+		}
+		if !auth.ValidAuthorizationContextResponse(auth.AuthorizationContextResolveRequest{
+			Service: binding.Service, CompanyID: principal.Claims.CompanyID, UIN: principal.Claims.UIN,
+			MembershipEpoch: principal.Claims.MembershipEpoch, Permissions: permissions,
+		}, resolved.Authorization) {
+			failLoginStatus(ls, auth.ErrAuthBackendUnavailable)
+			return
+		}
+		ctx.Set(constants.CtxKeyAuthorizationContext, &resolved.Authorization)
+		ctx.Set(constants.CtxKeyLoginStatus, auth.NewBrowserSessionLoginStatus(*principal))
+	}
 }
 
 func browserSessionMiddleware(normalized normalizedBrowserSessionOptions) gin.HandlerFunc {
@@ -118,11 +182,21 @@ func browserSessionMiddleware(normalized normalizedBrowserSessionOptions) gin.Ha
 			return
 		}
 
-		principal, err := normalized.resolver.Resolve(ctx.Request.Context(), auth.SessionResolveRequest{
-			Host:      host,
-			Service:   binding.Service,
-			SessionID: cookies[0].Value,
-		})
+		var principal *auth.SessionPrincipal
+		var err error
+		if normalized.authorizedResolver != nil {
+			var resolved *auth.AuthorizedSession
+			resolved, err = normalized.authorizedResolver.ResolveAuthorized(ctx.Request.Context(), auth.AuthorizedSessionResolveRequest{
+				Host: host, Service: binding.Service, SessionID: cookies[0].Value, Permissions: []auth.PermissionCode{},
+			})
+			if resolved != nil {
+				principal = &resolved.Principal
+			}
+		} else {
+			principal, err = normalized.resolver.Resolve(ctx.Request.Context(), auth.SessionResolveRequest{
+				Host: host, Service: binding.Service, SessionID: cookies[0].Value,
+			})
+		}
 		if err != nil {
 			failLoginStatus(ls, resolverError(err))
 			return
@@ -180,11 +254,12 @@ func normalizeBrowserSessionOptions(options BrowserSessionOptions) (normalizedBr
 	}
 
 	return normalizedBrowserSessionOptions{
-		bindings:      bindings,
-		resolver:      options.Resolver,
-		clock:         clock,
-		csrfHeader:    csrfHeader,
-		unsafeMethods: unsafeMethods,
+		bindings:           bindings,
+		resolver:           options.Resolver,
+		authorizedResolver: options.AuthorizedResolver,
+		clock:              clock,
+		csrfHeader:         csrfHeader,
+		unsafeMethods:      unsafeMethods,
 	}, nil
 }
 

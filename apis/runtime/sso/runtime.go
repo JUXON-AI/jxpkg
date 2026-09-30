@@ -180,8 +180,9 @@ func LoadEnv(getenv func(string) string, prefix string, optionList ...RuntimeOpt
 		})
 	}
 	session := middleware.BrowserSessionOptions{
-		Bindings: bindings,
-		Resolver: resolver,
+		Bindings:           bindings,
+		Resolver:           resolver,
+		AuthorizedResolver: resolver,
 	}
 	browserSession, err := server.NewBrowserSessionOption(session)
 	if err != nil {

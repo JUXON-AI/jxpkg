@@ -203,6 +203,7 @@ corsMiddleware, err := middleware.NewCORS(middleware.CORSOptions{
 
 - `Post`、`G`：匿名路由，不解析认证凭据。
 - `PRequireBrowserSession`：只接受配置的 Browser Session，并固定执行 Session、主体发布、认证要求和 CSRF。
+- `PRequireAuthorizedBrowserSession`：通过一次 Account 请求取得已验证会话和所需组织权限，再执行相同的主体发布与 CSRF 校验。
 - `PRequireBearer`：只接受 Bearer，并拒绝浏览器 Session Cookie。
 - `PRequireLogin`：兼容旧代码的 Bearer 别名；新代码不应使用。
 

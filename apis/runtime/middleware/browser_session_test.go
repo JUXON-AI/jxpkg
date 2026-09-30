@@ -28,6 +28,53 @@ type fakeSessionResolver struct {
 	calls int
 }
 
+type fakeAuthorizedSessionResolver struct {
+	request auth.AuthorizedSessionResolveRequest
+	result  *auth.AuthorizedSession
+	calls   int
+}
+
+func (resolver *fakeAuthorizedSessionResolver) ResolveAuthorized(_ context.Context, request auth.AuthorizedSessionResolveRequest) (*auth.AuthorizedSession, error) {
+	resolver.request = request
+	resolver.calls++
+	return resolver.result, nil
+}
+
+func TestAuthorizedBrowserSessionPublishesOneVerifiedContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Unix(2_000_000, 0)
+	hash := sha256.Sum256([]byte("csrf-token"))
+	legacy := &fakeSessionResolver{}
+	combined := &fakeAuthorizedSessionResolver{result: &auth.AuthorizedSession{
+		Principal: auth.SessionPrincipal{
+			Claims: auth.UserClaims{UserID: 1, UIN: 2, CompanyID: 3, MembershipEpoch: 4},
+			Host:   "app.example.com", ClientID: "browser", SessionVersion: 1,
+			AuthenticatedAt: now.Add(-time.Hour).Unix(), IdleExpiresAt: now.Add(time.Hour).Unix(),
+			AbsoluteExpiresAt: now.Add(2 * time.Hour).Unix(), CSRFTokenHash: hash[:],
+		},
+		Authorization: auth.AuthorizationContextResolveResponse{
+			CompanyID: 3, UIN: 2, MembershipEpoch: 4, AllowedPermissions: []auth.PermissionCode{"agent.create"},
+		},
+	}}
+	handlers, err := NewBrowserSessionHandlers(BrowserSessionOptions{
+		Bindings: []BrowserSessionBinding{{Host: "app.example.com", Service: "jxagent", CookieName: "__Host-session"}},
+		Resolver: legacy, AuthorizedResolver: combined, Clock: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "https://app.example.com/resource", nil)
+	ctx.Request.AddCookie(&http.Cookie{Name: "__Host-session", Value: "opaque-sid"})
+	handlers.AuthorizedSession([]auth.PermissionCode{"agent.create"})(ctx)
+	statusValue, _ := ctx.Get(constants.CtxKeyLoginStatus)
+	contextValue, found := ctx.Get(constants.CtxKeyAuthorizationContext)
+	if statusValue.(*auth.LoginStatus).State != auth.StateSucc || !found || !contextValue.(*auth.AuthorizationContextResolveResponse).Allows("agent.create") || combined.calls != 1 || legacy.calls != 0 ||
+		combined.request.Host != "app.example.com" || combined.request.Service != "jxagent" || !combined.request.IncludeAuthorization || len(combined.request.Permissions) != 1 {
+		t.Fatalf("status = %#v, context = %#v, combined = %#v, legacy calls = %d", statusValue, contextValue, combined, legacy.calls)
+	}
+}
+
 func newTestBrowserSessionMiddleware(options BrowserSessionOptions) (gin.HandlerFunc, error) {
 	handlers, err := NewBrowserSessionHandlers(options)
 	return handlers.Session, err

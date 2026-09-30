@@ -48,6 +48,7 @@ type InternalSessionResolverClient struct {
 	companySearchEndpoint         string
 	companyResolveEndpoint        string
 	authorizationEndpoint         string
+	authorizedSessionEndpoint     string
 	authorizationSubjectsEndpoint string
 	service                       string
 	client                        *http.Client
@@ -112,6 +113,7 @@ func NewInternalSessionResolverClient(options SessionResolverClientOptions) (*In
 		companySearchEndpoint:         strings.TrimSuffix(endpoint, InternalSessionResolvePath) + InternalCompanySearchPath,
 		companyResolveEndpoint:        strings.TrimSuffix(endpoint, InternalSessionResolvePath) + InternalCompanyResolvePath,
 		authorizationEndpoint:         strings.TrimSuffix(endpoint, InternalSessionResolvePath) + InternalAuthorizationContextResolvePath,
+		authorizedSessionEndpoint:     strings.TrimSuffix(endpoint, InternalSessionResolvePath) + InternalAuthorizedSessionResolvePath,
 		authorizationSubjectsEndpoint: strings.TrimSuffix(endpoint, InternalSessionResolvePath) + InternalAuthorizationSubjectsResolvePath,
 		service:                       options.Service,
 		client: &http.Client{
