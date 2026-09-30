@@ -199,11 +199,27 @@ func SaveTask(tsk *Task) error {
 	return nil
 }
 
+// claimCallback atomically reserves one running claim before application side effects.
+// A duplicate or stale worker callback must not enter the registered callback.
+func claimCallback(ctx context.Context, db *gorm.DB, tsk *Task) (bool, error) {
+	if tsk == nil || tsk.StartAt == nil {
+		return false, errors.New("task callback has no claim timestamp")
+	}
+	result := db.WithContext(ctx).Model(&Task{}).
+		Where("id = ? AND worker_id = ? AND start_at = ? AND task_status = ?", tsk.ID, tsk.WorkerID, tsk.StartAt, TaskStatusRunning).
+		Update("task_status", TaskStatusCompleting)
+	return result.RowsAffected == 1, result.Error
+}
+
 // finishClaim only persists an outcome while the same claim still owns the row.
 // Payload and scheduling identity are immutable here; rewriting them resends
 // megabytes and can overwrite a concurrent cancellation. start_at fences a
 // claim reclaimed between the callback lookup and its conditional update.
 func finishClaim(ctx context.Context, db *gorm.DB, tsk *Task) (bool, error) {
+	return finishClaimFromStatus(ctx, db, tsk, TaskStatusRunning)
+}
+
+func finishClaimFromStatus(ctx context.Context, db *gorm.DB, tsk *Task, expected TaskStatus) (bool, error) {
 	if tsk.StartAt == nil || tsk.EndAt == nil {
 		return false, errors.New("task outcome has no claim timestamps")
 	}
@@ -214,7 +230,7 @@ func finishClaim(ctx context.Context, db *gorm.DB, tsk *Task) (bool, error) {
 		tsk.Redo++
 	}
 	result := db.WithContext(ctx).Model(&Task{}).
-		Where("id = ? AND worker_id = ? AND start_at = ? AND task_status = ?", tsk.ID, tsk.WorkerID, tsk.StartAt, TaskStatusRunning).
+		Where("id = ? AND worker_id = ? AND start_at = ? AND task_status = ?", tsk.ID, tsk.WorkerID, tsk.StartAt, expected).
 		Updates(map[string]interface{}{
 			"task_status": tsk.TaskStatus, "result": tsk.Result, "err_msg": tsk.ErrMsg,
 			"end_at": tsk.EndAt, "cost": tsk.Cost, "redo": tsk.Redo, "priority": tsk.Priority,
@@ -272,6 +288,19 @@ func CheckAndTimeoutTasks() {
 			return
 		}
 		logs.InfoContextf(ctx, "Marked %d tasks as 'timeout' at %s", len(timeoutIDs), now)
+	}
+	// An interrupted application callback cannot be replayed safely: its
+	// external side effects may already have committed. Mark an abandoned
+	// reservation terminal after a generous deadline for manual reconciliation.
+	if err := dbtools.Core().WithContext(ctx).Model(&Task{}).
+		Where("task_status = ? AND updated_at < ?", TaskStatusCompleting, now.Add(-time.Hour)).
+		Updates(map[string]interface{}{
+			"task_status": TaskStatusFail,
+			"err_msg":     "task_callback_outcome_unknown",
+			"redo":        gorm.Expr("task_config_redo + 1"),
+			"end_at":      now,
+		}).Error; err != nil {
+		logs.ErrorContextf(ctx, "Failed to expire abandoned task callbacks: %v", err)
 	}
 }
 

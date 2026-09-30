@@ -203,6 +203,7 @@ corsMiddleware, err := middleware.NewCORS(middleware.CORSOptions{
 
 - `Post`、`G`：匿名路由，不解析认证凭据。
 - `PRequireBrowserSession`：只接受配置的 Browser Session，并固定执行 Session、主体发布、认证要求和 CSRF。
+- `PRequireAuthorizedBrowserSession`：通过一次 Account 请求取得已验证会话和所需组织权限，再执行相同的主体发布与 CSRF 校验。
 - `PRequireBearer`：只接受 Bearer，并拒绝浏览器 Session Cookie。
 - `PRequireLogin`：兼容旧代码的 Bearer 别名；新代码不应使用。
 
@@ -326,6 +327,8 @@ logs.Infow("request complete", "request_id", requestID)
 提供数据库任务记录、Redis Stream/队列、worker 健康检查和 callback 注册。典型流程是应用显式 `InitDB`、注册每种 task type 的 callback，再启动任务协调逻辑。
 
 历史 API 中保留了若干拼写兼容入口（例如 `ChackWockerHealth`）；新代码不要复制这些命名。任务 callback 必须幂等，并明确处理超时、重试和重复投递。
+
+服务端会在执行应用 callback 前，将当前 worker 的 `running` 领取原子改为 `completing`，同一领取的重复回调不会再次进入应用 callback。若服务在 callback 中途退出，结果可能无法确认；超过一小时的 `completing` 任务会标记为 `fail`、耗尽自动重试，并记录 `task_callback_outcome_unknown`，需要按业务侧记录人工核对。这个状态不能用自动重试代替幂等处理。
 
 ### `verification`
 

@@ -49,6 +49,10 @@ func (provider *Provider) serveHTTP(writer http.ResponseWriter, request *http.Re
 	}
 	request.Body = http.MaxBytesReader(writer, request.Body, 8*1024)
 	defer request.Body.Close()
+	if request.URL.Path == auth.InternalAuthorizedSessionResolvePath {
+		provider.resolveAuthorizedSession(writer, request, caller)
+		return
+	}
 	if request.URL.Path == auth.InternalCompanyIdentityResolvePath {
 		provider.resolveIdentities(writer, request, caller)
 		return
@@ -73,7 +77,7 @@ func (provider *Provider) serveHTTP(writer http.ResponseWriter, request *http.Re
 }
 
 func internalResolverPath(path string) bool {
-	return path == auth.InternalSessionResolvePath || path == auth.InternalCompanyIdentityResolvePath || path == auth.InternalAuthorizationContextResolvePath || path == auth.InternalAuthorizationSubjectsResolvePath ||
+	return path == auth.InternalSessionResolvePath || path == auth.InternalAuthorizedSessionResolvePath || path == auth.InternalCompanyIdentityResolvePath || path == auth.InternalAuthorizationContextResolvePath || path == auth.InternalAuthorizationSubjectsResolvePath ||
 		path == auth.InternalCompanySearchPath || path == auth.InternalCompanyResolvePath
 }
 
@@ -131,6 +135,68 @@ func (provider *Provider) resolveSession(writer http.ResponseWriter, request *ht
 	}
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(response)
+}
+
+func (provider *Provider) resolveAuthorizedSession(writer http.ResponseWriter, request *http.Request, caller providerCaller) {
+	input, err := auth.DecodeAuthorizedSessionResolveRequest(request.Body)
+	if err != nil || input.Service != caller.Service {
+		providerError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	allowed := false
+	for _, host := range caller.AllowedHosts {
+		if input.Host == host {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		providerError(writer, http.StatusUnauthorized, "invalid_session")
+		return
+	}
+	resolver, ok := provider.authority.(auth.AuthorizedSessionResolver)
+	if !ok {
+		providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
+		return
+	}
+	resolved, err := resolver.ResolveAuthorized(request.Context(), input)
+	if err != nil {
+		if errors.Is(err, auth.ErrInvalidCredential) || errors.Is(err, auth.ErrInvalidPrincipal) {
+			providerError(writer, http.StatusUnauthorized, "invalid_session")
+		} else if errors.Is(err, auth.ErrAuthorizationDenied) {
+			providerError(writer, http.StatusForbidden, "permission_denied")
+		} else {
+			providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
+		}
+		return
+	}
+	if resolved == nil || !validProviderSession(&resolved.Principal, input.Host) {
+		providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
+		return
+	}
+	if input.IncludeAuthorization && !auth.ValidAuthorizationContextResponse(auth.AuthorizationContextResolveRequest{
+		Service: input.Service, CompanyID: resolved.Principal.Claims.CompanyID, UIN: resolved.Principal.Claims.UIN,
+		MembershipEpoch: resolved.Principal.Claims.MembershipEpoch, Permissions: input.Permissions,
+	}, resolved.Authorization) {
+		providerError(writer, http.StatusServiceUnavailable, "temporarily_unavailable")
+		return
+	}
+	principal := resolved.Principal
+	var authorization *auth.AuthorizationContextResolveResponse
+	if input.IncludeAuthorization {
+		authorization = &resolved.Authorization
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(auth.AuthorizedSessionResolveResponse{
+		Session: auth.SessionResolveResponse{
+			UserID: principal.Claims.UserID, UIN: principal.Claims.UIN, CompanyID: principal.Claims.CompanyID,
+			MembershipEpoch: principal.Claims.MembershipEpoch, Host: principal.Host, ClientID: principal.ClientID,
+			SessionVersion: principal.SessionVersion, AuthenticatedAt: principal.AuthenticatedAt,
+			IdleExpiresAt: principal.IdleExpiresAt, AbsoluteExpiresAt: principal.AbsoluteExpiresAt,
+			CSRFTokenHash: base64.RawURLEncoding.EncodeToString(principal.CSRFTokenHash),
+		},
+		Authorization: authorization,
+	})
 }
 
 func validProviderSession(principal *auth.SessionPrincipal, host string) bool {

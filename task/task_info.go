@@ -13,10 +13,12 @@ type TaskStatus string
 const (
 	TaskStatusPending TaskStatus = "pending"
 	TaskStatusRunning TaskStatus = "running"
-	TaskStatusSuccess TaskStatus = "success"
-	TaskStatusFail    TaskStatus = "fail"
-	TaskStatusCancel  TaskStatus = "cancel"
-	TaskStatusTimeout TaskStatus = "timeout"
+	// TaskStatusCompleting 表示任务回调已被一个请求抢占，业务回调正在执行。
+	TaskStatusCompleting TaskStatus = "completing"
+	TaskStatusSuccess    TaskStatus = "success"
+	TaskStatusFail       TaskStatus = "fail"
+	TaskStatusCancel     TaskStatus = "cancel"
+	TaskStatusTimeout    TaskStatus = "timeout"
 )
 
 const TableNameCoreTask = "core_task"

@@ -91,6 +91,16 @@ func TaskCallBack(ctx *gin.Context, req *TaskCallBackRequest, resp *TaskCallBack
 	if tsk.TaskStatus != TaskStatusRunning {
 		return
 	}
+	claimed, err := claimCallback(ctx.Request.Context(), dbtools.Core(), tsk)
+	if err != nil {
+		logs.ErrorContextw(ctx.Request.Context(), "task.TaskCallBack claim failed", "task_id", tsk.ID)
+		resp.Code = errcode.ErrCode_InternalError
+		resp.Message = "task_claim_callback_failed"
+		return
+	}
+	if !claimed {
+		return
+	}
 	tsk.TaskStatus = req.Request.Status
 	tsk.Result = req.Request.Result
 	tsk.ErrMsg = req.Request.ErrorMessage
@@ -109,7 +119,7 @@ func TaskCallBack(ctx *gin.Context, req *TaskCallBackRequest, resp *TaskCallBack
 		tsk.Priority -= 1
 	}
 	var saved bool
-	saved, err = finishClaim(ctx.Request.Context(), dbtools.Core(), tsk)
+	saved, err = finishClaimFromStatus(ctx.Request.Context(), dbtools.Core(), tsk, TaskStatusCompleting)
 	if err != nil {
 		logs.ErrorContextw(ctx.Request.Context(), "task.TaskCallBack save failed", "task_id", tsk.ID)
 		resp.Code = errcode.ErrCode_InternalError

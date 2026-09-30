@@ -78,7 +78,8 @@ type Router struct {
 	corsMiddleware gin.HandlerFunc
 
 	// browserSessionMiddleware 保存浏览器会话解析中间件。
-	browserSessionMiddleware gin.HandlerFunc
+	browserSessionMiddleware           gin.HandlerFunc
+	browserAuthorizedSessionMiddleware func([]auth.PermissionCode) gin.HandlerFunc
 
 	// browserCSRFMiddleware 保存浏览器会话 CSRF 中间件。
 	browserCSRFMiddleware gin.HandlerFunc
@@ -149,6 +150,7 @@ func NewBrowserSessionOption(options middleware.BrowserSessionOptions) (RouterOp
 		}
 		svr.browserBearerMiddleware = handlers.Bearer
 		svr.browserSessionMiddleware = handlers.Session
+		svr.browserAuthorizedSessionMiddleware = handlers.AuthorizedSession
 		svr.browserCSRFMiddleware = handlers.CSRF
 		svr.browserSessionErr = nil
 	}, nil
@@ -298,6 +300,17 @@ func (svr *Router) PRequireBrowserSession(action string, handlers ...interface{}
 		middleware.RequireAuthenticated,
 		validateCSRF,
 	}
+	svr.Post(action, append(chain, handlers...)...)
+}
+
+// PRequireAuthorizedBrowserSession 通过一次 Account 解析完成浏览器认证和组织授权。
+func (svr *Router) PRequireAuthorizedBrowserSession(action string, permissions []auth.PermissionCode, handlers ...interface{}) {
+	_, validateCSRF := svr.browserSessionHandlers()
+	resolve := unavailableLoginStatus(auth.AuthModeBrowserSession, auth.ErrAuthBackendUnavailable)
+	if svr.browserSessionErr == nil && svr.browserAuthorizedSessionMiddleware != nil {
+		resolve = svr.browserAuthorizedSessionMiddleware(permissions)
+	}
+	chain := []interface{}{resolve, svr.publishBrowserPrincipal, middleware.RequireAuthenticated, validateCSRF}
 	svr.Post(action, append(chain, handlers...)...)
 }
 
