@@ -86,7 +86,7 @@ func claimPendingTask(ctx context.Context, db *gorm.DB, taskType, workerID strin
 		query := db.WithContext(ctx).Model(&Task{}).Select("core_task.id").
 			Where("task_type = ?", taskType).
 			Where("task_status IN ?", []TaskStatus{TaskStatusPending, TaskStatusFail}).
-			Where("redo <= task_config_redo").Joins(readyTaskJoin)
+			Where("redo >= 0 AND redo < 2147483647 AND redo <= task_config_redo").Joins(readyTaskJoin)
 		if len(attempted) > 0 {
 			query = query.Where("core_task.id NOT IN ?", attempted)
 		}
@@ -118,7 +118,7 @@ func claimCandidate(ctx context.Context, db *gorm.DB, id uint, taskType, workerI
 	var tsk Task
 	err := tx.Omit("result").Where("id = ? AND task_type = ?", id, taskType).
 		Where("task_status IN ?", []TaskStatus{TaskStatusPending, TaskStatusFail}).
-		Where("redo <= task_config_redo").
+		Where("redo >= 0 AND redo < 2147483647 AND redo <= task_config_redo").
 		Clauses(clause.Locking{Strength: "UPDATE", Options: clause.LockingOptionsSkipLocked}).First(&tsk).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
@@ -201,12 +201,15 @@ func SaveTask(tsk *Task) error {
 
 // claimCallback atomically reserves one running claim before application side effects.
 // A duplicate or stale worker callback must not enter the registered callback.
-func claimCallback(ctx context.Context, db *gorm.DB, tsk *Task) (bool, error) {
+func claimCallback(ctx context.Context, db *gorm.DB, tsk *Task, attempt int64) (bool, error) {
 	if tsk == nil || tsk.StartAt == nil {
 		return false, errors.New("task callback has no claim timestamp")
 	}
+	if attempt <= 0 || tsk.Redo < 0 || attempt != int64(tsk.Redo)+1 {
+		return false, nil
+	}
 	result := db.WithContext(ctx).Model(&Task{}).
-		Where("id = ? AND worker_id = ? AND start_at = ? AND task_status = ?", tsk.ID, tsk.WorkerID, tsk.StartAt, TaskStatusRunning).
+		Where("id = ? AND worker_id = ? AND start_at = ? AND redo = ? AND task_status = ?", tsk.ID, tsk.WorkerID, tsk.StartAt, tsk.Redo, TaskStatusRunning).
 		Update("task_status", TaskStatusCompleting)
 	return result.RowsAffected == 1, result.Error
 }
@@ -226,11 +229,12 @@ func finishClaimFromStatus(ctx context.Context, db *gorm.DB, tsk *Task, expected
 	if tsk.StartAt.Before(*tsk.EndAt) {
 		tsk.Cost = int64(tsk.EndAt.Sub(*tsk.StartAt).Seconds())
 	}
+	claimRedo := tsk.Redo
 	if tsk.TaskStatus == TaskStatusFail {
 		tsk.Redo++
 	}
 	result := db.WithContext(ctx).Model(&Task{}).
-		Where("id = ? AND worker_id = ? AND start_at = ? AND task_status = ?", tsk.ID, tsk.WorkerID, tsk.StartAt, expected).
+		Where("id = ? AND worker_id = ? AND start_at = ? AND redo = ? AND task_status = ?", tsk.ID, tsk.WorkerID, tsk.StartAt, claimRedo, expected).
 		Updates(map[string]interface{}{
 			"task_status": tsk.TaskStatus, "result": tsk.Result, "err_msg": tsk.ErrMsg,
 			"end_at": tsk.EndAt, "cost": tsk.Cost, "redo": tsk.Redo, "priority": tsk.Priority,
@@ -253,41 +257,22 @@ func CancelTask(tsk *Task) error {
 func CheckAndTimeoutTasks() {
 	now := time.Now()
 	ctx := context.TODO()
-	var timeoutIDs []uint
-	db := dbtools.Core().Session(&gorm.Session{Logger: customLogger})
-	// jia锁查询
+	db := dbtools.Core().WithContext(ctx).Session(&gorm.Session{Logger: customLogger})
 	var tasks []*Task
-	err := db.
-		Where("task_status = ?", TaskStatusRunning).
-		Find(&tasks).Error
-	if err != nil {
+	if err := db.Where("task_status = ?", TaskStatusRunning).Find(&tasks).Error; err != nil {
 		logs.ErrorContextf(ctx, "Failed to query tasks: %v", err)
 		return
 	}
-	for _, task := range tasks {
-		timeoutTime := task.StartAt.Add(task.TaskConfigTimeout)
-		if now.After(timeoutTime) {
-			timeoutIDs = append(timeoutIDs, task.ID)
+	for _, tsk := range tasks {
+		if tsk.StartAt == nil || !now.After(tsk.StartAt.Add(tsk.TaskConfigTimeout)) {
+			continue
 		}
-	}
-	if len(timeoutIDs) > 0 {
-		// 在事务中批量更新状态为 timeout
-		err = dbtools.Core().Model(&Task{}).
-			Where("id IN ?", timeoutIDs).
-			Where("task_status = ?", TaskStatusRunning).
-			Updates(
-				map[string]interface{}{
-					"task_status": TaskStatusFail,
-					"err_msg":     TaskStatusTimeout,
-					"redo":        gorm.Expr("redo + 1"),
-				},
-			).Error
-
-		if err != nil {
-			logs.ErrorContextf(ctx, "Failed to update timeout tasks: %v", err)
-			return
+		// Expire only the attempt observed by this scan, even if the same worker
+		// reclaimed the row before this conditional update.
+		tsk.TaskStatus, tsk.ErrMsg, tsk.EndAt = TaskStatusFail, string(TaskStatusTimeout), &now
+		if _, err := finishClaim(ctx, db, tsk); err != nil {
+			logs.ErrorContextw(ctx, "task timeout update failed", "task_id", tsk.ID)
 		}
-		logs.InfoContextf(ctx, "Marked %d tasks as 'timeout' at %s", len(timeoutIDs), now)
 	}
 	// An interrupted application callback cannot be replayed safely: its
 	// external side effects may already have committed. Mark an abandoned
@@ -417,7 +402,7 @@ func nextStepTasks(ctx context.Context, db *gorm.DB, tsk *Task) ([]*Task, error)
 	err := db.WithContext(ctx).Model(&Task{}).Select("id", "task_type", "step").
 		Where("subject_id = ? AND app_group = ? AND step > ?", tsk.SubjectID, tsk.AppGroup, tsk.Step).
 		Where("task_status IN ?", []TaskStatus{TaskStatusPending, TaskStatusFail}).
-		Where("redo <= task_config_redo").
+		Where("redo >= 0 AND redo < 2147483647 AND redo <= task_config_redo").
 		Where("NOT EXISTS (SELECT 1 FROM core_task t2 WHERE t2.subject_id = core_task.subject_id AND t2.app_group = core_task.app_group AND t2.step < core_task.step AND t2.deleted_at IS NULL AND t2.task_status NOT IN (?, ?))", TaskStatusCancel, TaskStatusSuccess).
 		Order("step ASC, id ASC").Find(&tasks).Error
 	if err != nil {
@@ -432,7 +417,7 @@ func GetPendingTaskCount(ctx context.Context, task_type string) (int64, error) {
 	err := dbtools.Core().WithContext(ctx).Model(&Task{}).
 		Where("task_type = ?", task_type).
 		Where("task_status IN (?)", []TaskStatus{TaskStatusPending, TaskStatusFail}).
-		Where("redo <= task_config_redo").
+		Where("redo >= 0 AND redo < 2147483647 AND redo <= task_config_redo").
 		Joins(readyTaskJoin).
 		Count(&count).Error
 	if err != nil {

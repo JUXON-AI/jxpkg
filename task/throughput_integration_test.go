@@ -186,7 +186,7 @@ func TestThroughputDuplicateCallbackOnlyClaimsOnce(t *testing.T) {
 	claims := 0
 	for range 16 {
 		wg.Go(func() {
-			claimed, err := claimCallback(context.Background(), db, x)
+			claimed, err := claimCallback(context.Background(), db, x, int64(x.Redo)+1)
 			if err != nil {
 				t.Error(err)
 				return
@@ -220,7 +220,7 @@ func TestThroughputStaleCallbackCannotClaimReassignedTask(t *testing.T) {
 	if err := db.Model(&Task{}).Where("id = ?", x.ID).Update("start_at", newStart).Error; err != nil {
 		t.Fatal(err)
 	}
-	if claimed, err := claimCallback(context.Background(), db, x); err != nil || claimed {
+	if claimed, err := claimCallback(context.Background(), db, x, int64(x.Redo)+1); err != nil || claimed {
 		t.Fatalf("stale callback claimed reassigned task: claimed=%v err=%v", claimed, err)
 	}
 }
@@ -259,5 +259,27 @@ func TestThroughputClaimSkipsLockedLeadingCandidateBatch(t *testing.T) {
 	got, err := claimPendingTask(ctx, db, group, "next-worker")
 	if err != nil || got == nil || got.ID != next.ID {
 		t.Fatalf("locked leading candidates hid eligible work: %v %v", got, err)
+	}
+}
+
+func TestThroughputSameWorkerOldAttemptCannotClaimRetry(t *testing.T) {
+	db := throughputDB(t)
+	x := taskFixture(t, db, 0, TaskStatusRunning, fmt.Sprintf("attempt%d", time.Now().UnixNano()), 21)
+	// Retrying in the same datetime second is intentional: start_at cannot fence this.
+	oldAttempt := int64(x.Redo) + 1
+	now := time.Now()
+	x.TaskStatus, x.EndAt = TaskStatusFail, &now
+	if saved, err := finishClaim(context.Background(), db, x); err != nil || !saved {
+		t.Fatalf("expire: %v %v", saved, err)
+	}
+	retry, err := claimCandidate(context.Background(), db, x.ID, x.TaskType, x.WorkerID)
+	if err != nil || retry == nil || int64(retry.Redo)+1 == oldAttempt {
+		t.Fatalf("reclaim did not change attempt: %v %v", retry, err)
+	}
+	if claimed, err := claimCallback(context.Background(), db, retry, oldAttempt); err != nil || claimed {
+		t.Fatalf("old callback with current snapshot claimed retry: %v %v", claimed, err)
+	}
+	if claimed, err := claimCallback(context.Background(), db, retry, int64(retry.Redo)+1); err != nil || !claimed {
+		t.Fatalf("current callback refused: %v %v", claimed, err)
 	}
 }

@@ -328,6 +328,8 @@ logs.Infow("request complete", "request_id", requestID)
 
 历史 API 中保留了若干拼写兼容入口（例如 `ChackWockerHealth`）；新代码不要复制这些命名。任务 callback 必须幂等，并明确处理超时、重试和重复投递。
 
+领取响应的 `attempt` 是本次执行的正数序号（`Redo + 1`）。Worker 必须在 callback 中原样回传，且只能回传 `success`/`fail`；缺少序号的旧请求被拒绝，不保留旧协议回退。同一 Worker 重领后的旧序号不会进入业务 callback，抢占与结果写入都核验领取时的 Redo。此协议要求 API 和 Worker 同时更新，无数据库结构迁移。
+
 服务端会在执行应用 callback 前，将当前 worker 的 `running` 领取原子改为 `completing`，同一领取的重复回调不会再次进入应用 callback。若服务在 callback 中途退出，结果可能无法确认；超过一小时的 `completing` 任务会标记为 `fail`、耗尽自动重试，并记录 `task_callback_outcome_unknown`，需要按业务侧记录人工核对。这个状态不能用自动重试代替幂等处理。
 
 ### `verification`

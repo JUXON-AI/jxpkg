@@ -70,6 +70,7 @@ func GetPendingTask(ctx *gin.Context, req *GetPendingTestRequest, resp *GetPendi
 
 	SetRedis(req.Request.TaskType, req.Request.WorkerID, tsk.ID)
 	resp.Response.TaskID = tsk.ID
+	resp.Response.Attempt = int64(tsk.Redo) + 1
 	resp.Response.Payload = tsk.Payload
 }
 
@@ -91,7 +92,7 @@ func TaskCallBack(ctx *gin.Context, req *TaskCallBackRequest, resp *TaskCallBack
 	if tsk.TaskStatus != TaskStatusRunning {
 		return
 	}
-	claimed, err := claimCallback(ctx.Request.Context(), dbtools.Core(), tsk)
+	claimed, err := claimCallback(ctx.Request.Context(), dbtools.Core(), tsk, req.Request.Attempt)
 	if err != nil {
 		logs.ErrorContextw(ctx.Request.Context(), "task.TaskCallBack claim failed", "task_id", tsk.ID)
 		resp.Code = errcode.ErrCode_InternalError
