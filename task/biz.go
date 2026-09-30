@@ -26,7 +26,9 @@ func (req *GetPendingTestRequest) Validity(resp *GetPendingTestResponse) {
 type GetPendingTestResponse struct {
 	apiobj.BaseResponse
 	Response struct {
-		TaskID  uint   `json:"task_id"`
+		TaskID uint `json:"task_id"`
+		// Attempt 是本次领取的正数执行序号，回调时必须原样返回。
+		Attempt int64  `json:"attempt"`
 		Payload string `json:"payload"` // 任务内容
 	}
 }
@@ -35,7 +37,9 @@ type GetPendingTestResponse struct {
 type TaskCallBackRequest struct {
 	apiobj.BaseRequest
 	Request struct {
-		TaskID       uint       `json:"task_id"`
+		TaskID uint `json:"task_id"`
+		// Attempt 是领取响应返回的执行序号，不允许缺省或重用旧序号。
+		Attempt      int64      `json:"attempt"`
 		WorkerID     string     `json:"worker_id"`
 		Status       TaskStatus `json:"status"`
 		ErrorMessage string     `json:"error_message"`
@@ -44,7 +48,7 @@ type TaskCallBackRequest struct {
 }
 
 func (req *TaskCallBackRequest) Validity(resp *TaskCallBackResponse) {
-	if req.Request.TaskID == 0 || req.Request.WorkerID == "" || req.Request.Status == "" {
+	if req.Request.TaskID == 0 || req.Request.WorkerID == "" || req.Request.Attempt <= 0 || (req.Request.Status != TaskStatusSuccess && req.Request.Status != TaskStatusFail) {
 		resp.Code = errcode.ErrCode_BadRequest
 		resp.Message = "参数错误"
 	}
