@@ -328,6 +328,8 @@ logs.Infow("request complete", "request_id", requestID)
 
 历史 API 中保留了若干拼写兼容入口（例如 `ChackWockerHealth`）；新代码不要复制这些命名。任务 callback 必须幂等，并明确处理超时、重试和重复投递。
 
+服务端会在执行应用 callback 前，将当前 worker 的 `running` 领取原子改为 `completing`，同一领取的重复回调不会再次进入应用 callback。若服务在 callback 中途退出，结果可能无法确认；超过一小时的 `completing` 任务会标记为 `fail`、耗尽自动重试，并记录 `task_callback_outcome_unknown`，需要按业务侧记录人工核对。这个状态不能用自动重试代替幂等处理。
+
 ### `verification`
 
 一次性验证码的通用领域服务。`Store` 管理验证码状态，`Deliverer` 负责邮件等通道，`Policy` 定义长度、有效期、发送冷却和尝试次数；`RedisStore` 是共享环境实现。

@@ -178,6 +178,53 @@ func TestThroughputTerminalAndReclaimedTasksCannotBeOverwritten(t *testing.T) {
 	}
 }
 
+func TestThroughputDuplicateCallbackOnlyClaimsOnce(t *testing.T) {
+	db := throughputDB(t)
+	x := taskFixture(t, db, 0, TaskStatusRunning, fmt.Sprintf("callback%d", time.Now().UnixNano()), 12)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	claims := 0
+	for range 16 {
+		wg.Go(func() {
+			claimed, err := claimCallback(context.Background(), db, x)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if claimed {
+				mu.Lock()
+				claims++
+				mu.Unlock()
+			}
+		})
+	}
+	wg.Wait()
+	if claims != 1 {
+		t.Fatalf("callback claims=%d want 1", claims)
+	}
+	x.TaskStatus = TaskStatusSuccess
+	now := time.Now()
+	x.EndAt = &now
+	if saved, err := finishClaimFromStatus(context.Background(), db, x, TaskStatusCompleting); err != nil || !saved {
+		t.Fatalf("claimed callback did not finish: saved=%v err=%v", saved, err)
+	}
+	if saved, err := finishClaimFromStatus(context.Background(), db, x, TaskStatusCompleting); err != nil || saved {
+		t.Fatalf("duplicate callback overwrote completed task: saved=%v err=%v", saved, err)
+	}
+}
+
+func TestThroughputStaleCallbackCannotClaimReassignedTask(t *testing.T) {
+	db := throughputDB(t)
+	x := taskFixture(t, db, 0, TaskStatusRunning, fmt.Sprintf("stale-callback%d", time.Now().UnixNano()), 13)
+	newStart := x.StartAt.Add(time.Second)
+	if err := db.Model(&Task{}).Where("id = ?", x.ID).Update("start_at", newStart).Error; err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := claimCallback(context.Background(), db, x); err != nil || claimed {
+		t.Fatalf("stale callback claimed reassigned task: claimed=%v err=%v", claimed, err)
+	}
+}
+
 func TestThroughputCandidateRechecksDependencyAfterSelection(t *testing.T) {
 	db := throughputDB(t)
 	group := fmt.Sprintf("stale%d", time.Now().UnixNano())
