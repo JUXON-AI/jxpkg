@@ -86,7 +86,8 @@ func claimPendingTask(ctx context.Context, db *gorm.DB, taskType, workerID strin
 		query := db.WithContext(ctx).Model(&Task{}).Select("core_task.id").
 			Where("task_type = ?", taskType).
 			Where("task_status IN ?", []TaskStatus{TaskStatusPending, TaskStatusFail}).
-			Where("redo <= task_config_redo").Joins(readyTaskJoin)
+			Where("redo <= task_config_redo")
+		query = eligibleDependencyQuery(query, taskType)
 		if len(attempted) > 0 {
 			query = query.Where("core_task.id NOT IN ?", attempted)
 		}
@@ -128,14 +129,18 @@ func claimCandidate(ctx context.Context, db *gorm.DB, id uint, taskType, workerI
 	}
 	// This is the short transaction's first consistent read. Recheck dependencies
 	// after locking: the unlocked candidate list may already be stale.
-	var blocker struct{ ID uint }
-	dependency := tx.Model(&Task{}).Select("id").
-		Where("subject_id = ? AND app_group = ? AND step < ?", tsk.SubjectID, tsk.AppGroup, tsk.Step).
-		Where("task_status NOT IN ?", []TaskStatus{TaskStatusCancel, TaskStatusSuccess}).Limit(1).Find(&blocker)
-	if dependency.Error != nil {
-		return nil, dependency.Error
-	}
-	if dependency.RowsAffected != 0 {
+	if !independentTaskType(taskType) {
+		var blocker struct{ ID uint }
+		dependency := tx.Model(&Task{}).Select("id").
+			Where("subject_id = ? AND app_group = ? AND step < ?", tsk.SubjectID, tsk.AppGroup, tsk.Step).
+			Where("task_status NOT IN ?", []TaskStatus{TaskStatusCancel, TaskStatusSuccess}).Limit(1).Find(&blocker)
+		if dependency.Error != nil {
+			return nil, dependency.Error
+		}
+		if dependency.RowsAffected != 0 {
+			return nil, nil
+		}
+	} else if tsk.Step != 0 {
 		return nil, nil
 	}
 	now := time.Now()
@@ -303,6 +308,9 @@ func validateNewTask(tsk *Task) error {
 	if tsk.TaskType == "" {
 		return errors.New("task_type cannot be empty")
 	}
+	if independentTaskType(tsk.TaskType) && tsk.Step != 0 {
+		return errors.New("independent tasks must use step zero")
+	}
 	if tsk.Payload == "" {
 		return errors.New("payload cannot be empty")
 	}
@@ -384,6 +392,9 @@ func GetNextStepTask(tsk *Task) ([]*Task, error) {
 }
 
 func nextStepTasks(ctx context.Context, db *gorm.DB, tsk *Task) ([]*Task, error) {
+	if independentTaskType(tsk.TaskType) && tsk.Step == 0 {
+		return nil, nil
+	}
 	var tasks []*Task
 	err := db.WithContext(ctx).Model(&Task{}).Select("id", "task_type", "step").
 		Where("subject_id = ? AND app_group = ? AND step > ?", tsk.SubjectID, tsk.AppGroup, tsk.Step).
@@ -400,14 +411,21 @@ func nextStepTasks(ctx context.Context, db *gorm.DB, tsk *Task) ([]*Task, error)
 // GetPendingTaskCount 获取待处理任务数量
 func GetPendingTaskCount(ctx context.Context, task_type string) (int64, error) {
 	var count int64
-	err := dbtools.Core().WithContext(ctx).Model(&Task{}).
+	query := dbtools.Core().WithContext(ctx).Model(&Task{}).
 		Where("task_type = ?", task_type).
 		Where("task_status IN (?)", []TaskStatus{TaskStatusPending, TaskStatusFail}).
 		Where("redo <= task_config_redo").
-		Joins(readyTaskJoin).
-		Count(&count).Error
+		Scopes(func(db *gorm.DB) *gorm.DB { return eligibleDependencyQuery(db, task_type) })
+	err := query.Count(&count).Error
 	if err != nil {
 		return 0, err
 	}
 	return count, nil
+}
+
+func eligibleDependencyQuery(query *gorm.DB, taskType string) *gorm.DB {
+	if independentTaskType(taskType) {
+		return query.Where("step = 0")
+	}
+	return query.Joins(readyTaskJoin)
 }

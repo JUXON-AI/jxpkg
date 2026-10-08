@@ -36,7 +36,7 @@ func throughputDB(t *testing.T) *gorm.DB {
 
 func taskFixture(t *testing.T, db *gorm.DB, step int, status TaskStatus, group string, subject uint) *Task {
 	t.Helper()
-	now := time.Now().UTC().Truncate(time.Millisecond)
+	now := time.Now().UTC().Truncate(time.Second)
 	x := &Task{AppGroup: group, SubjectID: subject, TaskType: group, Step: step, TaskStatus: status, WorkerID: "test-worker", StartAt: &now, Payload: "fixture", TaskConfigRedo: 1, TaskConfigTimeout: time.Minute}
 	if err := db.Create(x).Error; err != nil {
 		t.Fatal(err)
@@ -48,6 +48,7 @@ func TestThroughputIndependentTasksDoNotWakeTheirPeers(t *testing.T) {
 	db := throughputDB(t)
 	for _, size := range []int{300, 912} {
 		group := fmt.Sprintf("perf%d", time.Now().UnixNano())
+		RegisterIndependentTaskType(group)
 		tasks := make([]*Task, size)
 		for i := range tasks {
 			tasks[i] = &Task{AppGroup: group, SubjectID: 7, TaskType: group, Step: 0, TaskStatus: TaskStatusPending, Payload: "fixture"}
@@ -99,6 +100,7 @@ func TestThroughputNextStepHonorsDependenciesAndRetryBudget(t *testing.T) {
 func TestThroughputConcurrentClaimsAreUnique(t *testing.T) {
 	db := throughputDB(t)
 	group := fmt.Sprintf("claim%d", time.Now().UnixNano())
+	RegisterIndependentTaskType(group)
 	for range 32 {
 		taskFixture(t, db, 0, TaskStatusPending, group, 9)
 	}

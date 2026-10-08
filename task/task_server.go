@@ -75,6 +75,11 @@ func GetPendingTask(ctx *gin.Context, req *GetPendingTestRequest, resp *GetPendi
 
 // TaskCallBack 回调
 func TaskCallBack(ctx *gin.Context, req *TaskCallBackRequest, resp *TaskCallBackResponse) {
+	started := time.Now()
+	var lookupMS, applicationMS, finishMS int64
+	defer func() {
+		logs.InfoContextw(ctx.Request.Context(), "task.TaskCallBack phases", "task_id", req.Request.TaskID, "lookup_ms", lookupMS, "application_ms", applicationMS, "finish_ms", finishMS, "total_ms", time.Since(started).Milliseconds(), "code", resp.Code)
+	}()
 	if req.Validity(resp); resp.Code != 0 {
 		return
 	}
@@ -86,6 +91,7 @@ func TaskCallBack(ctx *gin.Context, req *TaskCallBackRequest, resp *TaskCallBack
 		resp.Message = "task_get_task_failed_or_timeout" // 获取任务失败,或任务以超时
 		return
 	}
+	lookupMS = time.Since(started).Milliseconds()
 	// Redelivery after a lost response is an acknowledgement, not a second
 	// application callback. A canceled or expired claim cannot be resurrected.
 	if tsk.TaskStatus != TaskStatusRunning {
@@ -96,6 +102,7 @@ func TaskCallBack(ctx *gin.Context, req *TaskCallBackRequest, resp *TaskCallBack
 	tsk.ErrMsg = req.Request.ErrorMessage
 	now := time.Now()
 	tsk.EndAt = &now
+	applicationStarted := time.Now()
 	tc, err := GetCallBack(tsk.TaskType)
 	if err == nil {
 		err := tc.CallBack(ctx, tsk)
@@ -105,11 +112,14 @@ func TaskCallBack(ctx *gin.Context, req *TaskCallBackRequest, resp *TaskCallBack
 			tsk.ErrMsg = "task_application_callback_failed"
 		}
 	}
+	applicationMS = time.Since(applicationStarted).Milliseconds()
 	if tsk.TaskStatus == TaskStatusFail {
 		tsk.Priority -= 1
 	}
 	var saved bool
+	finishStarted := time.Now()
 	saved, err = finishClaim(ctx.Request.Context(), dbtools.Core(), tsk)
+	finishMS = time.Since(finishStarted).Milliseconds()
 	if err != nil {
 		logs.ErrorContextw(ctx.Request.Context(), "task.TaskCallBack save failed", "task_id", tsk.ID)
 		resp.Code = errcode.ErrCode_InternalError
