@@ -85,7 +85,7 @@ func TaskCallBack(ctx *gin.Context, req *TaskCallBackRequest, resp *TaskCallBack
 		return
 	}
 	logs.InfoContextf(ctx, "task callback task_id: %v, status: %v", req.Request.TaskID, req.Request.Status)
-	tsk, err := GetTaskByIDAndWorkerID(req.Request.TaskID, req.Request.WorkerID)
+	tsk, err := getTaskByIDAndWorkerID(ctx.Request.Context(), req.Request.TaskID, req.Request.WorkerID)
 	if err != nil {
 		logs.ErrorContextw(ctx.Request.Context(), "task.TaskCallBack lookup failed", "task_id", req.Request.TaskID)
 		resp.Code = errcode.ErrCode_InternalError
