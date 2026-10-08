@@ -36,7 +36,7 @@ func throughputDB(t *testing.T) *gorm.DB {
 
 func taskFixture(t *testing.T, db *gorm.DB, step int, status TaskStatus, group string, subject uint) *Task {
 	t.Helper()
-	now := time.Now().UTC().Truncate(time.Millisecond)
+	now := time.Now().UTC().Truncate(time.Second)
 	x := &Task{AppGroup: group, SubjectID: subject, TaskType: group, Step: step, TaskStatus: status, WorkerID: "test-worker", StartAt: &now, Payload: "fixture", TaskConfigRedo: 1, TaskConfigTimeout: time.Minute}
 	if err := db.Create(x).Error; err != nil {
 		t.Fatal(err)
@@ -48,6 +48,7 @@ func TestThroughputIndependentTasksDoNotWakeTheirPeers(t *testing.T) {
 	db := throughputDB(t)
 	for _, size := range []int{300, 912} {
 		group := fmt.Sprintf("perf%d", time.Now().UnixNano())
+		RegisterIndependentTaskType(group)
 		tasks := make([]*Task, size)
 		for i := range tasks {
 			tasks[i] = &Task{AppGroup: group, SubjectID: 7, TaskType: group, Step: 0, TaskStatus: TaskStatusPending, Payload: "fixture"}
@@ -99,6 +100,7 @@ func TestThroughputNextStepHonorsDependenciesAndRetryBudget(t *testing.T) {
 func TestThroughputConcurrentClaimsAreUnique(t *testing.T) {
 	db := throughputDB(t)
 	group := fmt.Sprintf("claim%d", time.Now().UnixNano())
+	RegisterIndependentTaskType(group)
 	for range 32 {
 		taskFixture(t, db, 0, TaskStatusPending, group, 9)
 	}
@@ -215,7 +217,7 @@ func TestThroughputDuplicateCallbackOnlyClaimsOnce(t *testing.T) {
 
 func TestThroughputStaleCallbackCannotClaimReassignedTask(t *testing.T) {
 	db := throughputDB(t)
-	x := taskFixture(t, db, 0, TaskStatusRunning, fmt.Sprintf("stale-callback%d", time.Now().UnixNano()), 13)
+	x := taskFixture(t, db, 0, TaskStatusRunning, fmt.Sprintf("stale-cb%d", time.Now().UnixNano()), 13)
 	newStart := x.StartAt.Add(time.Second)
 	if err := db.Model(&Task{}).Where("id = ?", x.ID).Update("start_at", newStart).Error; err != nil {
 		t.Fatal(err)
@@ -275,6 +277,10 @@ func TestThroughputSameWorkerOldAttemptCannotClaimRetry(t *testing.T) {
 	retry, err := claimCandidate(context.Background(), db, x.ID, x.TaskType, x.WorkerID)
 	if err != nil || retry == nil || int64(retry.Redo)+1 == oldAttempt {
 		t.Fatalf("reclaim did not change attempt: %v %v", retry, err)
+	}
+	// The server callback first reloads the stored claim timestamp.
+	if err := db.First(retry, retry.ID).Error; err != nil {
+		t.Fatal(err)
 	}
 	if claimed, err := claimCallback(context.Background(), db, retry, oldAttempt); err != nil || claimed {
 		t.Fatalf("old callback with current snapshot claimed retry: %v %v", claimed, err)
