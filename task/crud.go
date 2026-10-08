@@ -169,8 +169,12 @@ func GetTaskByID(id uint) (*Task, error) {
 
 // GetTaskByIDAndWorkerID 根据id获取任务
 func GetTaskByIDAndWorkerID(id uint, worker_id string) (*Task, error) {
+	return getTaskByIDAndWorkerID(context.Background(), id, worker_id)
+}
+
+func getTaskByIDAndWorkerID(ctx context.Context, id uint, worker_id string) (*Task, error) {
 	var tsk *Task
-	err := dbtools.Core().Where("id = ?", id).
+	err := dbtools.Core().WithContext(ctx).Where("id = ?", id).
 		Where("worker_id = ?", worker_id).
 		// Where("task_status = ?", TaskStatusRunning).
 		First(&tsk).Error
