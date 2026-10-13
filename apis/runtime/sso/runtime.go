@@ -30,6 +30,7 @@ const (
 // mode owns an mTLS client; local mode supplies the same application contracts
 // from one loopback-only development identity.
 type Runtime struct {
+	service      string
 	httpAddress  string
 	origin       string
 	resolver     authorizationResolver
@@ -221,6 +222,7 @@ func LoadEnv(getenv func(string) string, prefix string, optionList ...RuntimeOpt
 		browserSession(router)
 	}
 	return &Runtime{
+		service:      getenv(env(prefix, "SESSION_RESOLVER_SERVICE")),
 		httpAddress:  httpAddress,
 		origin:       origin,
 		resolver:     resolver,
@@ -240,6 +242,9 @@ func (runtime *Runtime) HTTPAddress() string {
 func (runtime *Runtime) Origin() string {
 	return runtime.origin
 }
+
+// Service 返回实际绑定的 Account 工作负载服务名，供身份目录请求复用。
+func (runtime *Runtime) Service() string { return runtime.service }
 
 // RouterOption returns the complete, already validated browser authentication
 // boundary. Applications install it once and never assemble SSO middleware.

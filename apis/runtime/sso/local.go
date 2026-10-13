@@ -160,7 +160,7 @@ func loadLocalEnv(getenv func(string) string, prefix string, options runtimeOpti
 		router.GinEngine().GET("/auth/session", resolver.session)
 		router.GinEngine().POST("/auth/session/renew", resolver.renewSession)
 	}
-	return &Runtime{httpAddress: httpAddress, origin: origin, resolver: resolver, routerOption: routerOption}, nil
+	return &Runtime{service: service, httpAddress: httpAddress, origin: origin, resolver: resolver, routerOption: routerOption}, nil
 }
 
 func loadLocalIdentity(path string) (DevIdentity, error) {
