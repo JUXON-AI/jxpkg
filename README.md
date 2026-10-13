@@ -1,5 +1,7 @@
 # jxpkg
 
+新增 `credits` 服务端协议客户端：业务读取自己的配置并显式传给 `NewClient(Config)`，SDK 不读取 coresetting 或应用环境。`Client.AcquireDefault(ctx, Subject)` 获取员工 default Key 和 New API 地址；需要在一次执行内复用时创建 `NewExecution(subject, client.AcquireDefault)`，再调用 `execution.AcquireDefault(ctx)`，或通过 `WithExecution` / `ConnectionFromContext` 传递给下游。SDK 自建 mTLS 连接池；Client 没有全局员工 Key 缓存，Execution 只保留本次执行的结果（包括失败），不隐式重试、不跟随重定向。Subject 必须来自已验证登录或权威任务归属。HTTP 应用可在 Browser Session 校验后使用 `middleware.BindCreditsExecution(client)`，SDK 不决定业务资源权限。下游接入时需升级包含这些能力的发布版本并重新生成 vendor。
+
 `jxpkg` 是 JUXON Go 服务共用的基础库，覆盖 HTTP API、认证、配置、数据库、Redis、日志、对象存储、任务、邮件、验证码和模型客户端。它只提供可复用能力，不承载 Account、JXONE 等具体业务的数据模型或业务流程。
 
 ## 快速开始
@@ -334,6 +336,8 @@ logs.Infow("request complete", "request_id", requestID)
 ### `task`
 
 提供数据库任务记录、Redis Stream/队列、worker 健康检查和 callback 注册。典型流程是应用显式 `InitDB`、注册每种 task type 的 callback，再启动任务协调逻辑。
+
+新增 `RegisterWorkerRoutes(router, service, taskType, WorkerConfig, credits.AcquireFunc)`：应用加载配置并传入至少32字符的 Worker Token，SDK 不读取 settings、环境或 Account。该入口将任务领取、心跳、回调和 `AcquireTaskModelConnection` 绑定到同一独立 Bearer 认证边界并拒绝 Cookie。模型主体来自权威任务行，领取前后校验当前 worker/attempt/running/截止时间；应用在领取回调中决定员工是否仍有效。没有模型调用的回调不触发凭证领取。Token 在注册时固定，更新后需重启应用；既有手工注册路由不会被自动改动。JXX 的 jxagent 和 jxmemory 是两个实际接入方，下游需升级发布版本并重新生成 vendor。
 
 历史 API 中保留了若干拼写兼容入口（例如 `ChackWockerHealth`）；新代码不要复制这些命名。任务 callback 必须幂等，并明确处理超时、重试和重复投递。
 

@@ -79,6 +79,9 @@ func TestLoadEnvBuildsBrowserSessionRuntime(t *testing.T) {
 		t.Fatalf("LoadEnv() error = %v", err)
 	}
 	defer runtime.Close()
+	if runtime.Service() != "juxonone" {
+		t.Fatal("runtime lost configured workload service")
+	}
 	if runtime.Origin() != "https://one.example.com" || runtime.CompanyIdentityResolver() == nil || runtime.RouterOption() == nil {
 		t.Fatalf("LoadEnv() returned an incomplete runtime")
 	}
