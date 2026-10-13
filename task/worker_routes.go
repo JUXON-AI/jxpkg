@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/JUXON-AI/jxpkg/apis/runtime/server"
 	"github.com/JUXON-AI/jxpkg/credits"
 	"github.com/JUXON-AI/jxpkg/dbtools"
+	"github.com/JUXON-AI/jxpkg/requestid"
 	"github.com/gin-gonic/gin"
 )
 
@@ -38,11 +40,15 @@ func lookupWorkerTask(ctx context.Context, id uint, workerID, taskType string) (
 // RegisterWorkerRoutes 注册独立 Worker 认证边界，保持现有 action 和任务协议。
 // acquire 由业务校验员工有效性后领取连接；任务主体仅来自权威任务记录。
 // cfg 在注册时固定，应用更新令牌后需重启；既有未使用此入口的路由不受影响。
-func RegisterWorkerRoutes(router *server.Router, service, taskType string, cfg WorkerConfig, acquire credits.AcquireFunc) error {
+// callers 必须显式绑定受信 URI SAN 与 taskType；缺失时拒绝注册，Bearer 不单独授权。
+func RegisterWorkerRoutes(router *server.Router, service, taskType string, cfg WorkerConfig, acquire credits.AcquireFunc, callers ...WorkerCaller) error {
 	if router == nil || service == "" || taskType == "" || len(cfg.Token) < 32 || len(cfg.Token) > 8192 || strings.ContainsAny(cfg.Token, " \t\r\n") || acquire == nil {
 		return errors.New("task: invalid worker route configuration")
 	}
-	guard := authenticateWorker(taskType, cfg, lookupWorkerTask)
+	if err := validateWorkerCallers(taskType, callers); err != nil {
+		return err
+	}
+	guard := authenticateWorker(taskType, cfg, lookupWorkerTask, callers...)
 	bindModels := bindTaskExecution(acquire)
 	router.Post(service+".GetPendingTask", guard, GetPendingTask)
 	router.Post(service+".TaskCallBack", guard, bindModels, TaskCallBack)
@@ -60,7 +66,7 @@ type workerTaskInput struct {
 	} `json:"request"`
 }
 
-func authenticateWorker(taskType string, cfg WorkerConfig, lookup workerTaskLookup) gin.HandlerFunc {
+func authenticateWorker(taskType string, cfg WorkerConfig, lookup workerTaskLookup, callers ...WorkerCaller) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		values := ctx.Request.Header.Values("Authorization")
 		if len(values) != 1 || len(ctx.Request.Header.Values("Cookie")) != 0 || !strings.HasPrefix(values[0], "Bearer ") {
@@ -71,6 +77,11 @@ func authenticateWorker(taskType string, cfg WorkerConfig, lookup workerTaskLook
 		expected := sha256.Sum256([]byte(cfg.Token))
 		if subtle.ConstantTimeCompare(provided[:], expected[:]) != 1 {
 			ctx.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+		// Bearer 只作第二层凭证；工作负载身份来自直接 mTLS 握手。
+		if !authorizedWorkerCertificate(ctx.Request, taskType, callers) {
+			ctx.AbortWithStatus(http.StatusForbidden)
 			return
 		}
 		raw, err := io.ReadAll(http.MaxBytesReader(ctx.Writer, ctx.Request.Body, 1<<20))
@@ -124,9 +135,41 @@ func bindTaskExecution(acquire credits.AcquireFunc) gin.HandlerFunc {
 			return
 		}
 		ctx.Set(credits.ExecutionContextKey, e)
-		ctx.Request = ctx.Request.WithContext(credits.WithExecution(ctx.Request.Context(), e))
+		base := requestid.WithContext(ctx.Request.Context(), requestid.FromContext(ctx))
+		ctx.Request = ctx.Request.WithContext(credits.WithExecution(base, e))
 		ctx.Next()
 	}
+}
+
+func validateWorkerCallers(taskType string, callers []WorkerCaller) error {
+	if len(callers) == 0 || len(callers) > 64 {
+		return errors.New("task: invalid worker callers")
+	}
+	seen := map[string]bool{}
+	for _, caller := range callers {
+		u, err := url.Parse(caller.Principal)
+		if err != nil || len(caller.Principal) > 512 || u.Scheme != "spiffe" || u.Host == "" || u.Path == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || caller.TaskType != taskType || seen[caller.Principal] {
+			return errors.New("task: invalid worker callers")
+		}
+		seen[caller.Principal] = true
+	}
+	return nil
+}
+
+func authorizedWorkerCertificate(r *http.Request, taskType string, callers []WorkerCaller) bool {
+	if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.VerifiedChains[0]) == 0 {
+		return false
+	}
+	leaf := r.TLS.VerifiedChains[0][0]
+	if leaf == nil || len(leaf.URIs) != 1 || leaf.URIs[0] == nil {
+		return false
+	}
+	for _, caller := range callers {
+		if caller.TaskType == taskType && caller.Principal == leaf.URIs[0].String() {
+			return true
+		}
+	}
+	return false
 }
 
 // AcquireTaskModelConnectionRequest 是 Worker 对当前领取任务的凭证请求。

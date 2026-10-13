@@ -337,7 +337,9 @@ logs.Infow("request complete", "request_id", requestID)
 
 提供数据库任务记录、Redis Stream/队列、worker 健康检查和 callback 注册。典型流程是应用显式 `InitDB`、注册每种 task type 的 callback，再启动任务协调逻辑。
 
-新增 `RegisterWorkerRoutes(router, service, taskType, WorkerConfig, credits.AcquireFunc)`：应用加载配置并传入至少32字符的 Worker Token，SDK 不读取 settings、环境或 Account。该入口将任务领取、心跳、回调和 `AcquireTaskModelConnection` 绑定到同一独立 Bearer 认证边界并拒绝 Cookie。模型主体来自权威任务行，领取前后校验当前 worker/attempt/running/截止时间；应用在领取回调中决定员工是否仍有效。没有模型调用的回调不触发凭证领取。Token 在注册时固定，更新后需重启应用；既有手工注册路由不会被自动改动。JXX 的 jxagent 和 jxmemory 是两个实际接入方，下游需升级发布版本并重新生成 vendor。
+从 v0.0.24 开始，`RegisterWorkerRoutes` 必须显式传入 `WorkerCaller`：受信客户端证书唯一 URI SAN 与固定 taskType 一一绑定，Token 是第二层校验，拒绝 Cookie。应用使用 `NewWorkerServer(WorkerServerConfig, service, taskType, WorkerConfig, credits.AcquireFunc)` 启动独立 TLS 1.3 双向认证入口，显式调用 `Serve`，退出时 `Close`。Worker 使用 `NewWorkerHTTPClient(credits.TLSConfig, timeout)`；该客户端拒绝明文 HTTP 和重定向，调用方关闭空闲连接。SDK 不读取 settings、环境或 Account。旧的 v0.0.23 调用须补齐证书与 caller 配置后升级，否则注册失败关闭访问；原有其他手工注册路由不受影响。
+
+模型主体来自权威任务行，领取前后校验当前 worker/attempt/running/截止时间；应用在领取回调中决定员工是否仍有效。没有模型调用的回调不触发凭证领取。Token 在注册时固定，更新后需重启应用。JXX 的 jxagent 和 jxmemory 是两个实际接入方，下游需升级发布版本并重新生成 vendor。`requestid` 为标准 Context 与 Gin 传播同一个安全请求 ID，额度客户端携带 `X-Request-Id`，不为每一跳重新生成。
 
 历史 API 中保留了若干拼写兼容入口（例如 `ChackWockerHealth`）；新代码不要复制这些命名。任务 callback 必须幂等，并明确处理超时、重试和重复投递。
 
