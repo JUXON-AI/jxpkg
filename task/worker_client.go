@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/JUXON-AI/jxpkg/credits"
+	"github.com/JUXON-AI/jxpkg/safeerror"
 )
 
 // NewWorkerHTTPClient 用显式 mTLS 文件配置创建任务客户端；调用方负责关闭空闲连接。
@@ -18,11 +19,11 @@ func NewWorkerHTTPClient(cfg credits.TLSConfig, timeout time.Duration) (*http.Cl
 	}
 	pair, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
-		return nil, errors.New("task: worker TLS unavailable")
+		return nil, safeerror.Wrap("task: worker TLS unavailable", err)
 	}
 	pem, err := os.ReadFile(cfg.CAFile)
 	if err != nil {
-		return nil, errors.New("task: worker TLS unavailable")
+		return nil, safeerror.Wrap("task: worker TLS unavailable", err)
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(pem) {

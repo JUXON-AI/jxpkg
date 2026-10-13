@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"sync"
+
+	"github.com/JUXON-AI/jxpkg/safeerror"
 )
 
 // ExecutionContextKey 用于标准 Context 与 HTTP 框架之间传递同一个执行对象。
@@ -66,20 +68,22 @@ func (e *Execution) AcquireDefault(ctx context.Context) (Connection, error) {
 				err = ValidateConnection(connection)
 			}
 			if ctx.Err() != nil {
-				err = ctx.Err()
+				err = errors.Join(ctx.Err(), err)
 			}
 			if err != nil {
 				connection = Connection{}
+				var classification error
 				switch {
 				case errors.Is(err, ErrDenied):
-					err = ErrDenied
+					classification = ErrDenied
 				case errors.Is(err, context.Canceled):
-					err = context.Canceled
+					classification = context.Canceled
 				case errors.Is(err, context.DeadlineExceeded):
-					err = context.DeadlineExceeded
+					classification = context.DeadlineExceeded
 				default:
-					err = ErrUnavailable
+					classification = ErrUnavailable
 				}
+				err = safeerror.Wrap(classification.Error(), errors.Join(classification, err))
 			}
 			e.connection, e.err = connection, err
 		}()

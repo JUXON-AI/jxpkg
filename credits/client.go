@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/JUXON-AI/jxpkg/requestid"
+	"github.com/JUXON-AI/jxpkg/safeerror"
 )
 
 // DefaultPath 是独立工作负载入口，不接受浏览器凭证。
@@ -27,6 +28,13 @@ var ErrUnavailable = errors.New("credits unavailable")
 
 // ErrDenied 表示员工尚未开通或不允许使用模型凭证。
 var ErrDenied = errors.New("credits access denied")
+
+func unavailableCause(cause error) error {
+	if cause == nil {
+		return ErrUnavailable
+	}
+	return safeerror.Wrap(ErrUnavailable.Error(), errors.Join(ErrUnavailable, cause))
+}
 
 // Subject 来自调用服务已验证的身份或权威任务记录。
 type Subject struct {
@@ -75,11 +83,11 @@ type Client struct {
 func NewClient(cfg Config) (*Client, error) {
 	pair, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
 	if err != nil {
-		return nil, ErrUnavailable
+		return nil, unavailableCause(err)
 	}
 	pem, err := os.ReadFile(cfg.TLS.CAFile)
 	if err != nil {
-		return nil, ErrUnavailable
+		return nil, unavailableCause(err)
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(pem) {
@@ -102,7 +110,7 @@ func NewClient(cfg Config) (*Client, error) {
 func NewClientWithTransport(cfg Config, transport http.RoundTripper) (*Client, error) {
 	u, err := url.Parse(cfg.Endpoint)
 	if err != nil || len(cfg.Endpoint) > 512 || u.Scheme != "https" || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || transport == nil {
-		return nil, ErrUnavailable
+		return nil, unavailableCause(err)
 	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 15 * time.Second
@@ -123,11 +131,11 @@ func (c *Client) AcquireDefault(ctx context.Context, subject Subject) (Connectio
 	}
 	body, err := json.Marshal(subject)
 	if err != nil {
-		return Connection{}, ErrUnavailable
+		return Connection{}, unavailableCause(err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return Connection{}, ErrUnavailable
+		return Connection{}, unavailableCause(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if id := requestid.FromContext(ctx); id != "" {
@@ -136,9 +144,9 @@ func (c *Client) AcquireDefault(ctx context.Context, subject Subject) (Connectio
 	resp, err := c.http.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return Connection{}, ctx.Err()
+			return Connection{}, safeerror.Wrap(ctx.Err().Error(), errors.Join(ctx.Err(), err))
 		}
-		return Connection{}, ErrUnavailable
+		return Connection{}, unavailableCause(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusConflict {
@@ -149,17 +157,23 @@ func (c *Client) AcquireDefault(ctx context.Context, subject Subject) (Connectio
 	}
 	media, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil || media != "application/json" {
-		return Connection{}, ErrUnavailable
+		return Connection{}, unavailableCause(err)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024+1))
 	if err != nil || len(raw) > 16*1024 {
-		return Connection{}, ErrUnavailable
+		return Connection{}, unavailableCause(err)
 	}
 	var connection Connection
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
-	if d.Decode(&connection) != nil || d.Decode(new(any)) != io.EOF || ValidateConnection(connection) != nil {
-		return Connection{}, ErrUnavailable
+	if err := d.Decode(&connection); err != nil {
+		return Connection{}, unavailableCause(err)
+	}
+	if err := d.Decode(new(any)); err != io.EOF {
+		return Connection{}, unavailableCause(err)
+	}
+	if err := ValidateConnection(connection); err != nil {
+		return Connection{}, err
 	}
 	return connection, nil
 }
@@ -168,7 +182,7 @@ func (c *Client) AcquireDefault(ctx context.Context, subject Subject) (Connectio
 func ValidateConnection(c Connection) error {
 	u, err := url.Parse(c.BaseURL)
 	if err != nil || len(c.BaseURL) > 512 || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.TrimRight(u.Path, "/") != "/v1" || len(c.APIKey) < 1 || len(c.APIKey) > 8192 || strings.ContainsAny(c.APIKey, " \t\r\n") {
-		return ErrUnavailable
+		return unavailableCause(err)
 	}
 	return nil
 }

@@ -1,6 +1,7 @@
 package dbtools
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -10,6 +11,23 @@ import (
 
 	"github.com/JUXON-AI/jxpkg/logs"
 )
+
+func TestDatabaseURLCauseSurvivesRedaction(t *testing.T) {
+	_, err := InitDBConn("test", "mysql://PRIVATE_USER:PRIVATE_PASSWORD%zz@localhost/db")
+	var parsed *url.Error
+	if !errors.As(err, &parsed) || strings.Contains(fmt.Errorf("startup: %w", err).Error(), "PRIVATE") {
+		t.Fatal("URL cause lost or outer error unsafe")
+	}
+}
+
+func TestDatabaseDriverCauseSurvivesRedaction(t *testing.T) {
+	// 驱动参数解析在任何数据库连接之前失败。
+	_, err := InitDBConn("test", "mysql://PRIVATE_USER:PRIVATE_PASSWORD@localhost/db?private_option=%zz")
+	var escaped url.EscapeError
+	if !errors.As(err, &escaped) || !errors.Is(err, url.EscapeError("%zz")) || strings.Contains(fmt.Errorf("startup: %w", err).Error(), "PRIVATE") {
+		t.Fatal("driver cause lost or outer error unsafe")
+	}
+}
 
 func TestDatabaseInitializationErrorsDoNotExposeCredentials(t *testing.T) {
 	if os.Getenv("JXPKG_DB_ERROR_HELPER") == "1" {

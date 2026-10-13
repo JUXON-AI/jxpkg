@@ -426,3 +426,5 @@ JXPKG_TEST_S3_REGION
 - 不提交个人 fork `replace`、本地凭证、生成日志、IDE 缓存或临时修复脚本。
 - 导出 API 需要完整注释、测试和兼容性说明；破坏性变更必须通过新主版本发布。
 - 数据库迁移和外部资源初始化均由应用显式触发，禁止 import side effect。
+
+`safeerror.Wrap(message, cause)` 给内部 I/O 错误保留 errors.Is/As 分类，外层 Error() 只返回调用方提供的固定安全文本，原因为 nil 时返回 nil。credits 与 dbtools 是两个实际消费者；业务身份/启动边界也可直接复用。message 不得来自配置、凭证或上游响应，日志只输出外层错误。需要同时保留业务 sentinel 时把 errors.Join(sentinel,cause) 放在 Wrap 内，不直接返回 Join。
