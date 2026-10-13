@@ -6,6 +6,7 @@ import (
 
 	"github.com/JUXON-AI/jxpkg/apis/runtime"
 	"github.com/JUXON-AI/jxpkg/credits"
+	"github.com/JUXON-AI/jxpkg/requestid"
 	"github.com/gin-gonic/gin"
 )
 
@@ -27,7 +28,8 @@ func BindCreditsExecution(client *credits.Client) gin.HandlerFunc {
 			return
 		}
 		ctx.Set(credits.ExecutionContextKey, e)
-		ctx.Request = ctx.Request.WithContext(credits.WithExecution(ctx.Request.Context(), e))
+		base := requestid.WithContext(ctx.Request.Context(), runtime.RequestID(ctx))
+		ctx.Request = ctx.Request.WithContext(credits.WithExecution(base, e))
 		ctx.Next()
 	}
 }

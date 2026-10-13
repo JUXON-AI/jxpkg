@@ -17,6 +17,7 @@ func Logger(whitelist ...string) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		reqid := ctx.GetString(constants.CtxKeyRequestID)
 		logs.SetContextFields(ctx, "reqid", reqid)
+		ctx.Request = ctx.Request.WithContext(logs.WithContextFields(ctx.Request.Context(), "reqid", reqid))
 
 		currReq := ctx.FullPath()
 		for _, w := range whitelist {

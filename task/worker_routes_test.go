@@ -2,10 +2,13 @@ package task
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -61,7 +64,7 @@ func TestWorkerRoutesValidateConfigAndGuardEveryAction(t *testing.T) {
 		}
 	}
 	router := server.NewRouter("/v1/")
-	if err := RegisterWorkerRoutes(router, "example", "queue", WorkerConfig{Token: strings.Repeat("x", 32)}, acquire); err != nil {
+	if err := RegisterWorkerRoutes(router, "example", "queue", WorkerConfig{Token: strings.Repeat("x", 32)}, acquire, testWorkerCaller("queue")); err != nil {
 		t.Fatal(err)
 	}
 	for _, action := range []string{"GetPendingTask", "TaskCallBack", "CheckInstance", "AcquireTaskModelConnection"} {
@@ -119,13 +122,14 @@ func TestWorkerConnectionUsesAuthoritativeClaimAndRechecksAfterAcquisition(t *te
 				return credits.Connection{BaseURL: "https://models.example.com/v1", APIKey: "employee-default"}, nil
 			}
 			engine := gin.New()
-			engine.POST("/task", authenticateWorker("queue", WorkerConfig{Token: strings.Repeat("x", 32)}, lookup), bindTaskExecution(acquire), server.API(acquireTaskModelConnection(lookup)))
+			engine.POST("/task", authenticateWorker("queue", WorkerConfig{Token: strings.Repeat("x", 32)}, lookup, testWorkerCaller("queue")), bindTaskExecution(acquire), server.API(acquireTaskModelConnection(lookup)))
 			attempt := "3"
 			if name == "old_attempt" {
 				attempt = "2"
 			}
 			r := httptest.NewRequest("POST", "/task", strings.NewReader(`{"request":{"task_id":7,"worker_id":"worker-1","attempt":`+attempt+`,"company_id":999,"uin":999}}`))
 			r.Header.Set("Authorization", "Bearer "+strings.Repeat("x", 32))
+			bindTestWorkerTLS(r)
 			w := httptest.NewRecorder()
 			engine.ServeHTTP(w, r)
 			var resp AcquireTaskModelConnectionResponse
@@ -199,8 +203,9 @@ func TestWorkerBoundaryRejectsBrowserMissingTokenAndWrongQueue(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			engine := gin.New()
-			engine.POST("/v1/jxagent."+tc.path, authenticateWorker("attachment", WorkerConfig{Token: token}, nil), func(ctx *gin.Context) { ctx.Status(204) })
+			engine.POST("/v1/jxagent."+tc.path, authenticateWorker("attachment", WorkerConfig{Token: token}, nil, testWorkerCaller("attachment")), func(ctx *gin.Context) { ctx.Status(204) })
 			r := httptest.NewRequest(http.MethodPost, "/v1/jxagent."+tc.path, strings.NewReader(tc.body))
+			bindTestWorkerTLS(r)
 			if tc.authorization != "" {
 				r.Header.Set("Authorization", tc.authorization)
 			}
@@ -211,6 +216,49 @@ func TestWorkerBoundaryRejectsBrowserMissingTokenAndWrongQueue(t *testing.T) {
 			engine.ServeHTTP(w, r)
 			if w.Code != tc.status {
 				t.Fatalf("status=%d want %d", w.Code, tc.status)
+			}
+		})
+	}
+}
+
+func testWorkerCaller(taskType string) WorkerCaller {
+	return WorkerCaller{Principal: "spiffe://jxone.internal/ns/jxx/sa/test-worker", TaskType: taskType}
+}
+func bindTestWorkerTLS(r *http.Request) {
+	u, _ := url.Parse(testWorkerCaller("queue").Principal)
+	r.TLS = &tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{{URIs: []*url.URL{u}}}}}
+}
+func TestWorkerCertificateAndQueueBinding(t *testing.T) {
+	for _, name := range []string{"valid", "no_certificate", "unverified", "wrong_principal", "ambiguous_uri", "wrong_queue"} {
+		t.Run(name, func(t *testing.T) {
+			engine := gin.New()
+			caller := testWorkerCaller("queue")
+			if name == "wrong_queue" {
+				caller.TaskType = "other"
+			}
+			engine.POST("/task", authenticateWorker("queue", WorkerConfig{Token: strings.Repeat("x", 32)}, nil, caller), func(ctx *gin.Context) { ctx.Status(204) })
+			r := httptest.NewRequest("POST", "/task", strings.NewReader(`{"request":{"task_type":"queue","worker_id":"worker"}}`))
+			r.Header.Set("Authorization", "Bearer "+strings.Repeat("x", 32))
+			bindTestWorkerTLS(r)
+			switch name {
+			case "no_certificate":
+				r.TLS = nil
+			case "unverified":
+				r.TLS.VerifiedChains = nil
+			case "wrong_principal":
+				u, _ := url.Parse("spiffe://jxone.internal/ns/other/sa/worker")
+				r.TLS.VerifiedChains[0][0].URIs = []*url.URL{u}
+			case "ambiguous_uri":
+				r.TLS.VerifiedChains[0][0].URIs = append(r.TLS.VerifiedChains[0][0].URIs, r.TLS.VerifiedChains[0][0].URIs[0])
+			}
+			w := httptest.NewRecorder()
+			engine.ServeHTTP(w, r)
+			want := 403
+			if name == "valid" {
+				want = 204
+			}
+			if w.Code != want {
+				t.Fatalf("HTTP %d want %d", w.Code, want)
 			}
 		})
 	}

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/JUXON-AI/jxpkg/requestid"
 )
 
 type transportFunc func(*http.Request) (*http.Response, error)
@@ -52,6 +54,22 @@ func TestAcquireDefaultProtocol(t *testing.T) {
 				t.Fatal("credential returned on error")
 			}
 		})
+	}
+}
+
+func TestAcquirePreservesExistingRequestID(t *testing.T) {
+	c, err := NewClientWithTransport(Config{Endpoint: "https://credits.example.com"}, transportFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Header.Get("X-Request-Id") != "original-request" {
+			t.Fatal("lost request ID")
+		}
+		return &http.Response{StatusCode: 403, Body: io.NopCloser(strings.NewReader(""))}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.AcquireDefault(requestid.WithContext(context.Background(), "original-request"), Subject{CompanyID: 2, UIN: 3})
+	if !errors.Is(err, ErrDenied) {
+		t.Fatal(err)
 	}
 }
 

@@ -15,6 +15,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/JUXON-AI/jxpkg/requestid"
 )
 
 // DefaultPath 是独立工作负载入口，不接受浏览器凭证。
@@ -128,6 +130,9 @@ func (c *Client) AcquireDefault(ctx context.Context, subject Subject) (Connectio
 		return Connection{}, ErrUnavailable
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if id := requestid.FromContext(ctx); id != "" {
+		req.Header.Set("X-Request-Id", id)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
