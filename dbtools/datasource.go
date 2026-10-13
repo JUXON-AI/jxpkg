@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/JUXON-AI/jxpkg/logs"
+	"github.com/JUXON-AI/jxpkg/safeerror"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -25,7 +26,7 @@ func InitDBConn(name, dburl string) (*gorm.DB, error) {
 	}
 	dsn, err := url.Parse(dburl)
 	if err != nil {
-		return nil, fmt.Errorf("parse database connection URL failed")
+		return nil, safeerror.Wrap("parse database connection URL failed", err)
 	}
 	var db *gorm.DB
 	switch dsn.Scheme {
@@ -34,7 +35,7 @@ func InitDBConn(name, dburl string) (*gorm.DB, error) {
 		uri, err = NormalizeMySQL(dsn)
 		if err != nil {
 			logs.Error("[init-db] normalize mysql dsn failed")
-			return nil, fmt.Errorf("normalize MySQL connection failed")
+			return nil, safeerror.Wrap("normalize MySQL connection failed", err)
 		}
 		db, err = gorm.Open(mysql.Open(uri), &gorm.Config{
 			CreateBatchSize: 200,
@@ -47,7 +48,7 @@ func InitDBConn(name, dburl string) (*gorm.DB, error) {
 	}
 	if err != nil {
 		logs.Error("[init-db] open db failed")
-		return nil, fmt.Errorf("open database connection failed")
+		return nil, safeerror.Wrap("open database connection failed", err)
 	}
 
 	if name == "" {

@@ -15,6 +15,7 @@ import (
 	"github.com/JUXON-AI/jxpkg/credits"
 	"github.com/JUXON-AI/jxpkg/lifecycle"
 	"github.com/JUXON-AI/jxpkg/logs"
+	"github.com/JUXON-AI/jxpkg/safeerror"
 )
 
 // WorkerCaller 将已验证证书主体绑定到唯一任务队列。
@@ -62,11 +63,11 @@ func NewWorkerServer(cfg WorkerServerConfig, service, taskType string, auth Work
 	}
 	pair, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
-		return nil, errors.New("task: worker TLS unavailable")
+		return nil, safeerror.Wrap("task: worker TLS unavailable", err)
 	}
 	pem, err := os.ReadFile(cfg.ClientCAFile)
 	if err != nil {
-		return nil, errors.New("task: worker TLS unavailable")
+		return nil, safeerror.Wrap("task: worker TLS unavailable", err)
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(pem) {
@@ -84,7 +85,7 @@ func (s *WorkerServer) Serve() error {
 	}
 	l, err := net.Listen("tcp", s.address)
 	if err != nil {
-		return errors.New("task: worker listener unavailable")
+		return safeerror.Wrap("task: worker listener unavailable", err)
 	}
 	s.listener = tls.NewListener(l, s.tlsConfig)
 	go func() {
