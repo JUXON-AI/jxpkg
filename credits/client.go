@@ -118,24 +118,35 @@ func NewClientWithTransport(cfg Config, transport http.RoundTripper) (*Client, e
 	if cfg.Timeout <= 0 || cfg.Timeout > 45*time.Second {
 		return nil, ErrUnavailable
 	}
-	return &Client{endpoint: strings.TrimRight(u.String(), "/") + DefaultPath, http: &http.Client{Transport: transport, Timeout: cfg.Timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+	return &Client{endpoint: strings.TrimRight(u.String(), "/"), http: &http.Client{Transport: transport, Timeout: cfg.Timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 
 // AcquireDefault 只领取指定员工的连接，校验 HTTP、响应体和地址，不跟随重定向。
 func (c *Client) AcquireDefault(ctx context.Context, subject Subject) (Connection, error) {
+	var connection Connection
+	if err := c.call(ctx, subject, DefaultPath, &connection); err != nil {
+		return Connection{}, err
+	}
+	if err := ValidateConnection(connection); err != nil {
+		return Connection{}, err
+	}
+	return connection, nil
+}
+
+func (c *Client) call(ctx context.Context, subject Subject, path string, result any) error {
 	if c == nil || ctx == nil || subject.CompanyID == 0 || subject.UIN == 0 {
-		return Connection{}, ErrDenied
+		return ErrDenied
 	}
 	if err := ctx.Err(); err != nil {
-		return Connection{}, err
+		return err
 	}
 	body, err := json.Marshal(subject)
 	if err != nil {
-		return Connection{}, unavailableCause(err)
+		return unavailableCause(err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+path, bytes.NewReader(body))
 	if err != nil {
-		return Connection{}, unavailableCause(err)
+		return unavailableCause(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if id := requestid.FromContext(ctx); id != "" {
@@ -144,38 +155,34 @@ func (c *Client) AcquireDefault(ctx context.Context, subject Subject) (Connectio
 	resp, err := c.http.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return Connection{}, safeerror.Wrap(ctx.Err().Error(), errors.Join(ctx.Err(), err))
+			return safeerror.Wrap(ctx.Err().Error(), errors.Join(ctx.Err(), err))
 		}
-		return Connection{}, unavailableCause(err)
+		return unavailableCause(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusConflict {
-		return Connection{}, ErrDenied
+		return ErrDenied
 	}
 	if resp.StatusCode != http.StatusOK {
-		return Connection{}, ErrUnavailable
+		return ErrUnavailable
 	}
 	media, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil || media != "application/json" {
-		return Connection{}, unavailableCause(err)
+		return unavailableCause(err)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024+1))
 	if err != nil || len(raw) > 16*1024 {
-		return Connection{}, unavailableCause(err)
+		return unavailableCause(err)
 	}
-	var connection Connection
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
-	if err := d.Decode(&connection); err != nil {
-		return Connection{}, unavailableCause(err)
+	if err := d.Decode(result); err != nil {
+		return unavailableCause(err)
 	}
 	if err := d.Decode(new(any)); err != io.EOF {
-		return Connection{}, unavailableCause(err)
+		return unavailableCause(err)
 	}
-	if err := ValidateConnection(connection); err != nil {
-		return Connection{}, err
-	}
-	return connection, nil
+	return nil
 }
 
 // ValidateConnection 拒绝凭证 URL、非 HTTPS 地址和畸形 Key。
