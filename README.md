@@ -428,3 +428,9 @@ JXPKG_TEST_S3_REGION
 - 数据库迁移和外部资源初始化均由应用显式触发，禁止 import side effect。
 
 `safeerror.Wrap(message, cause)` 给内部 I/O 错误保留 errors.Is/As 分类，外层 Error() 只返回调用方提供的固定安全文本，原因为 nil 时返回 nil。credits 与 dbtools 是两个实际消费者；业务身份/启动边界也可直接复用。message 不得来自配置、凭证或上游响应，日志只输出外层错误。需要同时保留业务 sentinel 时把 errors.Join(sentinel,cause) 放在 Wrap 内，不直接返回 Join。
+
+## 员工余额查询
+
+`credits.Client.GetBalance(ctx, credits.Subject{CompanyID: companyID, UIN: uin})` 复用当前 mTLS 客户端，通过 `/internal/credits/balance` 查询原始 wallet。`credits.Balance` 包含 state、quota、used_quota，不领取 default Key、不保存额度或扣费；缺失、重复或畸形响应失败关闭，pending 不代表零余额。该协议同时由额度服务实现和 JXX 消费。
+
+业务浏览器接口使用 `apis/credits.RegisterBrowserBalance(router, "jxagent", client)` 注册 `jxagent.GetMyModelBalance`。它复用组织校验的 Browser Session 和 CSRF，员工身份只来自当前验证结果；DTO/handler/安全错误映射由 SDK 提供，业务无需转发包装。响应保留原始单位并回传 company_id/uin，浏览器须核对主体，避免其他标签页切换 Session 后的迟到响应污染旧身份缓存。调用方后端显式传 Client，SDK 不读取环境或 coresetting，也不增加 Bearer fallback。
