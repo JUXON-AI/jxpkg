@@ -4,6 +4,8 @@
 
 `jxpkg` 是 JUXON Go 服务共用的基础库，覆盖 HTTP API、认证、配置、数据库、Redis、日志、对象存储、任务、邮件、验证码和模型客户端。它只提供可复用能力，不承载 Account、JXONE 等具体业务的数据模型或业务流程。
 
+`task.WorkerConfig.ResolveCredentials` 是可选的业务回调：在员工连接授权后按权威任务快照解析独立 Provider 凭据。既有 `AcquireTaskModelConnection` 响应新增 `provider_credentials`，领取前后仍校验任务 claim，失败响应不返回任何凭据；SDK 不读取业务 settings，不持久化回调结果。业务须固定配置来源、验证任务参数与当前 Provider 地址绑定，Worker 只在执行内存中使用响应，不信任历史 payload 的凭据。
+
 ## 快速开始
 
 ```bash

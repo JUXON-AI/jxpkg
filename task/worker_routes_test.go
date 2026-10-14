@@ -77,7 +77,7 @@ func TestWorkerRoutesValidateConfigAndGuardEveryAction(t *testing.T) {
 }
 
 func TestWorkerConnectionUsesAuthoritativeClaimAndRechecksAfterAcquisition(t *testing.T) {
-	for _, name := range []string{"valid", "old_attempt", "cancelled_before", "cancelled_after", "new_claim", "changed_start", "changed_employee", "lookup_failure", "denied", "unavailable"} {
+	for _, name := range []string{"valid", "old_attempt", "cancelled_before", "cancelled_after", "new_claim", "changed_start", "changed_employee", "lookup_failure", "denied", "unavailable", "provider_failure", "provider_budget"} {
 		t.Run(name, func(t *testing.T) {
 			start := time.Now().Add(-time.Second)
 			row := Task{Model: gorm.Model{ID: 7}, CompanyID: 2, UIN: 3, TaskType: "queue", Redo: 2, WorkerID: "worker-1", StartAt: &start, TaskStatus: TaskStatusRunning, TaskConfigTimeout: time.Minute}
@@ -122,7 +122,24 @@ func TestWorkerConnectionUsesAuthoritativeClaimAndRechecksAfterAcquisition(t *te
 				return credits.Connection{BaseURL: "https://models.example.com/v1", APIKey: "employee-default"}, nil
 			}
 			engine := gin.New()
-			engine.POST("/task", authenticateWorker("queue", WorkerConfig{Token: strings.Repeat("x", 32)}, lookup, testWorkerCaller("queue")), bindTaskExecution(acquire), server.API(acquireTaskModelConnection(lookup)))
+			resolutions := 0
+			cfg := WorkerConfig{Token: strings.Repeat("x", 32), ResolveCredentials: func(_ context.Context, snapshot *Task) (map[string]string, error) {
+				resolutions++
+				if snapshot.ID != 7 || snapshot.UIN != 3 || snapshot.CompanyID != 2 {
+					t.Fatal("provider resolver received wrong task")
+				}
+				// Resolver 无权改写后续 claim fencing 所用的原始快照。
+				snapshot.UIN = 999
+				*snapshot.StartAt = time.Now()
+				if name == "provider_failure" {
+					return map[string]string{"mineru_token": "private-provider"}, errors.New("private provider failure")
+				}
+				if name == "provider_budget" {
+					return map[string]string{"mineru_token": strings.Repeat("x", 8193)}, nil
+				}
+				return map[string]string{"mineru_token": "private-provider"}, nil
+			}}
+			engine.POST("/task", authenticateWorker("queue", cfg, lookup, testWorkerCaller("queue")), bindTaskExecution(acquire), server.API(acquireTaskModelConnection(lookup, cfg)))
 			attempt := "3"
 			if name == "old_attempt" {
 				attempt = "2"
@@ -140,20 +157,20 @@ func TestWorkerConnectionUsesAuthoritativeClaimAndRechecksAfterAcquisition(t *te
 			if name == "valid" {
 				wantCode = 0
 			}
-			if name == "unavailable" {
+			if name == "unavailable" || name == "provider_failure" || name == "provider_budget" {
 				wantCode = 503
 			}
 			if w.Code != 200 || resp.Code != wantCode || w.Header().Get("Cache-Control") != "no-store" {
 				t.Fatalf("http=%d bodycode=%d", w.Code, resp.Code)
 			}
 			if name == "valid" {
-				if resp.Response.APIKey != "employee-default" || acquisitions != 1 || lookups != 2 {
+				if resp.Response.APIKey != "employee-default" || resp.ProviderCredentials["mineru_token"] != "private-provider" || acquisitions != 1 || resolutions != 1 || lookups != 2 {
 					t.Fatal("valid claim not acquired once and rechecked")
 				}
-			} else if resp.Response.APIKey != "" || strings.Contains(w.Body.String(), "private") {
+			} else if resp.Response.APIKey != "" || len(resp.ProviderCredentials) != 0 || strings.Contains(w.Body.String(), "private") {
 				t.Fatal("failure exposed credential or internal error")
 			}
-			if (name == "old_attempt" || name == "cancelled_before") && acquisitions != 0 {
+			if (name == "old_attempt" || name == "cancelled_before") && (acquisitions != 0 || resolutions != 0) {
 				t.Fatal("invalid claim reached acquisition")
 			}
 		})

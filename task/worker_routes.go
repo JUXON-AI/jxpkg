@@ -17,6 +17,7 @@ import (
 	"github.com/JUXON-AI/jxpkg/apis/runtime/server"
 	"github.com/JUXON-AI/jxpkg/credits"
 	"github.com/JUXON-AI/jxpkg/dbtools"
+	"github.com/JUXON-AI/jxpkg/logs"
 	"github.com/JUXON-AI/jxpkg/requestid"
 	"github.com/gin-gonic/gin"
 )
@@ -25,6 +26,8 @@ import (
 type WorkerConfig struct {
 	// Token 是至少32字符的可信 Worker 服务凭证，不是员工模型 Key。
 	Token string `yaml:"token" json:"-"`
+	// ResolveCredentials 按权威任务快照解析独立 Provider 凭据，仅返回给当前授权执行，不保存到任务。
+	ResolveCredentials func(context.Context, *Task) (map[string]string, error) `yaml:"-" json:"-"`
 }
 
 const workerTaskContextKey = "jxpkg.task.worker.claim"
@@ -53,7 +56,7 @@ func RegisterWorkerRoutes(router *server.Router, service, taskType string, cfg W
 	router.Post(service+".GetPendingTask", guard, GetPendingTask)
 	router.Post(service+".TaskCallBack", guard, bindModels, TaskCallBack)
 	router.Post(service+".CheckInstance", guard, CheckInstance)
-	router.Post(service+".AcquireTaskModelConnection", guard, bindModels, acquireTaskModelConnection(lookupWorkerTask))
+	router.Post(service+".AcquireTaskModelConnection", guard, bindModels, acquireTaskModelConnection(lookupWorkerTask, cfg))
 	return nil
 }
 
@@ -193,9 +196,11 @@ type AcquireTaskModelConnectionResponse struct {
 	apiobj.BaseResponse
 	// Response 是本次执行的员工模型连接。
 	Response credits.Connection `json:"response"`
+	// ProviderCredentials 是业务按任务绑定解析的执行期凭据，不进入持久化载荷。
+	ProviderCredentials map[string]string `json:"provider_credentials,omitempty"`
 }
 
-func acquireTaskModelConnection(lookup workerTaskLookup) func(*gin.Context, *AcquireTaskModelConnectionRequest, *AcquireTaskModelConnectionResponse) {
+func acquireTaskModelConnection(lookup workerTaskLookup, cfg WorkerConfig) func(*gin.Context, *AcquireTaskModelConnectionRequest, *AcquireTaskModelConnectionResponse) {
 	return func(ctx *gin.Context, req *AcquireTaskModelConnectionRequest, resp *AcquireTaskModelConnectionResponse) {
 		ctx.Header("Cache-Control", "no-store")
 		value, exists := ctx.Get(workerTaskContextKey)
@@ -212,6 +217,22 @@ func acquireTaskModelConnection(lookup workerTaskLookup) func(*gin.Context, *Acq
 			}
 			return
 		}
+		var providerCredentials map[string]string
+		if ctx.Request.Context().Err() != nil {
+			resp.Code = http.StatusServiceUnavailable
+			return
+		}
+		if cfg.ResolveCredentials != nil {
+			snapshot := *row
+			start := *row.StartAt
+			snapshot.StartAt = &start
+			providerCredentials, err = cfg.ResolveCredentials(ctx.Request.Context(), &snapshot)
+			if err != nil || !validProviderCredentials(providerCredentials) || ctx.Request.Context().Err() != nil {
+				logs.WarnContextw(ctx.Request.Context(), "task.provider.credentials.unavailable", "task_id", row.ID)
+				resp.Code = http.StatusServiceUnavailable
+				return
+			}
+		}
 		// 领取可能等待网络；返回前重读，防止任务已取消、重新领取或变更主体。
 		latest, err := lookup(ctx.Request.Context(), row.ID, row.WorkerID, row.TaskType)
 		if err != nil || !validClaim(latest, row.ID, row.WorkerID, req.Request.Attempt, time.Now()) || !latest.StartAt.Equal(*row.StartAt) || latest.CompanyID != row.CompanyID || latest.UIN != row.UIN {
@@ -219,7 +240,25 @@ func acquireTaskModelConnection(lookup workerTaskLookup) func(*gin.Context, *Acq
 			return
 		}
 		resp.Response = connection
+		resp.ProviderCredentials = providerCredentials
 	}
+}
+
+func validProviderCredentials(values map[string]string) bool {
+	if len(values) > 16 {
+		return false
+	}
+	for name, value := range values {
+		if name == "" || len(name) > 64 || len(value) > 8192 {
+			return false
+		}
+		for _, char := range name {
+			if !(char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || char == '_') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func validClaim(row *Task, id uint, workerID string, attempt int64, now time.Time) bool {
