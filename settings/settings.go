@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"context"
 	"encoding/json"
 
 	"github.com/JUXON-AI/jxpkg/dbtools"
@@ -104,35 +105,76 @@ func UpsertSetting(v *SettingItem) error {
 }
 
 // Get 获取数据库或者缓存配置项
+// jxlog:nonbusiness 兼容配置读取入口，查询错误交由调用方处理。
 func Get(group, key string) (*SettingItem, error) {
-	ret := &SettingItem{}
-
-	err := dbtools.Core().Table(TableNameSettings).
-		Where("`group` = ? AND `key` = ?", group, key).
-		First(ret).Error
-	if err != nil {
-		return nil, err
-	}
-
-	return ret, nil
+	return getContext(context.Background(), dbtools.Core(), group, key)
 }
 
 // GetValue 获取配置值，如果是加密配置，返回解密后的值
+// jxlog:nonbusiness 兼容配置值读取入口，查询错误交由调用方处理。
 func GetValue(group, key string) (string, error) {
-	si, err := Get(group, key)
+	return getValueContext(context.Background(), dbtools.Core(), group, key)
+}
+
+// GetYamlContext reads one YAML setting while carrying caller cancellation into
+// the GORM query and its connection-pool wait.
+// jxlog:nonbusiness configuration query; its caller owns request logging and error handling.
+func GetYamlContext(ctx context.Context, group, key string, value interface{}) error {
+	if ctx == nil || !dbtools.DBExists("core") {
+		return gorm.ErrInvalidDB
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	db := dbtools.Core()
+	if db == nil {
+		return gorm.ErrInvalidDB
+	}
+	return getYamlContext(ctx, db, group, key, value)
+}
+
+// jxlog:nonbusiness configuration query; errors propagate to GetYamlContext.
+func getYamlContext(ctx context.Context, db *gorm.DB, group, key string, value interface{}) error {
+	text, err := getValueContext(ctx, db, group, key)
+	if err != nil {
+		return err
+	}
+	return yaml.Unmarshal([]byte(text), value)
+}
+
+// GetYaml 获取yaml配置
+// jxlog:nonbusiness 兼容配置解码入口，读取及解码错误交由调用方处理。
+func GetYaml(group, key string, value interface{}) error {
+	return getYamlContext(context.Background(), dbtools.Core(), group, key, value)
+}
+
+// jxlog:nonbusiness configuration query; errors propagate to YAML decoding.
+func getValueContext(ctx context.Context, db *gorm.DB, group, key string) (string, error) {
+	si, err := getContext(ctx, db, group, key)
 	if err != nil {
 		return "", err
 	}
 	return si.Value, nil
 }
 
-// GetYaml 获取yaml配置
-func GetYaml(group, key string, value interface{}) error {
-	text, err := GetValue(group, key)
-	if err != nil {
-		return err
+// jxlog:nonbusiness concrete GORM query owner; errors propagate to compatibility and context entrypoints.
+func getContext(ctx context.Context, db *gorm.DB, group, key string) (*SettingItem, error) {
+	if ctx == nil || db == nil {
+		return nil, gorm.ErrInvalidDB
 	}
-	return yaml.Unmarshal([]byte(text), value)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var (
+		ret = &SettingItem{}
+		err = db.WithContext(ctx).Table(TableNameSettings).
+			Where("`group` = ? AND `key` = ?", group, key).
+			First(ret).Error
+	)
+	if err != nil {
+		return nil, err
+	}
+	return ret, nil
 }
 
 // GetText 获取文本配置

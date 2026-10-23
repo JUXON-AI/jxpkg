@@ -37,8 +37,11 @@ func TestAcquireDefaultProtocol(t *testing.T) {
 				if r.URL.Path != DefaultPath || r.Method != "POST" || r.Header.Get("Authorization") != "" {
 					t.Fatal("unexpected credential request")
 				}
-				body, _ := io.ReadAll(r.Body)
-				if string(body) != `{"company_id":2,"uin":3}` {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(body) != `{"organization_id":"org-2","user_id":"user-3"}` {
 					t.Fatalf("subject: %s", body)
 				}
 				return &http.Response{StatusCode: tc.status, Header: http.Header{"Content-Type": []string{tc.media}}, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
@@ -46,7 +49,7 @@ func TestAcquireDefaultProtocol(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			connection, err := client.AcquireDefault(context.Background(), Subject{CompanyID: 2, UIN: 3})
+			connection, err := client.AcquireDefault(context.Background(), Subject{OrganizationID: "org-2", UserID: "user-3"})
 			if !errors.Is(err, tc.want) || calls != 1 {
 				t.Fatalf("calls=%d err=%v", calls, err)
 			}
@@ -67,7 +70,7 @@ func TestAcquirePreservesExistingRequestID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = c.AcquireDefault(requestid.WithContext(context.Background(), "original-request"), Subject{CompanyID: 2, UIN: 3})
+	_, err = c.AcquireDefault(requestid.WithContext(context.Background(), "original-request"), Subject{OrganizationID: "org-2", UserID: "user-3"})
 	if !errors.Is(err, ErrDenied) {
 		t.Fatal(err)
 	}
@@ -89,7 +92,7 @@ func TestInvalidInputAndCancellationDoNotCallTransport(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err = c.AcquireDefault(ctx, Subject{CompanyID: 2, UIN: 3}); !errors.Is(err, context.Canceled) {
+	if _, err = c.AcquireDefault(ctx, Subject{OrganizationID: "org-2", UserID: "user-3"}); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 }
@@ -103,7 +106,7 @@ func TestRedirectDoesNotLeakSubject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = c.AcquireDefault(context.Background(), Subject{CompanyID: 2, UIN: 3}); !errors.Is(err, ErrUnavailable) || calls != 1 {
+	if _, err = c.AcquireDefault(context.Background(), Subject{OrganizationID: "org-2", UserID: "user-3"}); !errors.Is(err, ErrUnavailable) || calls != 1 {
 		t.Fatalf("calls=%d err=%v", calls, err)
 	}
 }

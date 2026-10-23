@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/JUXON-AI/jxpkg/dbtools"
+	"github.com/JUXON-AI/jxpkg/identity"
 	"github.com/JUXON-AI/jxpkg/logs"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -39,30 +40,11 @@ func InitTaskDBStauts() {
 	}
 }
 
-// readyTaskJoin computes the first unfinished step once per group. The former
-// correlated NOT EXISTS rescanned the task table for every pending candidate
-// without an appropriate deployment index. This is the same dependency rule,
-// including negative steps and exhausted failures, with one grouped scan.
-//
-// # Why the inner scan steers away from one index
-//
-// The deployment's `idx_core_task_dependency (subject_id, app_group, step, deleted_at,
-// task_status)` is the one shape that answers this subquery in a single pass: its leading
-// columns satisfy the GROUP BY and the MIN(step) in index order, and its trailing ones
-// carry the filter, so the whole thing is a covering scan with neither a temporary table
-// nor a sort. The optimizer does not pick it on its own -- it prefers the single-column
-// `deleted_at` index, which reaches the same rows but costs a row lookup each and then
-// sorts them (EXPLAIN: "Using index condition; Using where; Using temporary; Using
-// filesort", 13.4k rows on a 29.7k-row table). Naming that index as one to ignore is what
-// moves the plan.
-//
-// IGNORE and not FORCE, and that is the safety half of the choice. FORCE INDEX fails with
-// error 1176 on a deployment where schema/20260929-task-throughput.sql has not been
-// applied, which would stop every claim on the platform instead of making it slow. What
-// this ignores is the index the plan without the hint already uses, so a deployment where
-// that one is absent was not using it either: the blast radius of this line is a plan
-// choice, never a refusal.
-const readyTaskJoin = "JOIN (SELECT subject_id, app_group, MIN(step) AS ready_step FROM core_task IGNORE INDEX (idx_core_task_deleted_at) WHERE deleted_at IS NULL AND task_status NOT IN ('cancel', 'success') GROUP BY subject_id, app_group) ready ON ready.subject_id = core_task.subject_id AND ready.app_group = core_task.app_group AND ready.ready_step = core_task.step"
+// readyTaskJoin chooses the first unfinished step within a member's business
+// resource group. Resource numbers and application groups can coincide across
+// members; neither is an authentication identity. task.InitDB installs the
+// matching covering index through the application's explicit migration path.
+const readyTaskJoin = "JOIN (SELECT organization_id, user_id, subject_id, app_group, MIN(step) AS ready_step FROM core_task WHERE deleted_at IS NULL AND task_status NOT IN ('cancel', 'success') GROUP BY organization_id, user_id, subject_id, app_group) ready ON ready.organization_id = core_task.organization_id AND ready.user_id = core_task.user_id AND ready.subject_id = core_task.subject_id AND ready.app_group = core_task.app_group AND ready.ready_step = core_task.step"
 
 // GetOnePendingTask 获取一个待处理的任务并标记为 Running
 func GetOnePendingTask(task_type, worker_id string) (*Task, error) {
@@ -129,10 +111,13 @@ func claimCandidate(ctx context.Context, db *gorm.DB, id uint, taskType, workerI
 	}
 	// This is the short transaction's first consistent read. Recheck dependencies
 	// after locking: the unlocked candidate list may already be stale.
+	if err := (identity.Member{OrganizationID: tsk.OrganizationID, UserID: tsk.UserID}).Validate(); err != nil {
+		return nil, fmt.Errorf("stored task member: %w", err)
+	}
 	if !independentTaskType(taskType) {
 		var blocker struct{ ID uint }
 		dependency := tx.Model(&Task{}).Select("id").
-			Where("subject_id = ? AND app_group = ? AND step < ?", tsk.SubjectID, tsk.AppGroup, tsk.Step).
+			Where("organization_id = ? AND user_id = ? AND subject_id = ? AND app_group = ? AND step < ?", tsk.OrganizationID, tsk.UserID, tsk.SubjectID, tsk.AppGroup, tsk.Step).
 			Where("task_status NOT IN ?", []TaskStatus{TaskStatusCancel, TaskStatusSuccess}).Limit(1).Find(&blocker)
 		if dependency.Error != nil {
 			return nil, dependency.Error
@@ -323,6 +308,9 @@ func validateNewTask(tsk *Task) error {
 	if tsk.SubjectID == 0 {
 		return errors.New("subject_id cannot be zero")
 	}
+	if (identity.Member{OrganizationID: tsk.OrganizationID, UserID: tsk.UserID}).Validate() != nil {
+		return errors.New("organization_id and user_id must identify a valid member")
+	}
 	if tsk.TaskType == "" {
 		return errors.New("task_type cannot be empty")
 	}
@@ -410,15 +398,21 @@ func GetNextStepTask(tsk *Task) ([]*Task, error) {
 }
 
 func nextStepTasks(ctx context.Context, db *gorm.DB, tsk *Task) ([]*Task, error) {
+	if tsk == nil {
+		return nil, identity.ErrInvalidMember
+	}
+	if err := (identity.Member{OrganizationID: tsk.OrganizationID, UserID: tsk.UserID}).Validate(); err != nil {
+		return nil, err
+	}
 	if independentTaskType(tsk.TaskType) && tsk.Step == 0 {
 		return nil, nil
 	}
 	var tasks []*Task
 	err := db.WithContext(ctx).Model(&Task{}).Select("id", "task_type", "step").
-		Where("subject_id = ? AND app_group = ? AND step > ?", tsk.SubjectID, tsk.AppGroup, tsk.Step).
+		Where("organization_id = ? AND user_id = ? AND subject_id = ? AND app_group = ? AND step > ?", tsk.OrganizationID, tsk.UserID, tsk.SubjectID, tsk.AppGroup, tsk.Step).
 		Where("task_status IN ?", []TaskStatus{TaskStatusPending, TaskStatusFail}).
 		Where("redo >= 0 AND redo < 2147483647 AND redo <= task_config_redo").
-		Where("NOT EXISTS (SELECT 1 FROM core_task t2 WHERE t2.subject_id = core_task.subject_id AND t2.app_group = core_task.app_group AND t2.step < core_task.step AND t2.deleted_at IS NULL AND t2.task_status NOT IN (?, ?))", TaskStatusCancel, TaskStatusSuccess).
+		Where("NOT EXISTS (SELECT 1 FROM core_task t2 WHERE t2.organization_id = core_task.organization_id AND t2.user_id = core_task.user_id AND t2.subject_id = core_task.subject_id AND t2.app_group = core_task.app_group AND t2.step < core_task.step AND t2.deleted_at IS NULL AND t2.task_status NOT IN (?, ?))", TaskStatusCancel, TaskStatusSuccess).
 		Order("step ASC, id ASC").Find(&tasks).Error
 	if err != nil {
 		return nil, fmt.Errorf("read unblocked task steps: %w", err)

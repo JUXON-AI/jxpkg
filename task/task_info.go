@@ -27,11 +27,11 @@ const TableNameCoreTask = "core_task"
 type Task struct {
 	gorm.Model
 
-	// CompanyID 表示任务所属的公司 ID。
-	CompanyID uint `gorm:"column:company_id;type:bigint unsigned;not null;default:0;index:idx_core_task_company_uin,priority:1;comment:任务所属公司ID" json:"company_id"`
+	// OrganizationID 与 UserID 共同标识任务的额度归属，由创建任务的业务保存。
+	OrganizationID string `gorm:"column:organization_id;type:varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;not null;index:idx_core_task_member,priority:1;comment:任务所属组织" json:"organization_id"`
 
-	// UIN 表示任务所属的账户身份 ID。
-	UIN uint `gorm:"column:uin;type:bigint unsigned;not null;default:0;index:idx_core_task_company_uin,priority:2;comment:任务所属账户身份ID" json:"uin"`
+	// UserID 保留 Logto 全局用户 ID；Worker 不得从回调请求覆盖该字段。
+	UserID string `gorm:"column:user_id;type:varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;not null;index:idx_core_task_member,priority:2;comment:任务所属用户" json:"user_id"`
 	// SubjectID 主体ID
 	SubjectID uint `gorm:"type:int;column:subject_id;not null;comment:subject id" json:"subject_id"`
 	// Step 步骤
@@ -78,7 +78,11 @@ func (Task) TableName() string {
 // TaskList 是任务列表。
 type TaskList []Task
 
-// InitDB 初始化任务表。
+// InitDB 初始化任务表及其显式迁移索引。
 func InitDB() error {
-	return dbtools.InitModel(dbtools.Core(), &Task{})
+	db := dbtools.Core()
+	if err := dbtools.InitModel(db, &Task{}); err != nil {
+		return err
+	}
+	return ensureTaskIndexes(db)
 }

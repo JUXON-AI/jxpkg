@@ -2,9 +2,9 @@ package middleware
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/JUXON-AI/jxpkg/apis/runtime"
+	"github.com/JUXON-AI/jxpkg/apis/runtime/logtobff"
 	"github.com/JUXON-AI/jxpkg/credits"
 	"github.com/JUXON-AI/jxpkg/requestid"
 	"github.com/gin-gonic/gin"
@@ -18,11 +18,12 @@ func BindCreditsExecution(client *credits.Client) gin.HandlerFunc {
 			ctx.AbortWithStatus(http.StatusServiceUnavailable)
 			return
 		}
-		if runtime.UserID(ctx) == 0 || runtime.CompanyID(ctx) == 0 || runtime.UIN(ctx) == 0 || runtime.MembershipEpoch(ctx) == 0 || runtime.BrowserSessionExpiresAt(ctx) <= time.Now().Unix() {
+		principal, ok := logtobff.FromContext(ctx.Request.Context())
+		if !ok {
 			ctx.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
-		e, err := credits.NewExecution(credits.Subject{CompanyID: runtime.CompanyID(ctx), UIN: runtime.UIN(ctx)}, client.AcquireDefault)
+		e, err := credits.NewExecution(credits.Subject{OrganizationID: principal.OrganizationID, UserID: principal.UserID}, client.AcquireDefault)
 		if err != nil {
 			ctx.AbortWithStatus(http.StatusUnauthorized)
 			return

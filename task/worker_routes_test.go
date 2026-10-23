@@ -22,7 +22,7 @@ import (
 func TestClaimRejectsOldAttemptOtherWorkerAndTerminalTasks(t *testing.T) {
 	now := time.Now()
 	start := now.Add(-time.Minute)
-	base := Task{Model: gorm.Model{ID: 7}, CompanyID: 2, UIN: 3, Redo: 2, WorkerID: "worker-1", StartAt: &start, TaskStatus: TaskStatusRunning, TaskConfigTimeout: 2 * time.Minute}
+	base := Task{Model: gorm.Model{ID: 7}, OrganizationID: "org-2", UserID: "user-3", Redo: 2, WorkerID: "worker-1", StartAt: &start, TaskStatus: TaskStatusRunning, TaskConfigTimeout: 2 * time.Minute}
 	if !validClaim(&base, 7, "worker-1", 3, now) {
 		t.Fatal("valid claim rejected")
 	}
@@ -38,7 +38,7 @@ func TestClaimRejectsOldAttemptOtherWorkerAndTerminalTasks(t *testing.T) {
 		{"other_task", func(*Task) {}, 8, "worker-1", 3},
 		{"cancelled", func(t *Task) { t.TaskStatus = TaskStatusCancel }, 7, "worker-1", 3},
 		{"expired", func(t *Task) { t.TaskConfigTimeout = time.Second }, 7, "worker-1", 3},
-		{"no_employee", func(t *Task) { t.UIN = 0 }, 7, "worker-1", 3},
+		{"no_employee", func(t *Task) { t.UserID = "" }, 7, "worker-1", 3},
 		{"new_claim", func(t *Task) { t.Redo++ }, 7, "worker-1", 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -77,10 +77,10 @@ func TestWorkerRoutesValidateConfigAndGuardEveryAction(t *testing.T) {
 }
 
 func TestWorkerConnectionUsesAuthoritativeClaimAndRechecksAfterAcquisition(t *testing.T) {
-	for _, name := range []string{"valid", "old_attempt", "cancelled_before", "cancelled_after", "new_claim", "changed_start", "changed_employee", "lookup_failure", "denied", "unavailable"} {
+	for _, name := range []string{"valid", "old_attempt", "cancelled_before", "cancelled_after", "new_claim", "changed_start", "changed_employee", "changed_organization", "lookup_failure", "denied", "unavailable"} {
 		t.Run(name, func(t *testing.T) {
 			start := time.Now().Add(-time.Second)
-			row := Task{Model: gorm.Model{ID: 7}, CompanyID: 2, UIN: 3, TaskType: "queue", Redo: 2, WorkerID: "worker-1", StartAt: &start, TaskStatus: TaskStatusRunning, TaskConfigTimeout: time.Minute}
+			row := Task{Model: gorm.Model{ID: 7}, OrganizationID: "org-2", UserID: "user-3", TaskType: "queue", Redo: 2, WorkerID: "worker-1", StartAt: &start, TaskStatus: TaskStatusRunning, TaskConfigTimeout: time.Minute}
 			if name == "cancelled_before" {
 				row.TaskStatus = TaskStatusCancel
 			}
@@ -101,7 +101,9 @@ func TestWorkerConnectionUsesAuthoritativeClaimAndRechecksAfterAcquisition(t *te
 						newer := start.Add(time.Second)
 						latest.StartAt = &newer
 					case "changed_employee":
-						latest.UIN++
+						latest.UserID = "user-other"
+					case "changed_organization":
+						latest.OrganizationID = "org-other"
 					case "lookup_failure":
 						return nil, errors.New("database private failure")
 					}
@@ -110,7 +112,7 @@ func TestWorkerConnectionUsesAuthoritativeClaimAndRechecksAfterAcquisition(t *te
 			}
 			acquire := func(_ context.Context, subject credits.Subject) (credits.Connection, error) {
 				acquisitions++
-				if subject != (credits.Subject{CompanyID: 2, UIN: 3}) {
+				if subject != (credits.Subject{OrganizationID: "org-2", UserID: "user-3"}) {
 					t.Fatal("request overrode task employee")
 				}
 				if name == "denied" {
@@ -127,7 +129,7 @@ func TestWorkerConnectionUsesAuthoritativeClaimAndRechecksAfterAcquisition(t *te
 			if name == "old_attempt" {
 				attempt = "2"
 			}
-			r := httptest.NewRequest("POST", "/task", strings.NewReader(`{"request":{"task_id":7,"worker_id":"worker-1","attempt":`+attempt+`,"company_id":999,"uin":999}}`))
+			r := httptest.NewRequest("POST", "/task", strings.NewReader(`{"request":{"task_id":7,"worker_id":"worker-1","attempt":`+attempt+`,"company_id":999,"uin":999,"organization_id":"forged-org","user_id":"forged-user"}}`))
 			r.Header.Set("Authorization", "Bearer "+strings.Repeat("x", 32))
 			bindTestWorkerTLS(r)
 			w := httptest.NewRecorder()
@@ -164,7 +166,9 @@ func TestTaskExecutionIsLazyAndSharesGinAndRequestContext(t *testing.T) {
 	for _, use := range []bool{false, true} {
 		calls := 0
 		engine := gin.New()
-		engine.POST("/callback", func(ctx *gin.Context) { ctx.Set(workerTaskContextKey, &Task{CompanyID: 2, UIN: 3}) }, bindTaskExecution(func(context.Context, credits.Subject) (credits.Connection, error) {
+		engine.POST("/callback", func(ctx *gin.Context) {
+			ctx.Set(workerTaskContextKey, &Task{OrganizationID: "org-2", UserID: "user-3"})
+		}, bindTaskExecution(func(context.Context, credits.Subject) (credits.Connection, error) {
 			calls++
 			return credits.Connection{BaseURL: "https://models.example.com/v1", APIKey: "employee-default"}, nil
 		}), func(ctx *gin.Context) {

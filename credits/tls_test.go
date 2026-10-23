@@ -68,7 +68,7 @@ func TestClientAuthenticatesWithCertificateAndTrustsConfiguredServerCA(t *testin
 		t.Fatal(err)
 	}
 	defer c.Close()
-	connection, err := c.AcquireDefault(context.Background(), Subject{CompanyID: 2, UIN: 3})
+	connection, err := c.AcquireDefault(context.Background(), Subject{OrganizationID: "org-2", UserID: "user-3"})
 	if err != nil || connection.APIKey != "employee-default" {
 		t.Fatal("mTLS connection failed")
 	}

@@ -2,11 +2,12 @@ package task
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/JUXON-AI/jxpkg/apis/apiobj"
-	"github.com/JUXON-AI/jxpkg/logs"
+	"github.com/JUXON-AI/jxpkg/identity"
 	"gorm.io/gorm"
 )
 
@@ -39,61 +40,76 @@ func (dao *TaskDao) WithTx(db *gorm.DB) *TaskDao {
 
 func (dao *TaskDao) Insert(ctx context.Context, entity *Task) error {
 	if entity == nil {
-		return fmt.Errorf("[TaskDao] Insert fail, entity is nil")
+		return errors.New("task entity is required")
+	}
+	if err := validateNewTask(entity); err != nil {
+		return fmt.Errorf("[TaskDao] Insert fail: %w", err)
 	}
 	db := dao.DB(ctx).Table(dao.TableName())
 	if err := db.Create(entity).Error; err != nil {
-		return fmt.Errorf("[TaskDao] Insert fail, entity:%s, err: %v", logs.JSON(entity), err)
+		return fmt.Errorf("insert task: %w", err)
 	}
 	return nil
 }
 
 func (dao *TaskDao) BatchInsert(ctx context.Context, entityList TaskList) error {
 	if len(entityList) == 0 {
-		return fmt.Errorf("[TaskDao] BatchInsert fail, entityList is empty")
+		return errors.New("task batch is required")
+	}
+	for index := range entityList {
+		if err := validateNewTask(&entityList[index]); err != nil {
+			return fmt.Errorf("[TaskDao] BatchInsert fail, entityList[%d]: %w", index, err)
+		}
 	}
 
 	db := dao.DB(ctx).Table(dao.TableName())
 	if err := db.Create(entityList).Error; err != nil {
-		return fmt.Errorf("[TaskDao] BatchInsert fail, entityList:%s, err: %v", logs.JSON(entityList), err)
+		return fmt.Errorf("insert task batch: %w", err)
 	}
 	return nil
 }
 
-func (dao *TaskDao) UpdateByID(ctx context.Context, companyID, uin, id uint, entity *Task) error {
-	db := dao.DB(ctx).Table(dao.TableName())
-	if err := db.Where("company_id = ? AND uin = ? AND id = ?", companyID, uin, id).Updates(entity).Error; err != nil {
-		return fmt.Errorf("[TaskDao] UpdateByID fail, id:%d, entity:%s: %w", id, logs.JSON(entity), err)
+func (dao *TaskDao) UpdateByID(ctx context.Context, organizationID, userID string, id uint, entity *Task) error {
+	db := taskMemberQuery(dao.DB(ctx).Table(dao.TableName()), organizationID, userID).Where("id = ?", id)
+	if err := db.Omit("id", "organization_id", "user_id").Updates(entity).Error; err != nil {
+		return fmt.Errorf("update task %d: %w", id, err)
 	}
 	return nil
 }
 
-func (dao *TaskDao) UpdateMap(ctx context.Context, companyID, uin, id uint, updateMap map[string]interface{}) error {
-	db := dao.DB(ctx).Table(dao.TableName())
-	if err := db.Where("company_id = ? AND uin = ? AND id = ?", companyID, uin, id).Updates(updateMap).Error; err != nil {
-		return fmt.Errorf("[TaskDao] UpdateMap fail, id:%d, updateMap:%s: %w", id, logs.JSON(updateMap), err)
+func (dao *TaskDao) UpdateMap(ctx context.Context, organizationID, userID string, id uint, updateMap map[string]interface{}) error {
+	db := taskMemberQuery(dao.DB(ctx).Table(dao.TableName()), organizationID, userID).Where("id = ?", id)
+	if err := db.Omit("id", "organization_id", "user_id").Updates(updateMap).Error; err != nil {
+		return fmt.Errorf("update task fields %d: %w", id, err)
 	}
 	return nil
 }
 
-func (dao *TaskDao) Delete(ctx context.Context, companyID, uin, id uint) error {
-	db := dao.DB(ctx).Table(dao.TableName())
+func (dao *TaskDao) Delete(ctx context.Context, organizationID, userID string, id uint) error {
+	db := taskMemberQuery(dao.DB(ctx).Table(dao.TableName()), organizationID, userID).Where("id = ?", id)
 	updatedField := map[string]interface{}{
 		"deleted_at": time.Now(),
 	}
-	if err := db.Where("company_id = ? AND uin = ? AND id = ?", companyID, uin, id).Updates(updatedField).Error; err != nil {
+	if err := db.Updates(updatedField).Error; err != nil {
 		return fmt.Errorf("[TaskDao] Delete fail, id:%d: %w", id, err)
 	}
 	return nil
 }
 
-func (dao *TaskDao) GetByID(ctx context.Context, companyID, uin, id uint) (*Task, error) {
+func (dao *TaskDao) GetByID(ctx context.Context, organizationID, userID string, id uint) (*Task, error) {
 	var entity Task
-	db := dao.DB(ctx).Table(dao.TableName())
-	if err := db.Where("company_id = ? AND uin = ? AND id = ?", companyID, uin, id).First(&entity).Error; err != nil {
+	db := taskMemberQuery(dao.DB(ctx).Table(dao.TableName()), organizationID, userID).Where("id = ?", id)
+	if err := db.First(&entity).Error; err != nil {
 		return nil, fmt.Errorf("[TaskDao] GetByID fail, id:%d: %w", id, err)
 	}
 	return &entity, nil
+}
+
+func taskMemberQuery(db *gorm.DB, organizationID, userID string) *gorm.DB {
+	if (identity.Member{OrganizationID: organizationID, UserID: userID}).Validate() != nil {
+		return db.Where("1 = 0")
+	}
+	return db.Where("organization_id = ? AND user_id = ?", organizationID, userID)
 }
 
 func (dao *TaskDao) GetByCond(ctx context.Context, cond *TaskCond) (*Task, error) {
@@ -103,7 +119,7 @@ func (dao *TaskDao) GetByCond(ctx context.Context, cond *TaskCond) (*Task, error
 	db = dao.BuildCondition(db, cond)
 
 	if err := db.Find(&entity).Error; err != nil {
-		return nil, fmt.Errorf("[TaskDao] GetByCond fail, cond:%s, err: %v", logs.JSON(cond), err)
+		return nil, fmt.Errorf("find task: %w", err)
 	}
 	return &entity, nil
 }
@@ -115,7 +131,7 @@ func (dao *TaskDao) GetListByCond(ctx context.Context, cond *TaskCond) (TaskList
 	db = dao.BuildCondition(db, cond)
 
 	if err := db.Find(&entityList).Error; err != nil {
-		return nil, fmt.Errorf("[TaskDao] GetListByCond fail, cond:%s, err: %v", logs.JSON(cond), err)
+		return nil, fmt.Errorf("list tasks: %w", err)
 	}
 	return entityList, nil
 }
@@ -127,7 +143,7 @@ func (dao *TaskDao) GetPageListByCond(ctx context.Context, cond *TaskCond) (Task
 
 	var count int64
 	if err := db.Count(&count).Error; err != nil {
-		return nil, 0, fmt.Errorf("[TaskDao] GetPageListByCond count fail, cond:%s, err: %v", logs.JSON(cond), err)
+		return nil, 0, fmt.Errorf("count task page: %w", err)
 	}
 	if cond.Limit > 0 {
 		db = db.Limit(cond.Limit)
@@ -137,7 +153,7 @@ func (dao *TaskDao) GetPageListByCond(ctx context.Context, cond *TaskCond) (Task
 	}
 	var entityList TaskList
 	if err := db.Find(&entityList).Error; err != nil {
-		return nil, 0, fmt.Errorf("[TaskDao] GetPageListByCond find fail, cond:%s, err: %v", logs.JSON(cond), err)
+		return nil, 0, fmt.Errorf("list task page: %w", err)
 	}
 	return entityList, count, nil
 }
@@ -148,7 +164,7 @@ func (dao *TaskDao) CountByCond(ctx context.Context, cond *TaskCond) (int64, err
 	db = dao.BuildCondition(db, cond)
 	var count int64
 	if err := db.Count(&count).Error; err != nil {
-		return 0, fmt.Errorf("[TaskDao] CountByCond fail, cond:%s, err: %v", logs.JSON(cond), err)
+		return 0, fmt.Errorf("count tasks: %w", err)
 	}
 	return count, nil
 }
@@ -160,7 +176,7 @@ func (dao *TaskDao) AvgCostTimeByCond(ctx context.Context, cond *TaskCond) (floa
 
 	var avgCost float64
 	if err := db.Select("COALESCE(AVG(cost), 0)").Scan(&avgCost).Error; err != nil {
-		return 0, fmt.Errorf("[TaskDao] AvgCostTimeByCond fail, cond:%s, err: %v", logs.JSON(cond), err)
+		return 0, fmt.Errorf("average task cost: %w", err)
 	}
 	return avgCost, nil
 }

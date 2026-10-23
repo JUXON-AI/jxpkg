@@ -4,11 +4,11 @@ package credits
 import (
 	"errors"
 	"strings"
-	"time"
 
 	"github.com/JUXON-AI/jxpkg/apis/apiobj"
 	"github.com/JUXON-AI/jxpkg/apis/errcode"
 	"github.com/JUXON-AI/jxpkg/apis/runtime"
+	"github.com/JUXON-AI/jxpkg/apis/runtime/logtobff"
 	"github.com/JUXON-AI/jxpkg/apis/runtime/server"
 	clientcredits "github.com/JUXON-AI/jxpkg/credits"
 	"github.com/JUXON-AI/jxpkg/logs"
@@ -36,19 +36,19 @@ type GetMyModelBalanceResponse struct {
 type BrowserBalance struct {
 	// Balance 是原始 wallet 快照。
 	clientcredits.Balance
-	// CompanyID 来自当前已验证 Session，不来自请求。
-	CompanyID uint `json:"company_id"`
-	// UIN 来自当前已验证 Session，不来自请求。
-	UIN uint `json:"uin"`
+	// OrganizationID 来自当前已验证 Session，不来自请求。
+	OrganizationID string `json:"organization_id"`
+	// UserID 来自当前已验证 Session，不来自请求。
+	UserID string `json:"user_id"`
 }
 
 // RegisterBrowserBalance 在业务域注册 Session/组织校验/CSRF 保护的余额接口。
 // 该协议供 JXX 与后续应用共用，避免每个业务重复身份提取及错误映射。
-func RegisterBrowserBalance(router *server.Router, service string, client *clientcredits.Client) error {
-	if router == nil || client == nil || service == "" || len(service) > 64 || strings.Trim(service, "abcdefghijklmnopqrstuvwxyz0123456789_") != "" {
+func RegisterBrowserBalance(router *server.Router, service string, client *clientcredits.Client, bff *logtobff.Runtime) error {
+	if router == nil || client == nil || bff == nil || service == "" || len(service) > 64 || strings.Trim(service, "abcdefghijklmnopqrstuvwxyz0123456789_") != "" {
 		return clientcredits.ErrUnavailable
 	}
-	router.PRequireAuthorizedBrowserSession(service+".GetMyModelBalance", nil, balanceHandler(client))
+	router.Post(service+".GetMyModelBalance", bff.Require(), balanceHandler(client))
 	return nil
 }
 
@@ -56,12 +56,13 @@ func balanceHandler(client *clientcredits.Client) func(*gin.Context, *GetMyModel
 	return func(ctx *gin.Context, _ *GetMyModelBalanceRequest, resp *GetMyModelBalanceResponse) {
 		ctx.Header("Cache-Control", "no-store")
 		ctx.Header("Pragma", "no-cache")
-		if runtime.UserID(ctx) == 0 || runtime.CompanyID(ctx) == 0 || runtime.UIN(ctx) == 0 || runtime.MembershipEpoch(ctx) == 0 || runtime.BrowserSessionExpiresAt(ctx) <= time.Now().Unix() {
+		principal, ok := logtobff.FromContext(ctx.Request.Context())
+		if !ok {
 			resp.Code, resp.Message = errcode.ErrCode_NoPermission, "当前身份不可查询额度"
 			return
 		}
 		base := requestid.WithContext(ctx.Request.Context(), runtime.RequestID(ctx))
-		balance, err := client.GetBalance(base, clientcredits.Subject{CompanyID: runtime.CompanyID(ctx), UIN: runtime.UIN(ctx)})
+		balance, err := client.GetBalance(base, clientcredits.Subject{OrganizationID: principal.OrganizationID, UserID: principal.UserID})
 		if err != nil {
 			resp.Code, resp.Message = errcode.ErrCode_ServiceUnavailable, "额度服务暂时不可用"
 			if errors.Is(err, clientcredits.ErrDenied) {
@@ -70,6 +71,6 @@ func balanceHandler(client *clientcredits.Client) func(*gin.Context, *GetMyModel
 			logs.WarnContextw(base, "credits.browser.balance.failed", "code", resp.Code)
 			return
 		}
-		resp.Response = BrowserBalance{Balance: balance, CompanyID: runtime.CompanyID(ctx), UIN: runtime.UIN(ctx)}
+		resp.Response = BrowserBalance{Balance: balance, OrganizationID: principal.OrganizationID, UserID: principal.UserID}
 	}
 }

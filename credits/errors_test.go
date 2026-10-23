@@ -27,7 +27,7 @@ func TestClientAndExecutionRetainSafeErrorChains(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		subject := Subject{CompanyID: 1, UIN: 2}
+		subject := Subject{OrganizationID: "org-1", UserID: "user-2"}
 		execution, err := NewExecution(subject, client.AcquireDefault)
 		if err != nil {
 			t.Fatal(err)

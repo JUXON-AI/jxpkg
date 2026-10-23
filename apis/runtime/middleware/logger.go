@@ -34,7 +34,7 @@ func Logger(whitelist ...string) gin.HandlerFunc {
 		if ctx.Writer.Status() >= 500 {
 			logs.LoggerFromContext(ctx).Errorw(fmt.Sprint(ctx.Writer.Status()),
 				"method", ctx.Request.Method,
-				"uri", ctx.Request.RequestURI,
+				"uri", ctx.Request.URL.Path,
 				"latency", fmt.Sprintf("%.3f", cost.Seconds()),
 				"clientip", grt.GetRealIP(ctx.Request),
 			)
@@ -42,7 +42,7 @@ func Logger(whitelist ...string) gin.HandlerFunc {
 			code := ctx.GetInt(constants.CtxKeyCode)
 			logs.LoggerFromContext(ctx).Infow(fmt.Sprint(code),
 				"method", ctx.Request.Method,
-				"uri", ctx.Request.RequestURI,
+				"uri", ctx.Request.URL.Path,
 				"latency", fmt.Sprintf("%.3f", cost.Seconds()),
 				"clientip", grt.GetRealIP(ctx.Request),
 			)

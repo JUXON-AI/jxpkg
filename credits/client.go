@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/JUXON-AI/jxpkg/identity"
 	"github.com/JUXON-AI/jxpkg/requestid"
 	"github.com/JUXON-AI/jxpkg/safeerror"
 )
@@ -36,13 +37,8 @@ func unavailableCause(cause error) error {
 	return safeerror.Wrap(ErrUnavailable.Error(), errors.Join(ErrUnavailable, cause))
 }
 
-// Subject 来自调用服务已验证的身份或权威任务记录。
-type Subject struct {
-	// CompanyID 是员工所属公司。
-	CompanyID uint `json:"company_id"`
-	// UIN 是员工的公司身份；服务端核对已有账户关联。
-	UIN uint `json:"uin"`
-}
+// Subject 是额度工作负载协议中的组织成员；调用方仍须验证其当前准入资格。
+type Subject = identity.Member
 
 // Connection 是只在本次执行内使用的模型凭证。
 type Connection struct {
@@ -134,7 +130,10 @@ func (c *Client) AcquireDefault(ctx context.Context, subject Subject) (Connectio
 }
 
 func (c *Client) call(ctx context.Context, subject Subject, path string, result any) error {
-	if c == nil || ctx == nil || subject.CompanyID == 0 || subject.UIN == 0 {
+	if c == nil || ctx == nil {
+		return ErrDenied
+	}
+	if err := subject.Validate(); err != nil {
 		return ErrDenied
 	}
 	if err := ctx.Err(); err != nil {
