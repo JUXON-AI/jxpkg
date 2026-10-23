@@ -8,7 +8,8 @@
 // HTTPS origin. It does not read environment or database configuration, and
 // constructing a client has no network or startup side effect.
 //
-// ListPage publishes the provider's bounded one-page listing contract, but the
-// real Logto handler and end-to-end provider interop are still pending. Its
-// tests use an httptest provider contract and are not evidence of a live API.
+// ListPage implements the provider's bounded one-page listing contract. The
+// caller must deploy a compatible provider and enable allowMemberListing in
+// its workload registry. Local provider/database interoperability tests do not
+// imply that listing is enabled in a particular deployment.
 package logtodirectory

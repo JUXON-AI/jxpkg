@@ -123,7 +123,7 @@ snapshot, err := client.Snapshot(ctx, organizationID, userIDs, logtodirectory.Op
 
 `Snapshot` 不缓存成员、角色、资料或部门，只缓存有界 M2M access token；默认超时 10 秒，显式范围 1..30 秒。`Options.IncludeMembershipEpoch` 要求每个成员返回 canonical 正整数 decimal string，SDK 不把 epoch 解码为浮点数。错误通过 `ErrDenied`、`ErrUnavailable`、`ErrProtocol` 分类；调用方仍可用 `errors.Is` 检查 context cancellation。响应正文、token、Client Secret 和配置不会被写入错误。
 
-`ListPage` 发布同一 snapshot path 上的单页列出契约，但真实 Logto handler 和 SDK/provider 联调尚未完成；当前只有 `httptest` mock provider contract tests，不能宣称已经上线或用于生产。它不提供 capability flag、`allowMemberListing` 覆盖或跨页聚合，调用方必须等 provider handler 联合审阅完成后再接入。
+`ListPage` 使用同一 snapshot path 的单页列出契约；SDK 与配套 Logto handler 已通过本地 HTTPS、数据库联合测试及独立复审。使用前仍须部署配套 provider，并在 provider registry 为该 workload 显式启用 `allowMemberListing`；省略时禁止列出。SDK 不提供 capability 覆盖或跨页聚合，调用方须自行设置完整性、人数、页数和总时限。
 
 ### `apis/runtime/auth`
 
