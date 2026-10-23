@@ -431,6 +431,6 @@ JXPKG_TEST_S3_REGION
 
 ## 员工余额查询
 
-`credits.Client.GetBalance(ctx, credits.Subject{CompanyID: companyID, UIN: uin})` 复用当前 mTLS 客户端，通过 `/internal/credits/balance` 查询原始 wallet。`credits.Balance` 包含 state、quota、used_quota，不领取 default Key、不保存额度或扣费；缺失、重复或畸形响应失败关闭，pending 不代表零余额。该协议同时由额度服务实现和 JXX 消费。
+`credits.Client.GetBalance(ctx, credits.Subject{OrganizationID: organizationID, UserID: userID})` 复用当前 mTLS 客户端，通过 `/internal/credits/balance` 查询原始 wallet。`credits.Subject` 不接受旧数字公司/UIN 回退，必须同时提供已验证的 Logto 组织与用户主体。`credits.Balance` 包含 state、quota、used_quota，不领取 default Key、不保存额度或扣费；缺失、重复或畸形响应失败关闭，pending 不代表零余额。本分支已定义新的字符串主体协议；额度服务的工作负载入口和 JXX 调用方仍须随迁移升级，旧数字接口不能直接互通。
 
-业务浏览器接口使用 `apis/credits.RegisterBrowserBalance(router, "jxagent", client)` 注册 `jxagent.GetMyModelBalance`。它复用组织校验的 Browser Session 和 CSRF，员工身份只来自当前验证结果；DTO/handler/安全错误映射由 SDK 提供，业务无需转发包装。响应保留原始单位并回传 company_id/uin，浏览器须核对主体，避免其他标签页切换 Session 后的迟到响应污染旧身份缓存。调用方后端显式传 Client，SDK 不读取环境或 coresetting，也不增加 Bearer fallback。
+业务浏览器接口使用 `apis/credits.RegisterBrowserBalance(router, "jxagent", client, bff)` 注册 `jxagent.GetMyModelBalance`。它复用已校验的 Logto Browser Session、当前组织与 CSRF，员工身份只来自当前验证结果；DTO/handler/安全错误映射由 SDK 提供，业务无需转发包装。响应保留原始单位并回传 `organization_id/user_id`，浏览器须核对主体，避免其他标签页切换身份后的迟到响应污染旧缓存。调用方后端显式传 Client 与 BFF，SDK 不读取环境或 coresetting，也不增加 Bearer fallback。

@@ -28,7 +28,7 @@ func TestIndependentProtocolRequiresStepZero(t *testing.T) {
 func TestIndependentCompletionDoesNotQueryDatabase(t *testing.T) {
 	const kind = "test.independent.completion"
 	RegisterIndependentTaskType(kind)
-	rows, err := nextStepTasks(context.Background(), nil, &Task{TaskType: kind})
+	rows, err := nextStepTasks(context.Background(), nil, &Task{OrganizationID: "org-a", UserID: "user-a", TaskType: kind})
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("rows=%d err=%v", len(rows), err)
 	}

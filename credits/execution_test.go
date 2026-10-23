@@ -14,13 +14,13 @@ func TestExecutionConcurrentEmployeesAndExecutionsStayIsolated(t *testing.T) {
 	var calls atomic.Int64
 	acquire := func(_ context.Context, s Subject) (Connection, error) {
 		calls.Add(1)
-		return Connection{BaseURL: "https://models.example.com/v1", APIKey: fmt.Sprintf("employee-%d-%d", s.CompanyID, s.UIN)}, nil
+		return Connection{BaseURL: "https://models.example.com/v1", APIKey: fmt.Sprintf("employee-%s-%s", s.OrganizationID, s.UserID)}, nil
 	}
-	a, err := NewExecution(Subject{CompanyID: 2, UIN: 3}, acquire)
+	a, err := NewExecution(Subject{OrganizationID: "org-2", UserID: "user-3"}, acquire)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := NewExecution(Subject{CompanyID: 2, UIN: 4}, acquire)
+	b, err := NewExecution(Subject{OrganizationID: "org-2", UserID: "user-4"}, acquire)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,9 +29,9 @@ func TestExecutionConcurrentEmployeesAndExecutionsStayIsolated(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			e, want := a, "employee-2-3"
+			e, want := a, "employee-org-2-user-3"
 			if i%2 == 1 {
-				e, want = b, "employee-2-4"
+				e, want = b, "employee-org-2-user-4"
 			}
 			connection, err := ConnectionFromContext(WithExecution(context.Background(), e))
 			if err != nil || connection.APIKey != want {
@@ -55,7 +55,7 @@ func TestExecutionConcurrentEmployeesAndExecutionsStayIsolated(t *testing.T) {
 func TestExecutionFailureNeverReturnsCredentialOrRetries(t *testing.T) {
 	for _, cause := range []error{ErrDenied, errors.New("DO_NOT_LOG_CREDENTIAL"), context.Canceled} {
 		calls := 0
-		e, err := NewExecution(Subject{CompanyID: 2, UIN: 3}, func(context.Context, Subject) (Connection, error) {
+		e, err := NewExecution(Subject{OrganizationID: "org-2", UserID: "user-3"}, func(context.Context, Subject) (Connection, error) {
 			calls++
 			return Connection{APIKey: "DO_NOT_LOG_CREDENTIAL"}, cause
 		})
@@ -76,7 +76,7 @@ func TestExecutionFailureNeverReturnsCredentialOrRetries(t *testing.T) {
 
 func TestExecutionWaitingCallerCanCancel(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
-	e, err := NewExecution(Subject{CompanyID: 2, UIN: 3}, func(context.Context, Subject) (Connection, error) {
+	e, err := NewExecution(Subject{OrganizationID: "org-2", UserID: "user-3"}, func(context.Context, Subject) (Connection, error) {
 		close(started)
 		<-release
 		return Connection{BaseURL: "https://models.example.com/v1", APIKey: "employee-default"}, nil
@@ -110,7 +110,7 @@ func TestExecutionMissingIdentityContextAndPanicFailClosed(t *testing.T) {
 	if _, err := ConnectionFromContext(context.Background()); !errors.Is(err, ErrDenied) {
 		t.Fatal(err)
 	}
-	e, err := NewExecution(Subject{CompanyID: 2, UIN: 3}, func(context.Context, Subject) (Connection, error) { panic("synthetic callback panic") })
+	e, err := NewExecution(Subject{OrganizationID: "org-2", UserID: "user-3"}, func(context.Context, Subject) (Connection, error) { panic("synthetic callback panic") })
 	if err != nil {
 		t.Fatal(err)
 	}

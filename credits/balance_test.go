@@ -43,7 +43,7 @@ func TestBalanceProtocolRejectsIncompleteOrCredentialResponses(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			b, err := c.GetBalance(requestid.WithContext(context.Background(), "balance-request"), Subject{CompanyID: 2, UIN: 3})
+			b, err := c.GetBalance(requestid.WithContext(context.Background(), "balance-request"), Subject{OrganizationID: "org-2", UserID: "user-3"})
 			if !errors.Is(err, tc.want) || calls != 1 {
 				t.Fatalf("calls=%d err=%v", calls, err)
 			}

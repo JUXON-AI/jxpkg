@@ -129,7 +129,7 @@ func bindTaskExecution(acquire credits.AcquireFunc) gin.HandlerFunc {
 			ctx.AbortWithStatus(http.StatusServiceUnavailable)
 			return
 		}
-		e, err := credits.NewExecution(credits.Subject{CompanyID: row.CompanyID, UIN: row.UIN}, acquire)
+		e, err := credits.NewExecution(credits.Subject{OrganizationID: row.OrganizationID, UserID: row.UserID}, acquire)
 		if err != nil {
 			ctx.AbortWithStatus(http.StatusForbidden)
 			return
@@ -214,7 +214,7 @@ func acquireTaskModelConnection(lookup workerTaskLookup) func(*gin.Context, *Acq
 		}
 		// 领取可能等待网络；返回前重读，防止任务已取消、重新领取或变更主体。
 		latest, err := lookup(ctx.Request.Context(), row.ID, row.WorkerID, row.TaskType)
-		if err != nil || !validClaim(latest, row.ID, row.WorkerID, req.Request.Attempt, time.Now()) || !latest.StartAt.Equal(*row.StartAt) || latest.CompanyID != row.CompanyID || latest.UIN != row.UIN {
+		if err != nil || !validClaim(latest, row.ID, row.WorkerID, req.Request.Attempt, time.Now()) || !latest.StartAt.Equal(*row.StartAt) || latest.OrganizationID != row.OrganizationID || latest.UserID != row.UserID {
 			resp.Code = http.StatusForbidden
 			return
 		}
@@ -223,5 +223,5 @@ func acquireTaskModelConnection(lookup workerTaskLookup) func(*gin.Context, *Acq
 }
 
 func validClaim(row *Task, id uint, workerID string, attempt int64, now time.Time) bool {
-	return row != nil && id != 0 && row.ID == id && workerID != "" && row.WorkerID == workerID && attempt > 0 && attempt == int64(row.Redo)+1 && row.TaskStatus == TaskStatusRunning && row.CompanyID != 0 && row.UIN != 0 && row.StartAt != nil && row.TaskConfigTimeout > 0 && now.Before(row.StartAt.Add(row.TaskConfigTimeout))
+	return row != nil && id != 0 && row.ID == id && workerID != "" && row.WorkerID == workerID && attempt > 0 && attempt == int64(row.Redo)+1 && row.TaskStatus == TaskStatusRunning && (credits.Subject{OrganizationID: row.OrganizationID, UserID: row.UserID}).Validate() == nil && row.StartAt != nil && row.TaskConfigTimeout > 0 && now.Before(row.StartAt.Add(row.TaskConfigTimeout))
 }

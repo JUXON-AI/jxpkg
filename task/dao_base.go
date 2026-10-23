@@ -8,6 +8,7 @@ import (
 
 	"github.com/JUXON-AI/jxpkg/apis/apiobj"
 	"github.com/JUXON-AI/jxpkg/dbtools"
+	"github.com/JUXON-AI/jxpkg/identity"
 	"gorm.io/gorm"
 )
 
@@ -45,10 +46,10 @@ type BaseCond struct {
 	IsDelete bool
 	Offset   int
 	Limit    int
-	// CompanyID 按公司 ID 筛选。
-	CompanyID uint
-	// UIN 按账户身份 ID 筛选。
-	UIN         uint
+	// OrganizationID 与 UserID 必须共同限制任务列表，不允许跨组织读取。
+	OrganizationID string
+	// UserID 是已经验证的任务所属用户。
+	UserID      string
 	BeginTime   time.Time
 	EndTime     time.Time
 	OrderBy     []string
@@ -70,7 +71,7 @@ func (m *BaseModel) DB(ctx context.Context) *gorm.DB {
 }
 
 func (m *BaseModel) BuildBaseCondition(db *gorm.DB, tableName string, cond BaseCond) *gorm.DB {
-	if cond.CompanyID == 0 || cond.UIN == 0 {
+	if (identity.Member{OrganizationID: cond.OrganizationID, UserID: cond.UserID}).Validate() != nil {
 		return db.Where("1 = 0")
 	}
 	if cond.ID > 0 {
@@ -81,10 +82,10 @@ func (m *BaseModel) BuildBaseCondition(db *gorm.DB, tableName string, cond BaseC
 		query := fmt.Sprintf("%s.id in ?", tableName)
 		db = db.Where(query, cond.IDs)
 	}
-	query := fmt.Sprintf("%s.company_id = ?", tableName)
-	db = db.Where(query, cond.CompanyID)
-	query = fmt.Sprintf("%s.uin = ?", tableName)
-	db = db.Where(query, cond.UIN)
+	query := fmt.Sprintf("%s.organization_id = ?", tableName)
+	db = db.Where(query, cond.OrganizationID)
+	query = fmt.Sprintf("%s.user_id = ?", tableName)
+	db = db.Where(query, cond.UserID)
 	if !cond.BeginTime.IsZero() {
 		query := fmt.Sprintf("%s.created_at >= ?", tableName)
 		db = db.Where(query, cond.BeginTime)

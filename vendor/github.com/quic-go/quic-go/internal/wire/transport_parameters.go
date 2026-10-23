@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/netip"
 	"slices"
 	"time"
@@ -45,8 +46,14 @@ const (
 	retrySourceConnectionIDParameterID         transportParameterID = 0x10
 	// RFC 9221
 	maxDatagramFrameSizeParameterID transportParameterID = 0x20
-	// https://datatracker.ietf.org/doc/draft-ietf-quic-reliable-stream-reset/06/
-	resetStreamAtParameterID transportParameterID = 0x17f7586d2cb571
+	// https://datatracker.ietf.org/doc/draft-ietf-quic-reliable-stream-reset/09/
+	resetStreamAtParameterID transportParameterID = 0x1d
+	// https://datatracker.ietf.org/doc/draft-ietf-quic-reliable-stream-reset/07/
+	// When removing support for this codepoint, increment transportParameterMarshalingVersion
+	// to prevent 0-RTT resumption with tickets that remember it.
+	legacyResetStreamAtParameterID transportParameterID = 0x17f7586d2cb571
+	// https://datatracker.ietf.org/doc/draft-ietf-quic-ack-frequency/11/
+	minAckDelayParameterID transportParameterID = 0xff04de1b
 )
 
 // PreferredAddress is the value encoding in the preferred_address transport parameter
@@ -85,7 +92,8 @@ type TransportParameters struct {
 	ActiveConnectionIDLimit uint64
 
 	MaxDatagramFrameSize protocol.ByteCount // RFC 9221
-	EnableResetStreamAt  bool               // https://datatracker.ietf.org/doc/draft-ietf-quic-reliable-stream-reset/06/
+	EnableResetStreamAt  bool               // https://datatracker.ietf.org/doc/draft-ietf-quic-reliable-stream-reset/09/
+	MinAckDelay          *time.Duration
 }
 
 // Unmarshal the transport parameters
@@ -106,12 +114,12 @@ func (p *TransportParameters) unmarshal(b []byte, sentBy protocol.Perspective, f
 	var (
 		readOriginalDestinationConnectionID bool
 		readInitialSourceConnectionID       bool
-		readActiveConnectionIDLimit         bool
 	)
 
 	p.AckDelayExponent = protocol.DefaultAckDelayExponent
 	p.MaxAckDelay = protocol.DefaultMaxAckDelay
 	p.MaxDatagramFrameSize = protocol.InvalidByteCount
+	p.ActiveConnectionIDLimit = protocol.DefaultActiveConnectionIDLimit
 
 	for len(b) > 0 {
 		paramIDInt, l, err := quicvarint.Parse(b)
@@ -130,9 +138,6 @@ func (p *TransportParameters) unmarshal(b []byte, sentBy protocol.Perspective, f
 		}
 		parameterIDs = append(parameterIDs, paramID)
 		switch paramID {
-		case activeConnectionIDLimitParameterID:
-			readActiveConnectionIDLimit = true
-			fallthrough
 		case maxIdleTimeoutParameterID,
 			maxUDPPayloadSizeParameterID,
 			initialMaxDataParameterID,
@@ -143,7 +148,9 @@ func (p *TransportParameters) unmarshal(b []byte, sentBy protocol.Perspective, f
 			initialMaxStreamsUniParameterID,
 			maxAckDelayParameterID,
 			maxDatagramFrameSizeParameterID,
-			ackDelayExponentParameterID:
+			ackDelayExponentParameterID,
+			activeConnectionIDLimitParameterID,
+			minAckDelayParameterID:
 			if err := p.readNumericTransportParameter(b, paramID, int(paramLen)); err != nil {
 				return err
 			}
@@ -202,18 +209,24 @@ func (p *TransportParameters) unmarshal(b []byte, sentBy protocol.Perspective, f
 			connID := protocol.ParseConnectionID(b[:paramLen])
 			b = b[paramLen:]
 			p.RetrySourceConnectionID = &connID
-		case resetStreamAtParameterID:
+		case resetStreamAtParameterID, legacyResetStreamAtParameterID:
 			if paramLen != 0 {
 				return fmt.Errorf("wrong length for reset_stream_at: %d (expected empty)", paramLen)
 			}
 			p.EnableResetStreamAt = true
 		default:
+			if fromSessionTicket {
+				// A ticket might contain a parameter for an extension supported by an older
+				// version of this endpoint. If we can't parse it, don't resume with it.
+				return fmt.Errorf("unknown transport parameter %#x in session ticket", paramID)
+			}
 			b = b[paramLen:]
 		}
 	}
 
-	if !readActiveConnectionIDLimit {
-		p.ActiveConnectionIDLimit = protocol.DefaultActiveConnectionIDLimit
+	// min_ack_delay must be less or equal to max_ack_delay
+	if p.MinAckDelay != nil && *p.MinAckDelay > p.MaxAckDelay {
+		return fmt.Errorf("min_ack_delay (%s) is greater than max_ack_delay (%s)", *p.MinAckDelay, p.MaxAckDelay)
 	}
 	if !fromSessionTicket {
 		if sentBy == protocol.PerspectiveServer && !readOriginalDestinationConnectionID {
@@ -228,13 +241,8 @@ func (p *TransportParameters) unmarshal(b []byte, sentBy protocol.Perspective, f
 	}
 
 	// check that every transport parameter was sent at most once
-	slices.SortFunc(parameterIDs, func(a, b transportParameterID) int {
-		if a < b {
-			return -1
-		}
-		return 1
-	})
-	for i := 0; i < len(parameterIDs)-1; i++ {
+	slices.Sort(parameterIDs)
+	for i := range len(parameterIDs) - 1 {
 		if parameterIDs[i] == parameterIDs[i+1] {
 			return fmt.Errorf("received duplicate transport parameter %#x", parameterIDs[i])
 		}
@@ -334,6 +342,12 @@ func (p *TransportParameters) readNumericTransportParameter(b []byte, paramID tr
 		p.ActiveConnectionIDLimit = val
 	case maxDatagramFrameSizeParameterID:
 		p.MaxDatagramFrameSize = protocol.ByteCount(val)
+	case minAckDelayParameterID:
+		mad := time.Duration(val) * time.Microsecond
+		if mad < 0 {
+			mad = math.MaxInt64
+		}
+		p.MinAckDelay = &mad
 	default:
 		return fmt.Errorf("TransportParameter BUG: transport parameter %d not found", paramID)
 	}
@@ -445,6 +459,9 @@ func (p *TransportParameters) Marshal(pers protocol.Perspective) []byte {
 		b = quicvarint.Append(b, uint64(resetStreamAtParameterID))
 		b = quicvarint.Append(b, 0)
 	}
+	if p.MinAckDelay != nil {
+		b = p.marshalVarintParam(b, minAckDelayParameterID, uint64(*p.MinAckDelay/time.Microsecond))
+	}
 
 	if pers == protocol.PerspectiveClient && len(AdditionalTransportParametersClient) > 0 {
 		for k, v := range AdditionalTransportParametersClient {
@@ -517,6 +534,9 @@ func (p *TransportParameters) ValidFor0RTT(saved *TransportParameters) bool {
 	if saved.MaxDatagramFrameSize != protocol.InvalidByteCount && (p.MaxDatagramFrameSize == protocol.InvalidByteCount || p.MaxDatagramFrameSize < saved.MaxDatagramFrameSize) {
 		return false
 	}
+	if saved.EnableResetStreamAt && !p.EnableResetStreamAt {
+		return false
+	}
 	return p.InitialMaxStreamDataBidiLocal >= saved.InitialMaxStreamDataBidiLocal &&
 		p.InitialMaxStreamDataBidiRemote >= saved.InitialMaxStreamDataBidiRemote &&
 		p.InitialMaxStreamDataUni >= saved.InitialMaxStreamDataUni &&
@@ -530,6 +550,9 @@ func (p *TransportParameters) ValidFor0RTT(saved *TransportParameters) bool {
 // It is only used on the client side.
 func (p *TransportParameters) ValidForUpdate(saved *TransportParameters) bool {
 	if saved.MaxDatagramFrameSize != protocol.InvalidByteCount && (p.MaxDatagramFrameSize == protocol.InvalidByteCount || p.MaxDatagramFrameSize < saved.MaxDatagramFrameSize) {
+		return false
+	}
+	if saved.EnableResetStreamAt && !p.EnableResetStreamAt {
 		return false
 	}
 	return p.ActiveConnectionIDLimit >= saved.ActiveConnectionIDLimit &&
@@ -561,6 +584,10 @@ func (p *TransportParameters) String() string {
 	}
 	logString += ", EnableResetStreamAt: %t"
 	logParams = append(logParams, p.EnableResetStreamAt)
+	if p.MinAckDelay != nil {
+		logString += ", MinAckDelay: %s"
+		logParams = append(logParams, *p.MinAckDelay)
+	}
 	logString += "}"
 	return fmt.Sprintf(logString, logParams...)
 }

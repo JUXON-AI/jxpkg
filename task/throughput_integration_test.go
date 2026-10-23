@@ -37,7 +37,7 @@ func throughputDB(t *testing.T) *gorm.DB {
 func taskFixture(t *testing.T, db *gorm.DB, step int, status TaskStatus, group string, subject uint) *Task {
 	t.Helper()
 	now := time.Now().UTC().Truncate(time.Second)
-	x := &Task{AppGroup: group, SubjectID: subject, TaskType: group, Step: step, TaskStatus: status, WorkerID: "test-worker", StartAt: &now, Payload: "fixture", TaskConfigRedo: 1, TaskConfigTimeout: time.Minute}
+	x := &Task{OrganizationID: "org-a", UserID: "user-a", AppGroup: group, SubjectID: subject, TaskType: group, Step: step, TaskStatus: status, WorkerID: "test-worker", StartAt: &now, Payload: "fixture", TaskConfigRedo: 1, TaskConfigTimeout: time.Minute}
 	if err := db.Create(x).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestThroughputIndependentTasksDoNotWakeTheirPeers(t *testing.T) {
 		RegisterIndependentTaskType(group)
 		tasks := make([]*Task, size)
 		for i := range tasks {
-			tasks[i] = &Task{AppGroup: group, SubjectID: 7, TaskType: group, Step: 0, TaskStatus: TaskStatusPending, Payload: "fixture"}
+			tasks[i] = &Task{OrganizationID: "org-a", UserID: "user-a", AppGroup: group, SubjectID: 7, TaskType: group, Step: 0, TaskStatus: TaskStatusPending, Payload: "fixture"}
 		}
 		if err := db.CreateInBatches(tasks, 200).Error; err != nil {
 			t.Fatal(err)
@@ -140,7 +140,7 @@ func TestThroughputConcurrentClaimsAreUnique(t *testing.T) {
 func TestThroughputNotificationOutageDoesNotReportCreationFailure(t *testing.T) {
 	db := throughputDB(t)
 	group := fmt.Sprintf("notify%d", time.Now().UnixNano())
-	x := &Task{AppGroup: group, SubjectID: 13, TaskType: group, Payload: "fixture", TaskConfigTimeout: time.Minute}
+	x := &Task{OrganizationID: "org-a", UserID: "user-a", AppGroup: group, SubjectID: 13, TaskType: group, Payload: "fixture", TaskConfigTimeout: time.Minute}
 	err := createTasks(context.Background(), []*Task{x}, func() *gorm.DB { return db }, func(context.Context, []string) error { return errors.New("notification unavailable") })
 	if err != nil || x.ID == 0 {
 		t.Fatalf("committed task reported as failed: id=%d err=%v", x.ID, err)

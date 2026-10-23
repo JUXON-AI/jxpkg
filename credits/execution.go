@@ -29,7 +29,7 @@ type Execution struct {
 
 // NewExecution 接收业务已验证的员工身份和领取能力，不自行选择员工或执行授权。
 func NewExecution(subject Subject, acquire AcquireFunc) (*Execution, error) {
-	if subject.CompanyID == 0 || subject.UIN == 0 {
+	if err := subject.Validate(); err != nil {
 		return nil, ErrDenied
 	}
 	if acquire == nil {

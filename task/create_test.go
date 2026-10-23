@@ -14,6 +14,8 @@ import (
 func wellFormedTask() *Task {
 	return &Task{
 		AppGroup:          "wzwx",
+		OrganizationID:    "org-1",
+		UserID:            "user-1",
 		SubjectID:         7,
 		TaskType:          "wzwx.identify",
 		Payload:           `{"job_id":"j-1","image":"1.png"}`,
@@ -43,6 +45,8 @@ func TestValidateNewTaskRefusesEachMissingField(t *testing.T) {
 		want    string
 	}{
 		{"app_group 为空", func(tsk *Task) { tsk.AppGroup = "" }, "app_group cannot be empty"},
+		{"organization_id 为空", func(tsk *Task) { tsk.OrganizationID = "" }, "organization_id and user_id must identify a valid member"},
+		{"user_id 为空", func(tsk *Task) { tsk.UserID = "" }, "organization_id and user_id must identify a valid member"},
 		{"subject_id 为零", func(tsk *Task) { tsk.SubjectID = 0 }, "subject_id cannot be zero"},
 		{"task_type 为空", func(tsk *Task) { tsk.TaskType = "" }, "task_type cannot be empty"},
 		{"payload 为空", func(tsk *Task) { tsk.Payload = "" }, "payload cannot be empty"},
@@ -59,6 +63,21 @@ func TestValidateNewTaskRefusesEachMissingField(t *testing.T) {
 				t.Fatalf("validateNewTask said %q, want %q", err.Error(), testCase.want)
 			}
 		})
+	}
+}
+
+func TestTaskDAOInsertRejectsInvalidMemberBeforeDatabase(t *testing.T) {
+	for _, insert := range []func(*TaskDao, *Task) error{
+		func(dao *TaskDao, value *Task) error { return dao.Insert(context.Background(), value) },
+		func(dao *TaskDao, value *Task) error {
+			return dao.BatchInsert(context.Background(), TaskList{*value})
+		},
+	} {
+		value := wellFormedTask()
+		value.OrganizationID = ""
+		if err := insert(&TaskDao{}, value); err == nil || !strings.Contains(err.Error(), "organization_id and user_id") {
+			t.Fatalf("invalid member reached the database: %v", err)
+		}
 	}
 }
 
@@ -103,13 +122,15 @@ func TestValidateNewTaskBoundaries(t *testing.T) {
 // 唯一原因，所以它自己要有用例：一旦有人把某条规则改回内联在单条路径上，这里就红。
 func TestCreateTaskAndCreateTasksRefuseTheSameThings(t *testing.T) {
 	corruptions := map[string]func(*Task){
-		"nil":           nil,
-		"app_group 为空":  func(tsk *Task) { tsk.AppGroup = "" },
-		"subject_id 为零": func(tsk *Task) { tsk.SubjectID = 0 },
-		"task_type 为空":  func(tsk *Task) { tsk.TaskType = "" },
-		"payload 为空":    func(tsk *Task) { tsk.Payload = "" },
-		"timeout 为零":    func(tsk *Task) { tsk.TaskConfigTimeout = 0 },
-		"redo 为负":       func(tsk *Task) { tsk.TaskConfigRedo = -1 },
+		"nil":                nil,
+		"app_group 为空":       func(tsk *Task) { tsk.AppGroup = "" },
+		"organization_id 为空": func(tsk *Task) { tsk.OrganizationID = "" },
+		"user_id 为空":         func(tsk *Task) { tsk.UserID = "" },
+		"subject_id 为零":      func(tsk *Task) { tsk.SubjectID = 0 },
+		"task_type 为空":       func(tsk *Task) { tsk.TaskType = "" },
+		"payload 为空":         func(tsk *Task) { tsk.Payload = "" },
+		"timeout 为零":         func(tsk *Task) { tsk.TaskConfigTimeout = 0 },
+		"redo 为负":            func(tsk *Task) { tsk.TaskConfigRedo = -1 },
 	}
 	for name, corrupt := range corruptions {
 		t.Run(name, func(t *testing.T) {
