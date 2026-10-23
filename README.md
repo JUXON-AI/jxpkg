@@ -44,6 +44,7 @@ make clean       # 清理 Go test cache
 | [`apis/constants`](#apisconstants) | Gin Context 的稳定键名 | `CtxKeyRequestID`、`CtxKeyUserID` |
 | [`apis/errcode`](#apiserrcode) | 业务错误码注册和消息查询 | `Register`、`GetMessage` |
 | [`apis/runtime`](#apisruntime) | HTTP 响应与已验证身份读取 | `Success`、`BadRequest`、`UserID` |
+| [`apis/runtime/logtodirectory`](#apisruntimelogtodirectory) | 固定用途 Logto workload-directory M2M 客户端 | `NewClient`、`Snapshot`、`ListPage` |
 | [`apis/runtime/auth`](#apisruntimeauth) | Bearer/JWT、Browser Session 和授权上下文的共享契约 | `TokenSigner`、`SessionResolver`、`AuthorizationContextResolver` |
 | [`apis/runtime/middleware`](#apisruntimemiddleware) | Gin 日志、恢复、CORS、认证、CSRF 与权限中间件 | `NewCORS`、`ResolveAuthorizationContext`、`RequirePermission` |
 | [`apis/runtime/server`](#apisruntimeserver) | Gin Router、路由认证模式和 API 适配 | `NewRouter`、`API` |
@@ -100,6 +101,29 @@ func GetProfile(ctx *gin.Context) {
 ```
 
 这些读取函数不执行认证；认证必须由对应路由 middleware 完成。
+
+### `apis/runtime/logtodirectory`
+
+提供 JXX 现有目录传输迁移和 JXONE 有界成员列举共用的固定 Logto workload-directory M2M 客户端。应用必须显式读取自己的启动配置并传给 `NewClient(Config)`；SDK 不读取环境、数据库或 coresetting，导入和构造不执行网络、迁移或其他初始化副作用。`Endpoint` 只接受精确 HTTPS origin，客户端只派生 `/oidc/token` 和 `/api/workload-directory/snapshot`，不接受任意 URL、scope、token 转发或 Management API 请求。
+
+```go
+client, err := logtodirectory.NewClient(logtodirectory.Config{
+    Endpoint:     logtoEndpoint,
+    ClientID:     workloadClientID,
+    ClientSecret: workloadClientSecret,
+    Resource:     directoryResource,
+})
+if err != nil {
+    return err
+}
+snapshot, err := client.Snapshot(ctx, organizationID, userIDs, logtodirectory.Options{
+    IncludeDepartments: true,
+})
+```
+
+`Snapshot` 不缓存成员、角色、资料或部门，只缓存有界 M2M access token；默认超时 10 秒，显式范围 1..30 秒。`Options.IncludeMembershipEpoch` 要求每个成员返回 canonical 正整数 decimal string，SDK 不把 epoch 解码为浮点数。错误通过 `ErrDenied`、`ErrUnavailable`、`ErrProtocol` 分类；调用方仍可用 `errors.Is` 检查 context cancellation。响应正文、token、Client Secret 和配置不会被写入错误。
+
+`ListPage` 发布同一 snapshot path 上的单页列出契约，但真实 Logto handler 和 SDK/provider 联调尚未完成；当前只有 `httptest` mock provider contract tests，不能宣称已经上线或用于生产。它不提供 capability flag、`allowMemberListing` 覆盖或跨页聚合，调用方必须等 provider handler 联合审阅完成后再接入。
 
 ### `apis/runtime/auth`
 
