@@ -174,7 +174,19 @@ func (a *Runtime) callback(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, 503, "session_entropy_unavailable")
 		return
 	}
-	value := &session{SDK: tx.SDK, Subject: verified.Subject, Organization: identity.OrganizationID, Revision: identity.Revision, CSRF: csrf, Until: time.Now().Add(30 * time.Minute)}
+	now := a.store.nowTime()
+	value := &session{
+		SDK:             tx.SDK,
+		Subject:         verified.Subject,
+		Organization:    identity.OrganizationID,
+		Revision:        identity.Revision,
+		CSRF:            csrf,
+		Until:           now.Add(sessionIdleLifetime),
+		PolicyVersion:   sessionPolicyVersion,
+		AuthenticatedAt: now,
+		IdleUntil:       now.Add(sessionIdleLifetime),
+		AbsoluteUntil:   now.Add(sessionAbsoluteLifetime),
+	}
 	if a.config.APIResource == "" {
 		if err := a.prepareIdentity(r.Context(), value); err != nil {
 			outcome := classify(err)
@@ -207,7 +219,7 @@ func (a *Runtime) callback(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, 503, "session_store_unavailable")
 		return
 	}
-	a.setCookie(w, a.config.CookieName, next, 1800)
+	a.setCookie(w, a.config.CookieName, next, sessionCookieMaxAge(value, a.store.nowTime()))
 	http.Redirect(w, r, a.config.Origin+tx.ReturnTo, 302)
 }
 
@@ -355,8 +367,8 @@ func (a *Runtime) currentRequest(ctx context.Context, value *session) (profile, 
 	}
 	return user, rows, nil
 }
-func view(value *session, user profile, rows []organization) map[string]any {
-	result := map[string]any{"authenticated": true, "organizations": rows, "organization_id": value.Organization, "organization_revision": value.Revision, "expires_at": value.Until.Unix(), "csrf_token": value.CSRF}
+func view(value *session, user profile, rows []organization, deadline time.Time) map[string]any {
+	result := map[string]any{"authenticated": true, "organizations": rows, "organization_id": value.Organization, "organization_revision": value.Revision, "expires_at": deadline.Unix(), "csrf_token": value.CSRF}
 	if value.Organization != "" {
 		result["user"] = user
 		roles := []string{}
@@ -374,16 +386,28 @@ func (a *Runtime) sessionView(r *http.Request, value *session) result {
 	if err != nil {
 		return classify(err)
 	}
-	data := view(value, user, rows)
+	data, err := a.sessionViewData(r.Context(), value, user, rows)
+	if err != nil {
+		return classify(err)
+	}
+	return result{status: 200, data: data}
+}
+
+func (a *Runtime) sessionViewData(ctx context.Context, value *session, user profile, rows []organization) (map[string]any, error) {
+	deadline, err := sessionDeadline(value, a.store.nowTime())
+	if err != nil {
+		return nil, err
+	}
+	data := view(value, user, rows, deadline)
 	data["permissions"] = []string{}
 	if value.Organization != "" && a.config.APIResource != "" {
-		claims, err := a.organizationClaims(r.Context(), value, value.Organization)
+		claims, err := a.organizationClaims(ctx, value, value.Organization)
 		if err != nil {
-			return classify(err)
+			return nil, err
 		}
 		data["permissions"] = strings.Fields(claims.Scope)
 	}
-	return result{status: 200, data: data}
+	return data, nil
 }
 func (a *Runtime) csrfValid(r *http.Request, value *session) bool {
 	return len(r.Header.Values("Origin")) == 1 && len(r.Header.Values("X-CSRF-Token")) == 1 && r.Header.Get("Origin") == a.config.Origin && value.CSRF != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-CSRF-Token")), []byte(value.CSRF)) == 1

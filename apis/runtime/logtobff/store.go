@@ -18,6 +18,15 @@ import (
 
 var _errMissing = errors.New("session missing")
 var _errBusy = errors.New("session busy")
+var _errInvalid = errors.New("session invalid")
+
+const (
+	// sessionPolicyVersion 2 mirrors Account's tested eight-hour idle and
+	// seven-day absolute browser-session policy.
+	sessionPolicyVersion    uint64 = 2
+	sessionIdleLifetime            = 8 * time.Hour
+	sessionAbsoluteLifetime        = 7 * 24 * time.Hour
+)
 
 // Redis owns short-lived authentication capabilities only. Every value is encrypted;
 // the key prefix is authenticated too, preventing transaction/session substitution.
@@ -26,6 +35,7 @@ type store struct {
 	db      *redis.Client
 	box     cipher.AEAD
 	entropy io.Reader
+	now     func() time.Time
 }
 type session struct {
 	SDK          map[string]string `json:"sdk"`
@@ -33,9 +43,15 @@ type session struct {
 	Organization string            `json:"organization"`
 	Revision     string            `json:"revision"`
 	CSRF         string            `json:"csrf"`
-	Until        time.Time         `json:"until"`
-	Profile      *profile          `json:"profile,omitempty"`
-	ProfileUntil time.Time         `json:"profile_until,omitempty"`
+	// Until is the pre-policy fixed expiry and remains the idle projection for
+	// version 2 records so an earlier BFF can still read a newer record safely.
+	Until           time.Time `json:"until"`
+	PolicyVersion   uint64    `json:"policy_version,omitempty"`
+	AuthenticatedAt time.Time `json:"authenticated_at,omitempty"`
+	IdleUntil       time.Time `json:"idle_until,omitempty"`
+	AbsoluteUntil   time.Time `json:"absolute_until,omitempty"`
+	Profile         *profile  `json:"profile,omitempty"`
+	ProfileUntil    time.Time `json:"profile_until,omitempty"`
 }
 type transaction struct {
 	SDK      map[string]string `json:"sdk"`
@@ -64,7 +80,72 @@ func newStore(address, password, key, prefix string) (*store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &store{db: redis.NewClient(&redis.Options{Addr: address, Password: password, DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second, MaxRetries: -1, PoolSize: 8, MaxActiveConns: 8, ContextTimeoutEnabled: true, PoolTimeout: time.Second}), box: box, prefix: prefix, entropy: rand.Reader}, nil
+	return &store{db: redis.NewClient(&redis.Options{Addr: address, Password: password, DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second, MaxRetries: -1, PoolSize: 8, MaxActiveConns: 8, ContextTimeoutEnabled: true, PoolTimeout: time.Second}), box: box, prefix: prefix, entropy: rand.Reader, now: time.Now}, nil
+}
+
+func (s *store) nowTime() time.Time {
+	if s.now == nil {
+		return time.Now()
+	}
+	return s.now()
+}
+
+func validateSessionSchema(value *session, now time.Time) error {
+	if value == nil {
+		return _errInvalid
+	}
+	switch value.PolicyVersion {
+	case 0:
+		if value.Until.IsZero() || !value.AuthenticatedAt.IsZero() || !value.IdleUntil.IsZero() || !value.AbsoluteUntil.IsZero() {
+			return _errInvalid
+		}
+	case sessionPolicyVersion:
+		if value.AuthenticatedAt.IsZero() || value.AuthenticatedAt.After(now) || value.IdleUntil.IsZero() || value.AbsoluteUntil.IsZero() ||
+			!value.Until.Equal(value.IdleUntil) || value.IdleUntil.Before(value.AuthenticatedAt) || value.IdleUntil.After(value.AbsoluteUntil) ||
+			!value.AbsoluteUntil.Equal(value.AuthenticatedAt.Add(sessionAbsoluteLifetime)) {
+			return _errInvalid
+		}
+	default:
+		return _errInvalid
+	}
+	return nil
+}
+
+func sessionDeadline(value *session, now time.Time) (time.Time, error) {
+	if err := validateSessionSchema(value, now); err != nil {
+		return time.Time{}, err
+	}
+	deadline := value.Until
+	if value.PolicyVersion == sessionPolicyVersion {
+		deadline = value.IdleUntil
+		if value.AbsoluteUntil.Before(deadline) {
+			deadline = value.AbsoluteUntil
+		}
+	}
+	if !now.Before(deadline) {
+		return time.Time{}, _errMissing
+	}
+	return deadline, nil
+}
+
+func nextSessionIdle(now, absolute time.Time) time.Time {
+	next := now.Add(sessionIdleLifetime)
+	if next.After(absolute) {
+		return absolute
+	}
+	return next
+}
+
+func sessionCookieMaxAge(value *session, now time.Time) int {
+	deadline, err := sessionCookieDeadline(value)
+	if err != nil {
+		return -1
+	}
+	remaining := deadline.Sub(now)
+	if remaining <= 0 {
+		return -1
+	}
+	return int((remaining + time.Second - 1) / time.Second)
 }
 func (s *store) seal(key string, value any) ([]byte, error) {
 	data, err := json.Marshal(value)
@@ -120,6 +201,11 @@ func (s *store) consume(ctx context.Context, id string) (transaction, error) {
 	return tx, s.open(key, data, &tx)
 }
 func (s *store) create(ctx context.Context, value *session, previous string) (string, error) {
+	now := s.nowTime()
+	deadline, err := sessionDeadline(value, now)
+	if err != nil {
+		return "", err
+	}
 	id, err := s.opaque()
 	if err != nil {
 		return "", err
@@ -132,7 +218,7 @@ func (s *store) create(ctx context.Context, value *session, previous string) (st
 	if !_opaquePattern.MatchString(previous) {
 		previous = "absent"
 	}
-	return id, s.db.Eval(ctx, `redis.call('set',KEYS[1],ARGV[1],'PX',ARGV[2]);redis.call('del',KEYS[2]);return 1`, []string{key, s.prefix + "s:" + previous}, data, time.Until(value.Until).Milliseconds()).Err()
+	return id, s.db.Eval(ctx, `redis.call('set',KEYS[1],ARGV[1],'PX',ARGV[2]);redis.call('del',KEYS[2]);return 1`, []string{key, s.prefix + "s:" + previous}, data, deadline.Sub(now).Milliseconds()).Err()
 }
 
 // A fixed 30s lease outlives the entire 20s request budget. All commits are fenced
@@ -179,9 +265,9 @@ func (s *store) acquire(ctx context.Context, id string) (*session, string, error
 		s.release(ctx, id, owner)
 		return nil, "", err
 	}
-	if !time.Now().Before(value.Until) {
+	if _, err := sessionDeadline(&value, s.nowTime()); err != nil {
 		s.release(ctx, id, owner)
-		return nil, "", _errMissing
+		return nil, "", err
 	}
 	return &value, owner, nil
 }
@@ -194,14 +280,22 @@ func (s *store) release(requestContext context.Context, id, owner string) {
 	}
 }
 func (s *store) commit(ctx context.Context, id, owner, next string, value *session, remove bool) error {
+	now := s.nowTime()
+	if err := validateSessionSchema(value, now); err != nil {
+		return err
+	}
 	key := s.prefix + "s:" + next
 	data, err := s.seal(key, value)
 	if err != nil {
 		return err
 	}
-	ttl := time.Until(value.Until).Milliseconds()
-	if ttl <= 0 {
-		return _errMissing
+	ttl := int64(0)
+	if !remove {
+		deadline, err := sessionDeadline(value, now)
+		if err != nil {
+			return err
+		}
+		ttl = deadline.Sub(now).Milliseconds()
 	}
 	result, err := s.db.Eval(ctx, `
  if redis.call('get',KEYS[1])~=ARGV[1] or redis.call('exists',KEYS[2])==0 then return 0 end

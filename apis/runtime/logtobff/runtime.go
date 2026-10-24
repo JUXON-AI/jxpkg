@@ -171,12 +171,14 @@ func New(ctx context.Context, cfg Config) (*Runtime, error) {
 // Close 释放本运行时持有的 Redis 连接。
 func (a *Runtime) Close() error { return a.store.db.Close() }
 
-// Handler 提供固定 /auth 路由；登录后仅返回经过校验的本站路径。
+// Handler 提供固定 /auth 路由；GET session 只报告当前状态，可信的 POST
+// session 才滑动 idle，登录后仅返回经过校验的本站路径。
 func (a *Runtime) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /auth/login", a.login)
 	mux.HandleFunc("GET /auth/callback", a.callback)
 	mux.HandleFunc("GET /auth/session", a.withSession(a.sessionView))
+	mux.HandleFunc("POST /auth/session", a.withSession(a.renewSession))
 	mux.HandleFunc("GET /auth/switch-organization", a.login)
 	mux.HandleFunc("POST /auth/logout", a.withSession(a.logout))
 	mux.HandleFunc("GET /auth/account-center", a.withSession(a.accountCenter))
@@ -233,6 +235,9 @@ func classify(err error) result {
 	if errors.Is(err, _errMissing) {
 		return problem(401, "session_expired")
 	}
+	if errors.Is(err, _errInvalid) {
+		return problem(401, "session_invalid")
+	}
 	if errors.Is(err, _errBusy) {
 		return problem(409, "session_busy")
 	}
@@ -272,7 +277,11 @@ func (a *Runtime) Require(scopes ...string) gin.HandlerFunc {
 				if len(scopes) > 0 {
 					return problem(403, "insufficient_scope")
 				}
-				p := Principal{Issuer: a.config.Endpoint + "/oidc", UserID: s.Subject, OrganizationID: s.Organization, OrganizationRevision: s.Revision, ExpiresAt: s.Until.Unix()}
+				deadline, err := sessionDeadline(s, a.store.nowTime())
+				if err != nil {
+					return classify(err)
+				}
+				p := Principal{Issuer: a.config.Endpoint + "/oidc", UserID: s.Subject, OrganizationID: s.Organization, OrganizationRevision: s.Revision, ExpiresAt: deadline.Unix()}
 				return result{status: 200, principal: &p}
 			}
 			claims, err := a.organizationClaims(r.Context(), s, s.Organization)
@@ -284,7 +293,15 @@ func (a *Runtime) Require(scopes ...string) gin.HandlerFunc {
 					return problem(403, "insufficient_scope")
 				}
 			}
-			p := Principal{Issuer: a.config.Endpoint + "/oidc", UserID: claims.Subject, OrganizationID: claims.OrganizationID, OrganizationRevision: s.Revision, DepartmentIDs: claims.DepartmentIDs, PrimaryDepartmentID: claims.PrimaryDepartmentID, Permissions: strings.Fields(claims.Scope), ExpiresAt: claims.ExpiresAt.Unix()}
+			deadline, err := sessionDeadline(s, a.store.nowTime())
+			if err != nil {
+				return classify(err)
+			}
+			expiresAt := claims.ExpiresAt.Unix()
+			if deadline.Unix() < expiresAt {
+				expiresAt = deadline.Unix()
+			}
+			p := Principal{Issuer: a.config.Endpoint + "/oidc", UserID: claims.Subject, OrganizationID: claims.OrganizationID, OrganizationRevision: s.Revision, DepartmentIDs: claims.DepartmentIDs, PrimaryDepartmentID: claims.PrimaryDepartmentID, Permissions: strings.Fields(claims.Scope), ExpiresAt: expiresAt}
 			return result{status: 200, principal: &p}
 		}, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { called = true; c.Request = r; c.Next() }))(c.Writer, c.Request)
 		if !called {
@@ -328,6 +345,8 @@ func (a *Runtime) withSession(next sessionHandler, authorized ...http.Handler) h
 			status, code := 503, "session_store_unavailable"
 			if errors.Is(err, _errMissing) {
 				status, code = 401, "session_expired"
+			} else if errors.Is(err, _errInvalid) {
+				status, code = 401, "session_invalid"
 			} else if errors.Is(err, _errBusy) {
 				status, code = 409, "session_busy"
 			}
@@ -371,7 +390,7 @@ func (a *Runtime) withSession(next sessionHandler, authorized ...http.Handler) h
 		if outcome.remove {
 			a.setCookie(w, a.config.CookieName, "", -1)
 		} else if outcome.rotate {
-			a.setCookie(w, a.config.CookieName, nextID, int(time.Until(value.Until).Seconds()))
+			a.setCookie(w, a.config.CookieName, nextID, sessionCookieMaxAge(value, a.store.nowTime()))
 			if v, ok := outcome.data.(map[string]any); ok {
 				v["csrf_token"] = value.CSRF
 			}
