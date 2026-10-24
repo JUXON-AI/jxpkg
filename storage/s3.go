@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -18,10 +19,23 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 var _ Storager = (*S3Fs)(nil)
 var _ MultipartStorager = (*S3Fs)(nil)
+var _ OriginalFileStorager = (*S3Fs)(nil)
+
+const originalImageCIQuery = "originImage"
+
+// originalFileHTTPClient deliberately does not follow redirects. A redirected
+// signed GET could forward its credential-bearing query string to another host.
+var originalFileHTTPClient = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
 
 // S3StorageConfig S3通用存储
 type S3StorageConfig struct {
@@ -31,6 +45,10 @@ type S3StorageConfig struct {
 	Region          string `yaml:"region"`
 	Bucket          string `yaml:"bucket"`
 	UsePathStyle    bool   `yaml:"use_path_style"` // 是否使用路径风格的URL minio true 腾讯云 false
+	// OriginalImageCI enables the provider's billable original-image operation
+	// (COS ci-process=originImage). It must remain false for providers without
+	// that operation.
+	OriginalImageCI bool `yaml:"original_image_ci"`
 }
 
 // S3Fs .
@@ -160,6 +178,73 @@ func (s3fs *S3Fs) GetPresignedURL(ctx context.Context, method, storagePath strin
 	}
 
 	return url.URL, nil
+}
+
+// OriginalFileSupported reports whether this instance opted into the provider's
+// billable original-image operation.
+func (s3fs *S3Fs) OriginalFileSupported() bool {
+	return s3fs != nil && s3fs.s3fsCfg.OriginalImageCI
+}
+
+// originalImageQueryMiddleware adds the provider query before the SDK signing
+// middleware runs. The request path and all other query parameters stay owned
+// by the SDK; this code deliberately does not rebuild the object URL.
+type originalImageQueryMiddleware struct{}
+
+func (*originalImageQueryMiddleware) ID() string { return "C660OriginalImageQuery" }
+
+func (*originalImageQueryMiddleware) HandleBuild(
+	ctx context.Context, in middleware.BuildInput, next middleware.BuildHandler,
+) (middleware.BuildOutput, middleware.Metadata, error) {
+	request, ok := in.Request.(*smithyhttp.Request)
+	if !ok {
+		return middleware.BuildOutput{}, middleware.Metadata{},
+			fmt.Errorf("original image query: unexpected request type %T", in.Request)
+	}
+	query := request.URL.Query()
+	query.Set("ci-process", originalImageCIQuery)
+	request.URL.RawQuery = query.Encode()
+	return next.HandleBuild(ctx, in)
+}
+
+func addOriginalImageQuery(stack *middleware.Stack) error {
+	return stack.Build.Add(&originalImageQueryMiddleware{}, middleware.After)
+}
+
+func (s3fs *S3Fs) presignOriginalObject(
+	ctx context.Context, storagePath string, optFns ...func(*s3.PresignOptions),
+) (*v4.PresignedHTTPRequest, error) {
+	presigner := s3.NewPresignClient(s3fs.client, func(options *s3.PresignOptions) {
+		options.Expires = s3fs.opt.PresignedTimeout
+		options.ClientOptions = append(options.ClientOptions, func(options *s3.Options) {
+			options.APIOptions = append(options.APIOptions, addOriginalImageQuery)
+		})
+	})
+	return presigner.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s3fs.s3fsCfg.Bucket),
+		Key:    aws.String(storagePath),
+	}, optFns...)
+}
+
+// GetPresignedOriginalURL signs a GET for the provider's original-image API.
+// The query is inserted through an SDK build middleware so the normal
+// PresignGetObject signing flow, path encoding, and unsigned payload semantics
+// remain authoritative.
+func (s3fs *S3Fs) GetPresignedOriginalURL(ctx context.Context, method, storagePath string) (string, error) {
+	if !s3fs.OriginalFileSupported() {
+		return "", fmt.Errorf("original image CI is not enabled")
+	}
+	if method != http.MethodGet {
+		return "", fmt.Errorf("original file URL only supports GET, now: %s", method)
+	}
+	if strings.TrimSpace(storagePath) == "" {
+		return "", fmt.Errorf("storage path is empty")
+	}
+	result, err := s3fs.presignOriginalObject(ctx, storagePath)
+	if err != nil {
+		return "", fmt.Errorf("sign original object URL: %w", err)
+	}
+	return result.URL, nil
 }
 
 // CreateMultipartUpload 创建一个私有对象的分片上传会话。
@@ -318,6 +403,62 @@ func (s3fs *S3Fs) HeadFile(ctx context.Context, storagePath string) (*FileMetada
 		ContentType:   aws.ToString(obj.ContentType),
 		ETag:          strings.Trim(aws.ToString(obj.ETag), `"`),
 	}, nil
+}
+
+// ReadOriginalFile streams the object through the provider's original-image
+// endpoint. The caller remains responsible for size, hash, and media checks.
+func (s3fs *S3Fs) ReadOriginalFile(ctx context.Context, storagePath string) (io.ReadCloser, error) {
+	signedURL, err := s3fs.GetPresignedOriginalURL(ctx, http.MethodGet, storagePath)
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, signedURL, nil)
+	if err != nil {
+		// A URL parse error can contain the signed query string. Do not wrap it.
+		return nil, fmt.Errorf("build original object request: invalid signed address")
+	}
+	request.Header.Set("Accept-Encoding", "identity")
+	response, err := originalFileHTTPClient.Do(request)
+	if err != nil {
+		return nil, originalReadTransportError(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		_ = response.Body.Close()
+		return nil, fmt.Errorf("read original object: status %d", response.StatusCode)
+	}
+	if response.Body == nil {
+		return nil, fmt.Errorf("read original object: empty body")
+	}
+	return response.Body, nil
+}
+
+// originalReadTransportError removes url.Error, which contains the complete
+// signed URL, while preserving cancellation identity and a safe error category.
+func originalReadTransportError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		if urlErr.Err == nil {
+			return errors.New("read original object: transport failure")
+		}
+		err = urlErr.Err
+	}
+	switch {
+	case errors.Is(err, context.Canceled):
+		return fmt.Errorf("read original object: canceled: %w", context.Canceled)
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Errorf("read original object: deadline exceeded: %w", context.DeadlineExceeded)
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return fmt.Errorf("read original object: network timeout: %w", context.DeadlineExceeded)
+		}
+		return errors.New("read original object: network failure")
+	}
+	return errors.New("read original object: transport failure")
 }
 
 // ReadFile 获取文件内容
