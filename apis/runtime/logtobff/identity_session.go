@@ -95,8 +95,8 @@ func (a *Runtime) finishIdentity(ctx context.Context, id, nextID string, before,
 			a.store.release(ctx, id, owner)
 		}
 	}()
-	if current.Subject != before.Subject || current.Organization != before.Organization || current.Revision != before.Revision || current.CSRF != before.CSRF || !current.Until.Equal(before.Until) {
-		return &accessError{status: 409, code: "organization_identity_changed"}
+	if err := mergeIdentityUpdate(current, before, value, a.store.nowTime()); err != nil {
+		return err
 	}
 	current.Organization, current.Revision, current.CSRF = value.Organization, value.Revision, value.CSRF
 	save, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
@@ -105,6 +105,50 @@ func (a *Runtime) finishIdentity(ctx context.Context, id, nextID string, before,
 		return err
 	}
 	committed = true
+	value.SDK = current.SDK
+	value.Profile = current.Profile
+	value.ProfileUntil = current.ProfileUntil
+	value.Until = current.Until
+	value.PolicyVersion = current.PolicyVersion
+	value.AuthenticatedAt = current.AuthenticatedAt
+	value.IdleUntil = current.IdleUntil
+	value.AbsoluteUntil = current.AbsoluteUntil
+	return nil
+}
+
+// mergeIdentityUpdate adopts only a deadline extension from a snapshot that may
+// have run in parallel with an identity read. The current Redis record remains
+// authoritative for SDK/profile rotation, logout, CSRF and identity changes.
+func mergeIdentityUpdate(current, before, value *session, now time.Time) error {
+	changed := func() error {
+		return &accessError{status: 409, code: "organization_identity_changed"}
+	}
+	if current.Subject != before.Subject || current.Organization != before.Organization || current.Revision != before.Revision || current.CSRF != before.CSRF {
+		return changed()
+	}
+	if err := validateSessionSchema(current, now); err != nil {
+		return err
+	}
+	if err := validateSessionSchema(value, now); err != nil {
+		return err
+	}
+	if before.PolicyVersion == 0 {
+		if current.PolicyVersion != 0 || value.PolicyVersion != 0 || !current.Until.Equal(before.Until) || !value.Until.Equal(before.Until) {
+			return changed()
+		}
+		return nil
+	}
+	if before.PolicyVersion != sessionPolicyVersion || current.PolicyVersion != sessionPolicyVersion || value.PolicyVersion != sessionPolicyVersion ||
+		!current.AuthenticatedAt.Equal(before.AuthenticatedAt) || !value.AuthenticatedAt.Equal(before.AuthenticatedAt) ||
+		!current.AbsoluteUntil.Equal(before.AbsoluteUntil) || !value.AbsoluteUntil.Equal(before.AbsoluteUntil) {
+		return changed()
+	}
+	idle := current.IdleUntil
+	if value.IdleUntil.After(idle) {
+		idle = value.IdleUntil
+	}
+	current.IdleUntil = idle
+	current.Until = idle
 	return nil
 }
 
@@ -160,10 +204,20 @@ func (a *Runtime) withIdentitySession(next sessionHandler, authorized ...http.Ha
 			fail(w, r, failed.status, "session_changed_or_unavailable")
 			return
 		}
+		if !outcome.remove {
+			if deadline, deadlineErr := sessionDeadline(value, a.store.nowTime()); deadlineErr == nil {
+				if data, ok := outcome.data.(map[string]any); ok {
+					data["expires_at"] = deadline.Unix()
+				}
+				if outcome.principal != nil {
+					outcome.principal.ExpiresAt = deadline.Unix()
+				}
+			}
+		}
 		if outcome.remove {
 			a.setCookie(w, a.config.CookieName, "", -1)
 		} else if outcome.rotate {
-			a.setCookie(w, a.config.CookieName, nextID, int(time.Until(value.Until).Seconds()))
+			a.setCookie(w, a.config.CookieName, nextID, sessionCookieMaxAge(value, a.store.nowTime()))
 			if data, ok := outcome.data.(map[string]any); ok {
 				data["csrf_token"] = value.CSRF
 			}

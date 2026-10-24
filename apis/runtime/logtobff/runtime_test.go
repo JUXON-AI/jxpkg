@@ -476,7 +476,8 @@ func TestExpiredAndAmbiguousCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	value.Until = time.Now().Add(30 * time.Millisecond)
+	value.IdleUntil = time.Now().Add(30 * time.Millisecond)
+	value.Until = value.IdleUntil
 	if err = a.store.commit(context.Background(), cookie.Value, owner, cookie.Value, value, false); err != nil {
 		t.Fatal(err)
 	}

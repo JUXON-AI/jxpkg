@@ -175,7 +175,7 @@ func authorizationError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, _errMissing) || errors.Is(err, _errBusy) {
+	if errors.Is(err, _errMissing) || errors.Is(err, _errBusy) || errors.Is(err, _errInvalid) {
 		return ErrAuthorizationChanged
 	}
 	var denied *accessError

@@ -1,0 +1,571 @@
+package logtobff
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/logto-io/go/v2/client"
+	"github.com/redis/go-redis/v9"
+)
+
+func renewalClone(t *testing.T, value *session) *session {
+	t.Helper()
+	out := *value
+	out.SDK = map[string]string{}
+	for key, item := range value.SDK {
+		out.SDK[key] = item
+	}
+	return &out
+}
+
+func renewalReadSession(t *testing.T, a *Runtime, cookie *http.Cookie) *session {
+	t.Helper()
+	value, owner, err := a.store.acquire(context.Background(), cookie.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.store.release(context.Background(), cookie.Value, owner)
+	return renewalClone(t, value)
+}
+
+func renewalRequest(a *Runtime, cookie *http.Cookie, csrf string, mutate func(*http.Request)) *httptest.ResponseRecorder {
+	request := httptest.NewRequest("POST", "http://localhost:5180/auth/session", strings.NewReader(`{}`))
+	request.RequestURI = request.URL.RequestURI()
+	if cookie != nil {
+		request.AddCookie(cookie)
+	}
+	request.Header.Set("Origin", a.config.Origin)
+	request.Header.Set("X-CSRF-Token", csrf)
+	request.Header.Set("X-Organization-ID", "org-one")
+	request.Header.Set("X-Organization-Revision", "1")
+	request.Header.Set("Content-Type", "application/json")
+	if mutate != nil {
+		mutate(request)
+	}
+	response := httptest.NewRecorder()
+	a.Handler().ServeHTTP(response, request)
+	return response
+}
+
+func renewalBody(t *testing.T, response *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	if response.Code < 200 || response.Code >= 300 {
+		t.Fatalf("renewal HTTP %d: %s", response.Code, response.Body.String())
+	}
+	return sessionBody(t, response)
+}
+
+func renewalExpiresAt(t *testing.T, body map[string]any) time.Time {
+	t.Helper()
+	seconds, ok := body["expires_at"].(float64)
+	if !ok {
+		t.Fatalf("expires_at missing: %#v", body["expires_at"])
+	}
+	return time.Unix(int64(seconds), 0)
+}
+
+func renewalPolicySession(now time.Time) *session {
+	return &session{
+		SDK:             map[string]string{client.StorageKeyRefreshToken: "refresh-current"},
+		Subject:         "user-one",
+		Organization:    "org-one",
+		Revision:        "1",
+		CSRF:            "csrf-current",
+		Until:           now.Add(sessionIdleLifetime),
+		PolicyVersion:   sessionPolicyVersion,
+		AuthenticatedAt: now,
+		IdleUntil:       now.Add(sessionIdleLifetime),
+		AbsoluteUntil:   now.Add(sessionAbsoluteLifetime),
+	}
+}
+
+func TestSessionRenewalInitializationAndGetReadOnly(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		resource []string
+	}{
+		{name: "identity-only", resource: []string{""}},
+		{name: "resource", resource: nil},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			a, f := fixtureRuntime(t, testCase.resource...)
+			cookie := loginFixture(t, a, f)
+			value := renewalReadSession(t, a, cookie)
+			if value.PolicyVersion != sessionPolicyVersion || value.AuthenticatedAt.IsZero() {
+				t.Fatalf("new session policy missing: %#v", value)
+			}
+			if value.IdleUntil.Sub(value.AuthenticatedAt) != sessionIdleLifetime || value.AbsoluteUntil.Sub(value.AuthenticatedAt) != sessionAbsoluteLifetime || !value.Until.Equal(value.IdleUntil) {
+				t.Fatalf("unexpected initial deadlines: auth=%s idle=%s absolute=%s until=%s", value.AuthenticatedAt, value.IdleUntil, value.AbsoluteUntil, value.Until)
+			}
+			if cookie.MaxAge < int((sessionAbsoluteLifetime-2*time.Second)/time.Second) || cookie.MaxAge > int(sessionAbsoluteLifetime/time.Second) {
+				t.Fatalf("cookie max age %d is not the absolute cap", cookie.MaxAge)
+			}
+			firstExpiry := renewalExpiresAt(t, renewalBody(t, callAuth(a, "GET", "/auth/session", "", cookie, "")))
+			a.store.now = func() time.Time { return value.AuthenticatedAt.Add(time.Minute) }
+			response := callAuth(a, "GET", "/auth/session", "", cookie, "")
+			secondExpiry := renewalExpiresAt(t, renewalBody(t, response))
+			if !firstExpiry.Equal(secondExpiry) || len(response.Result().Cookies()) != 0 {
+				t.Fatalf("GET renewed session: before=%s after=%s cookies=%v", firstExpiry, secondExpiry, response.Result().Cookies())
+			}
+			after := renewalReadSession(t, a, cookie)
+			if !after.IdleUntil.Equal(value.IdleUntil) || !after.AbsoluteUntil.Equal(value.AbsoluteUntil) {
+				t.Fatal("GET changed Redis deadlines")
+			}
+		})
+	}
+}
+
+func TestSessionRenewalPostExtendsIdleButNotAbsolute(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		resource []string
+	}{
+		{name: "identity-only", resource: []string{""}},
+		{name: "resource", resource: nil},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			a, f := fixtureRuntime(t, testCase.resource...)
+			cookie := loginFixture(t, a, f)
+			current := sessionBody(t, callAuth(a, "GET", "/auth/session", "", cookie, ""))
+			csrf := current["csrf_token"].(string)
+			before := renewalReadSession(t, a, cookie)
+			a.store.now = func() time.Time { return before.AuthenticatedAt.Add(time.Minute) }
+			refreshesBefore := f.refreshes
+			response := renewalRequest(a, cookie, csrf, nil)
+			body := renewalBody(t, response)
+			after := renewalReadSession(t, a, cookie)
+			wantIdle := before.AuthenticatedAt.Add(time.Minute + sessionIdleLifetime)
+			if !after.IdleUntil.Equal(wantIdle) || !after.Until.Equal(wantIdle) || !after.AbsoluteUntil.Equal(before.AbsoluteUntil) || renewalExpiresAt(t, body).Unix() != wantIdle.Unix() {
+				t.Fatalf("renewed deadlines: want idle=%s absolute=%s got idle=%s until=%s absolute=%s body=%s", wantIdle, before.AbsoluteUntil, after.IdleUntil, after.Until, after.AbsoluteUntil, renewalExpiresAt(t, body))
+			}
+			if len(response.Result().Cookies()) != 0 {
+				t.Fatal("same-ID renewal rewrote the browser cookie")
+			}
+			beforeRefresh, afterRefresh := before.SDK[client.StorageKeyRefreshToken], after.SDK[client.StorageKeyRefreshToken]
+			if testCase.resource == nil && (beforeRefresh == "" || afterRefresh == "" || afterRefresh != beforeRefresh && f.refreshes <= refreshesBefore) {
+				t.Fatalf("resource-mode refresh token retention failed: before_present=%t after_present=%t changed=%t refreshes=%d", beforeRefresh != "", afterRefresh != "", afterRefresh != beforeRefresh, f.refreshes-refreshesBefore)
+			}
+		})
+	}
+}
+
+func TestSessionRenewalIdleIsCappedByAbsoluteDeadline(t *testing.T) {
+	now := time.Date(2026, 10, 24, 10, 0, 0, 0, time.UTC)
+	absolute := now.Add(sessionAbsoluteLifetime)
+	if got := nextSessionIdle(now.Add(6*24*time.Hour+23*time.Hour), absolute); !got.Equal(absolute) {
+		t.Fatalf("idle renewal exceeded absolute cap: %s", got)
+	}
+	if got := nextSessionIdle(now, absolute); !got.Equal(now.Add(sessionIdleLifetime)) {
+		t.Fatalf("normal idle renewal = %s", got)
+	}
+	if got := sessionCookieMaxAge(renewalPolicySession(now), now); got != int(sessionAbsoluteLifetime/time.Second) {
+		t.Fatalf("policy cookie max age = %d", got)
+	}
+	legacyUntil := now.Add(30 * time.Minute)
+	if got := sessionCookieMaxAge(&session{Until: legacyUntil}, now); got != int((30*time.Minute)/time.Second) {
+		t.Fatalf("legacy cookie max age = %d", got)
+	}
+}
+
+func TestLegacyUntilOnlySessionCannotBeUpgradedOrRenewed(t *testing.T) {
+	a, f := fixtureRuntime(t, "")
+	cookie := loginFixture(t, a, f)
+	current := sessionBody(t, callAuth(a, "GET", "/auth/session", "", cookie, ""))
+	csrf := current["csrf_token"].(string)
+	value, owner, err := a.store.acquire(context.Background(), cookie.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := a.store.nowTime()
+	legacyUntil := now.Add(30 * time.Minute)
+	value.PolicyVersion = 0
+	value.AuthenticatedAt = time.Time{}
+	value.IdleUntil = time.Time{}
+	value.AbsoluteUntil = time.Time{}
+	value.Until = legacyUntil
+	if err := a.store.commit(context.Background(), cookie.Value, owner, cookie.Value, value, false); err != nil {
+		t.Fatal(err)
+	}
+	get := callAuth(a, "GET", "/auth/session", "", cookie, "")
+	if get.Code != 200 || renewalExpiresAt(t, sessionBody(t, get)).Unix() != legacyUntil.Unix() {
+		t.Fatalf("legacy fixed expiry changed: %d %s", get.Code, get.Body.String())
+	}
+	touch := renewalRequest(a, cookie, csrf, nil)
+	if touch.Code != http.StatusConflict || sessionBody(t, touch)["error"] != "session_renewal_unsupported" || len(touch.Result().Cookies()) != 0 {
+		t.Fatalf("legacy session renewed: HTTP %d %s", touch.Code, touch.Body.String())
+	}
+	after := renewalReadSession(t, a, cookie)
+	if after.PolicyVersion != 0 || !after.IdleUntil.IsZero() || !after.AbsoluteUntil.IsZero() || !after.Until.Equal(legacyUntil) {
+		t.Fatalf("legacy record upgraded: %#v", after)
+	}
+}
+
+func TestMalformedSessionPolicyFailsClosed(t *testing.T) {
+	now := time.Date(2026, 10, 24, 10, 0, 0, 0, time.UTC)
+	valid := renewalPolicySession(now)
+	tests := []struct {
+		name   string
+		change func(*session)
+	}{
+		{name: "empty legacy", change: func(value *session) { value.PolicyVersion = 0; value.Until = time.Time{} }},
+		{name: "mixed legacy", change: func(value *session) { value.PolicyVersion = 0 }},
+		{name: "unknown policy", change: func(value *session) { value.PolicyVersion = 3 }},
+		{name: "missing authentication", change: func(value *session) { value.AuthenticatedAt = time.Time{} }},
+		{name: "missing idle", change: func(value *session) { value.IdleUntil = time.Time{} }},
+		{name: "missing absolute", change: func(value *session) { value.AbsoluteUntil = time.Time{} }},
+		{name: "legacy projection mismatch", change: func(value *session) { value.Until = value.Until.Add(-time.Minute) }},
+		{name: "absolute not seven days", change: func(value *session) {
+			value.AbsoluteUntil = value.AuthenticatedAt.Add(sessionAbsoluteLifetime + time.Second)
+		}},
+		{name: "idle after absolute", change: func(value *session) {
+			value.IdleUntil = value.AbsoluteUntil.Add(time.Second)
+			value.Until = value.IdleUntil
+		}},
+		{name: "idle before authentication", change: func(value *session) {
+			value.IdleUntil = value.AuthenticatedAt.Add(-time.Second)
+			value.Until = value.IdleUntil
+		}},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			value := renewalClone(t, valid)
+			testCase.change(value)
+			if err := validateSessionSchema(value, now); !errors.Is(err, _errInvalid) {
+				t.Fatalf("invalid policy accepted: %v", err)
+			}
+		})
+	}
+	if err := validateSessionSchema(valid, now); err != nil {
+		t.Fatalf("valid policy rejected: %v", err)
+	}
+	expired := renewalClone(t, valid)
+	expired.IdleUntil = now.Add(time.Second)
+	expired.Until = expired.IdleUntil
+	if _, err := sessionDeadline(expired, now.Add(2*time.Second)); !errors.Is(err, _errMissing) {
+		t.Fatalf("expired policy exposed: %v", err)
+	}
+}
+
+func TestSessionRenewalRejectsUnboundOrAmbiguousRequests(t *testing.T) {
+	a, f := fixtureRuntime(t, "")
+	cookie := loginFixture(t, a, f)
+	body := sessionBody(t, callAuth(a, "GET", "/auth/session", "", cookie, ""))
+	csrf := body["csrf_token"].(string)
+	t0 := renewalReadSession(t, a, cookie).AuthenticatedAt
+	a.store.now = func() time.Time { return t0.Add(time.Minute) }
+	before := renewalReadSession(t, a, cookie)
+	tests := []struct {
+		name   string
+		mutate func(*http.Request)
+		status int
+	}{
+		{name: "no cookie", mutate: func(r *http.Request) { r.Header.Del("Cookie") }, status: 401},
+		{name: "duplicate cookie", mutate: func(r *http.Request) { r.Header.Add("Cookie", cookie.String()) }, status: 401},
+		{name: "bearer", mutate: func(r *http.Request) { r.Header.Set("Authorization", "Bearer forbidden") }, status: 400},
+		{name: "wrong host", mutate: func(r *http.Request) { r.Host = "foreign.invalid" }, status: 403},
+		{name: "missing origin", mutate: func(r *http.Request) { r.Header.Set("Origin", "") }, status: 403},
+		{name: "duplicate origin", mutate: func(r *http.Request) { r.Header.Add("Origin", a.config.Origin) }, status: 403},
+		{name: "missing csrf", mutate: func(r *http.Request) { r.Header.Set("X-CSRF-Token", "") }, status: 403},
+		{name: "wrong csrf", mutate: func(r *http.Request) { r.Header.Set("X-CSRF-Token", "wrong") }, status: 403},
+		{name: "missing organization", mutate: func(r *http.Request) { r.Header.Del("X-Organization-ID") }, status: 409},
+		{name: "wrong revision", mutate: func(r *http.Request) { r.Header.Set("X-Organization-Revision", "2") }, status: 409},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			response := renewalRequest(a, cookie, csrf, testCase.mutate)
+			if response.Code != testCase.status || len(response.Result().Cookies()) != 0 {
+				t.Fatalf("HTTP %d cookies=%v body=%s", response.Code, response.Result().Cookies(), response.Body.String())
+			}
+			after := renewalReadSession(t, a, cookie)
+			if !after.IdleUntil.Equal(before.IdleUntil) || !after.Until.Equal(before.Until) {
+				t.Fatal("rejected request extended idle deadline")
+			}
+		})
+	}
+}
+
+func TestSessionRenewalProviderAndRedisFailuresDoNotExtend(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		resource []string
+	}{
+		{name: "identity-only", resource: []string{""}},
+		{name: "resource", resource: nil},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			a, f := fixtureRuntime(t, testCase.resource...)
+			cookie := loginFixture(t, a, f)
+			body := sessionBody(t, callAuth(a, "GET", "/auth/session", "", cookie, ""))
+			csrf := body["csrf_token"].(string)
+			before := renewalReadSession(t, a, cookie)
+			a.store.now = func() time.Time { return before.AuthenticatedAt.Add(time.Minute) }
+			f.unavailable = true
+			response := renewalRequest(a, cookie, csrf, nil)
+			if response.Code != http.StatusServiceUnavailable || len(response.Result().Cookies()) != 0 {
+				t.Fatalf("provider unavailable HTTP %d cookies=%v", response.Code, response.Result().Cookies())
+			}
+			after := renewalReadSession(t, a, cookie)
+			if !after.IdleUntil.Equal(before.IdleUntil) || !after.Until.Equal(before.Until) {
+				t.Fatal("provider failure extended idle deadline")
+			}
+		})
+	}
+}
+
+func TestSessionRenewalRejectsChangedCentralIdentityWithoutExtension(t *testing.T) {
+	a, f := fixtureRuntime(t, "")
+	cookie := loginFixture(t, a, f)
+	body := sessionBody(t, callAuth(a, "GET", "/auth/session", "", cookie, ""))
+	csrf := body["csrf_token"].(string)
+	before := renewalReadSession(t, a, cookie)
+	a.store.now = func() time.Time { return before.AuthenticatedAt.Add(time.Minute) }
+	f.revision = "2"
+	response := renewalRequest(a, cookie, csrf, nil)
+	if response.Code != http.StatusConflict || sessionBody(t, response)["error"] != "organization_identity_changed" || len(response.Result().Cookies()) != 0 {
+		t.Fatalf("changed central identity HTTP %d cookies=%v body=%s", response.Code, response.Result().Cookies(), response.Body.String())
+	}
+	after := renewalReadSession(t, a, cookie)
+	if after.Organization != before.Organization || after.Revision != before.Revision || !after.IdleUntil.Equal(before.IdleUntil) || !after.Until.Equal(before.Until) {
+		t.Fatalf("renewal adopted changed identity or extended idle: before=%#v after=%#v", before, after)
+	}
+}
+
+// renewalBoundaryDelayedCommit models bounded latency between computing the
+// Redis TTL and executing SET. It does not alter the record or Redis clock.
+type renewalBoundaryDelayedCommit struct{ armed atomic.Bool }
+
+func (h *renewalBoundaryDelayedCommit) DialHook(next redis.DialHook) redis.DialHook {
+	return next
+}
+
+func (h *renewalBoundaryDelayedCommit) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func (h *renewalBoundaryDelayedCommit) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "eval" && strings.Contains(cmd.String(), "ARGV[5]") && h.armed.CompareAndSwap(true, false) {
+			time.Sleep(700 * time.Millisecond)
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func TestResourceRenewalRechecksOriginalIdleAfterOnlineIdentity(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		t.Run(method, func(t *testing.T) {
+			a, f := fixtureRuntime(t)
+			cookie := loginFixture(t, a, f)
+			body := sessionBody(t, callAuth(a, http.MethodGet, "/auth/session", "", cookie, ""))
+			csrf := body["csrf_token"].(string)
+			value, owner, err := a.store.acquire(context.Background(), cookie.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(2 * time.Second)
+			value.IdleUntil, value.Until = deadline, deadline
+			delay := &renewalBoundaryDelayedCommit{}
+			a.store.db.AddHook(delay)
+			delay.armed.Store(true)
+			if err := a.store.commit(context.Background(), cookie.Value, owner, cookie.Value, value, false); err != nil {
+				t.Fatal(err)
+			}
+			if delay.armed.Load() || !time.Now().Before(deadline) {
+				t.Fatal("fixture did not cross setup with a still-valid original deadline")
+			}
+			base := a.http.Transport
+			a.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == "/api/my-account/organization-identity" {
+					time.Sleep(time.Until(deadline.Add(100 * time.Millisecond)))
+				}
+				return base.RoundTrip(r)
+			})
+			response := callAuth(a, method, "/auth/session", "{}", cookie, csrf)
+			if time.Now().Before(deadline) {
+				t.Fatal("online identity check did not cross original idle deadline")
+			}
+			if response.Code >= 200 && response.Code < 300 {
+				stored := renewalReadSession(t, a, cookie)
+				t.Fatalf("accepted expired original session: method=%s status=%d old_idle=%s stored_idle=%s", method, response.Code, deadline.Format(time.RFC3339Nano), stored.IdleUntil.Format(time.RFC3339Nano))
+			}
+		})
+	}
+}
+
+func TestSessionRenewalRedisUnavailableDoesNotAlterStoredDeadline(t *testing.T) {
+	a, f := fixtureRuntime(t, "")
+	cookie := loginFixture(t, a, f)
+	body := sessionBody(t, callAuth(a, "GET", "/auth/session", "", cookie, ""))
+	csrf := body["csrf_token"].(string)
+	before := renewalReadSession(t, a, cookie)
+	a.store.now = func() time.Time { return before.AuthenticatedAt.Add(time.Minute) }
+	original := a.store.db
+	a.store.db = redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", DialTimeout: 20 * time.Millisecond, MaxRetries: -1})
+	response := renewalRequest(a, cookie, csrf, nil)
+	if response.Code != http.StatusServiceUnavailable || len(response.Result().Cookies()) != 0 {
+		t.Fatalf("Redis unavailable HTTP %d cookies=%v", response.Code, response.Result().Cookies())
+	}
+	_ = a.store.db.Close()
+	a.store.db = original
+	after := renewalReadSession(t, a, cookie)
+	if !after.IdleUntil.Equal(before.IdleUntil) || !after.Until.Equal(before.Until) {
+		t.Fatal("Redis failure altered persisted deadline")
+	}
+}
+
+func TestIdentityUpdateMergesRenewalButRejectsIdentityMutation(t *testing.T) {
+	now := time.Date(2026, 10, 24, 10, 0, 0, 0, time.UTC)
+	before := renewalPolicySession(now)
+	current := renewalClone(t, before)
+	current.IdleUntil = now.Add(10 * time.Hour)
+	current.Until = current.IdleUntil
+	current.SDK[client.StorageKeyRefreshToken] = "refresh-rotated"
+	lateGET := renewalClone(t, before)
+	lateGET.SDK[client.StorageKeyRefreshToken] = "refresh-stale"
+	if err := mergeIdentityUpdate(current, before, lateGET, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if !current.IdleUntil.Equal(now.Add(10*time.Hour)) || current.SDK[client.StorageKeyRefreshToken] != "refresh-rotated" {
+		t.Fatal("late identity update clobbered renewed deadline or rotated SDK state")
+	}
+	earlierTouch := renewalClone(t, before)
+	earlierTouch.IdleUntil = now.Add(9 * time.Hour)
+	earlierTouch.Until = earlierTouch.IdleUntil
+	if err := mergeIdentityUpdate(current, before, earlierTouch, now.Add(2*time.Minute)); err != nil || !current.IdleUntil.Equal(now.Add(10*time.Hour)) {
+		t.Fatalf("two-touch merge rewound deadline: %v %s", err, current.IdleUntil)
+	}
+	rotated := renewalClone(t, before)
+	rotated.Revision = "2"
+	rotated.CSRF = "csrf-new"
+	if err := mergeIdentityUpdate(rotated, before, lateGET, now.Add(time.Minute)); classify(err).status != http.StatusConflict {
+		t.Fatalf("identity rotation was merged: %v", err)
+	}
+}
+
+func TestFinishIdentityPreservesRenewalAndCannotReviveLogout(t *testing.T) {
+	a, f := fixtureRuntime(t, "")
+	cookie := loginFixture(t, a, f)
+	stale := renewalReadSession(t, a, cookie)
+	current, owner, err := a.store.acquire(context.Background(), cookie.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current.IdleUntil = stale.IdleUntil.Add(time.Hour)
+	current.Until = current.IdleUntil
+	current.SDK[client.StorageKeyRefreshToken] = "refresh-rotated"
+	if err := a.store.commit(context.Background(), cookie.Value, owner, cookie.Value, current, false); err != nil {
+		t.Fatal(err)
+	}
+	late := renewalClone(t, stale)
+	late.SDK[client.StorageKeyRefreshToken] = "refresh-stale"
+	if err := a.finishIdentity(context.Background(), cookie.Value, cookie.Value, stale, late, false); err != nil {
+		t.Fatal(err)
+	}
+	merged := renewalReadSession(t, a, cookie)
+	if !merged.IdleUntil.Equal(current.IdleUntil) || merged.SDK[client.StorageKeyRefreshToken] != "refresh-rotated" {
+		t.Fatal("finishIdentity clobbered concurrent renewal or SDK rotation")
+	}
+	remove, removeOwner, err := a.store.acquire(context.Background(), cookie.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.store.commit(context.Background(), cookie.Value, removeOwner, cookie.Value, remove, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.finishIdentity(context.Background(), cookie.Value, cookie.Value, merged, renewalClone(t, merged), false); !errors.Is(err, _errMissing) {
+		t.Fatalf("late update revived logout: %v", err)
+	}
+	if _, _, err := a.store.acquire(context.Background(), cookie.Value); !errors.Is(err, _errMissing) {
+		t.Fatalf("logged-out session revived: %v", err)
+	}
+}
+
+func TestLateSessionViewCannotClobberConcurrentRenewal(t *testing.T) {
+	a, f := fixtureRuntime(t, "")
+	cookie := loginFixture(t, a, f)
+	body := sessionBody(t, callAuth(a, "GET", "/auth/session", "", cookie, ""))
+	csrf := body["csrf_token"].(string)
+	before := renewalReadSession(t, a, cookie)
+	a.store.now = func() time.Time { return before.AuthenticatedAt.Add(time.Minute) }
+	observer := observeIdentity(t, a, true)
+
+	var (
+		group     sync.WaitGroup
+		touchCode int
+		getCode   int
+		getExpiry time.Time
+		touchDone = make(chan struct{})
+		getDone   = make(chan struct{})
+	)
+	group.Add(2)
+	go func() {
+		defer group.Done()
+		defer close(touchDone)
+		touchCode = renewalRequest(a, cookie, csrf, nil).Code
+	}()
+	select {
+	case <-observer.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("touch did not reach online identity verification")
+	}
+	go func() {
+		defer group.Done()
+		defer close(getDone)
+		response := callAuth(a, "GET", "/auth/session", "", cookie, "")
+		getCode = response.Code
+		if response.Code == http.StatusOK {
+			getExpiry = renewalExpiresAt(t, sessionBody(t, response))
+		}
+	}()
+	select {
+	case <-observer.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("late GET did not reach online identity verification")
+	}
+	observer.release <- struct{}{}
+	select {
+	case <-touchDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("touch did not finish")
+	}
+	if touchCode != http.StatusOK {
+		t.Fatalf("touch HTTP %d", touchCode)
+	}
+	observer.release <- struct{}{}
+	select {
+	case <-getDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("late GET did not finish")
+	}
+	group.Wait()
+	wantIdle := before.AuthenticatedAt.Add(time.Minute + sessionIdleLifetime)
+	after := renewalReadSession(t, a, cookie)
+	if getCode != http.StatusOK || getExpiry.Unix() != wantIdle.Unix() || !after.IdleUntil.Equal(wantIdle) || !after.Until.Equal(wantIdle) {
+		t.Fatalf("late GET rolled back renewal: HTTP %d response=%s stored=%s want=%s", getCode, getExpiry, after.IdleUntil, wantIdle)
+	}
+}
+
+func TestRenewalRejectsStaleCookieWithoutReplacingCurrentSession(t *testing.T) {
+	a, f := fixtureRuntime(t, "")
+	oldCookie := loginFixture(t, a, f)
+	f.revision = "2"
+	rotated := callAuth(a, "GET", "/auth/session", "", oldCookie, "")
+	if rotated.Code != http.StatusOK || len(rotated.Result().Cookies()) != 1 {
+		t.Fatalf("identity rotation failed: HTTP %d", rotated.Code)
+	}
+	newCookie := rotated.Result().Cookies()[0]
+	response := renewalRequest(a, oldCookie, "stale-csrf", nil)
+	if response.Code != http.StatusUnauthorized || len(response.Result().Cookies()) != 0 {
+		t.Fatalf("stale touch HTTP %d cookies=%v body=%s", response.Code, response.Result().Cookies(), response.Body.String())
+	}
+	if got := callAuth(a, "GET", "/auth/session", "", newCookie, ""); got.Code != http.StatusOK {
+		t.Fatal("stale touch invalidated the current rotated cookie")
+	}
+}
