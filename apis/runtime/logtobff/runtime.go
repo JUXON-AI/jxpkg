@@ -176,6 +176,7 @@ func (a *Runtime) Close() error { return a.store.db.Close() }
 func (a *Runtime) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /auth/login", a.login)
+	mux.HandleFunc("GET /auth/auto-login", a.autoLogin)
 	mux.HandleFunc("GET /auth/callback", a.callback)
 	mux.HandleFunc("GET /auth/session", a.withSession(a.sessionView))
 	mux.HandleFunc("POST /auth/session", a.withSession(a.renewSession))

@@ -75,6 +75,17 @@ type sdkStorage map[string]string
 func (s sdkStorage) GetItem(key string) string { return s[key] }
 func (s sdkStorage) SetItem(key, value string) { s[key] = value }
 func (a *Runtime) login(w http.ResponseWriter, r *http.Request) {
+	a.startLogin(w, r, "")
+}
+
+// autoLogin performs one silent authorization attempt. The frontend uses this
+// fixed route only when the product has no browser session; prompt=none keeps
+// the public page usable when the central browser has no reusable authority.
+func (a *Runtime) autoLogin(w http.ResponseWriter, r *http.Request) {
+	a.startLogin(w, r, "none")
+}
+
+func (a *Runtime) startLogin(w http.ResponseWriter, r *http.Request, prompt string) {
 	ctx, cancel := context.WithTimeout(r.Context(), _authenticationTimeout)
 	defer cancel()
 	r = r.WithContext(ctx)
@@ -97,7 +108,11 @@ func (a *Runtime) login(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, 503, "login_entropy_unavailable")
 		return
 	}
-	target, err := a.sdk(r.Context(), values).SignIn(&client.SignInOptions{RedirectUri: a.config.Origin + "/auth/callback", ExtraParams: map[string]string{"nonce": nonce, "organization_identity": "required"}})
+	target, err := a.sdk(r.Context(), values).SignIn(&client.SignInOptions{
+		RedirectUri: a.config.Origin + "/auth/callback",
+		Prompt:      prompt,
+		ExtraParams: map[string]string{"nonce": nonce, "organization_identity": "required"},
+	})
 	if err != nil {
 		fail(w, r, 503, "login_provider_unavailable")
 		return
@@ -107,7 +122,13 @@ func (a *Runtime) login(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, 503, "login_state_unavailable")
 		return
 	}
-	id, _, err := a.store.start(r.Context(), transaction{SDK: values, Nonce: nonce, State: authorizationURL.Query().Get("state"), ReturnTo: returnTo})
+	id, _, err := a.store.start(r.Context(), transaction{
+		SDK:      values,
+		Nonce:    nonce,
+		State:    authorizationURL.Query().Get("state"),
+		ReturnTo: returnTo,
+		Silent:   prompt == "none",
+	})
 	if err != nil {
 		fail(w, r, 503, "login_store_unavailable")
 		return
@@ -115,6 +136,33 @@ func (a *Runtime) login(w http.ResponseWriter, r *http.Request) {
 	a.setCookie(w, a.config.CookieName+"_login", id, 300)
 	http.Redirect(w, r, target, 302)
 }
+
+// silentLoginUnavailable accepts only an OAuth error after the one-time
+// transaction and state checks have succeeded. It never turns guest navigation
+// into an authentication decision.
+func silentLoginUnavailable(query url.Values) bool {
+	if len(query["error"]) != 1 || len(query["code"]) != 0 {
+		return false
+	}
+	switch query.Get("error") {
+	case "login_required", "interaction_required", "consent_required", "unmet_authentication_requirements", "access_denied", "server_error", "temporarily_unavailable":
+		return true
+	default:
+		return false
+	}
+}
+
+func silentGuestRedirect(origin, returnTo string) string {
+	target, err := url.Parse(returnTo)
+	if err != nil {
+		return origin + "/?sso_auto=guest"
+	}
+	query := target.Query()
+	query.Set("sso_auto", "guest")
+	target.RawQuery = query.Encode()
+	return origin + target.String()
+}
+
 func (a *Runtime) callback(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), _authenticationTimeout)
 	defer cancel()
@@ -137,6 +185,12 @@ func (a *Runtime) callback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if len(q["state"]) != 1 || !equalCSRF(q.Get("state"), tx.State) {
 		fail(w, r, 400, "callback_state_invalid")
+		return
+	}
+	if tx.Silent && silentLoginUnavailable(q) {
+		// Consuming the transaction and validating state happen before this branch.
+		// The guest marker is navigation state only; no authority is published.
+		http.Redirect(w, r, silentGuestRedirect(a.config.Origin, tx.ReturnTo), http.StatusFound)
 		return
 	}
 	if len(q["error"]) == 1 && q.Get("error") == "access_denied" && len(q["code"]) == 0 {
