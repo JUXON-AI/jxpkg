@@ -58,6 +58,9 @@ type transaction struct {
 	Nonce    string            `json:"nonce"`
 	State    string            `json:"state"`
 	ReturnTo string            `json:"return_to"`
+	// Silent only changes how a validated provider error is rendered. It is not
+	// browser-controlled authentication state and never creates a session.
+	Silent bool `json:"silent,omitempty"`
 }
 
 func (s *store) opaque() (string, error) {
