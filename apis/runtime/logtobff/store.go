@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	mathrand "math/rand/v2"
 	"time"
 
 	"github.com/JUXON-AI/jxpkg/logs"
@@ -26,7 +27,21 @@ const (
 	sessionPolicyVersion    uint64 = 2
 	sessionIdleLifetime            = 8 * time.Hour
 	sessionAbsoluteLifetime        = 7 * 24 * time.Hour
+	sessionAcquireRetryMin         = 2 * time.Millisecond
+	sessionAcquireRetryMax         = 25 * time.Millisecond
+	sessionAcquireMissing   int64  = -1
+	sessionAcquireBusy      int64  = 0
+	sessionAcquireOwned     int64  = 1
 )
+
+// acquire's script reads the source before taking the lease so a missing or
+// wrong-type record cannot create a new lock. The owner remains the fencing
+// token used by commit and release, including when a late Eval response is lost.
+const acquireScript = `
+local data=redis.call('get',KEYS[2])
+if not data then return {-1} end
+if not redis.call('set',KEYS[1],ARGV[1],'NX','PX',ARGV[2]) then return {0} end
+return {1,data}`
 
 // Redis owns short-lived authentication capabilities only. Every value is encrypted;
 // the key prefix is authenticated too, preventing transaction/session substitution.
@@ -235,44 +250,76 @@ func (s *store) acquire(ctx context.Context, id string) (*session, string, error
 		return nil, "", err
 	}
 	lock := s.prefix + "lock:" + id
+	key := s.prefix + "s:" + id
 	// Remote identity checks share the 20s authentication budget with this wait.
 	deadline := time.Now().Add(_authenticationTimeout)
 	for {
-		ok, err := s.db.SetNX(ctx, lock, owner, 30*time.Second).Result()
+		result, err := s.db.Eval(ctx, acquireScript, []string{lock, key}, owner, (30 * time.Second).Milliseconds()).Slice()
 		if err != nil {
+			// Redis does not roll back commands that ran before a Lua error. The
+			// owner fence makes cleanup safe when no lease, another owner's lease,
+			// or this call's late lease is present.
+			s.release(ctx, id, owner)
 			return nil, "", err
 		}
-		if ok {
-			break
+		if len(result) == 0 {
+			s.release(ctx, id, owner)
+			return nil, "", errors.New("acquire authentication session: invalid script response")
 		}
-		if time.Now().After(deadline) {
-			return nil, "", _errBusy
+		status, ok := result[0].(int64)
+		if !ok {
+			s.release(ctx, id, owner)
+			return nil, "", errors.New("acquire authentication session: invalid script status")
 		}
-		select {
-		case <-ctx.Done():
-			return nil, "", ctx.Err()
-		case <-time.After(100 * time.Millisecond):
+		switch status {
+		case sessionAcquireMissing:
+			return nil, "", _errMissing
+		case sessionAcquireBusy:
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return nil, "", _errBusy
+			}
+			timer := time.NewTimer(sessionAcquireRetryDelay(remaining))
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, "", ctx.Err()
+			case <-timer.C:
+			}
+			continue
+		case sessionAcquireOwned:
+		default:
+			s.release(ctx, id, owner)
+			return nil, "", errors.New("acquire authentication session: unknown script status")
 		}
-	}
-	key := s.prefix + "s:" + id
-	data, err := s.db.Get(ctx, key).Bytes()
-	if err != nil {
-		s.release(ctx, id, owner)
-		if errors.Is(err, redis.Nil) {
-			err = _errMissing
+		if len(result) != 2 {
+			s.release(ctx, id, owner)
+			return nil, "", errors.New("acquire authentication session: invalid script data")
 		}
-		return nil, "", err
+		data, ok := result[1].(string)
+		if !ok {
+			s.release(ctx, id, owner)
+			return nil, "", errors.New("acquire authentication session: invalid script payload")
+		}
+		var value session
+		if err = s.open(key, []byte(data), &value); err != nil {
+			s.release(ctx, id, owner)
+			return nil, "", err
+		}
+		if _, err := sessionDeadline(&value, s.nowTime()); err != nil {
+			s.release(ctx, id, owner)
+			return nil, "", err
+		}
+		return &value, owner, nil
 	}
-	var value session
-	if err = s.open(key, data, &value); err != nil {
-		s.release(ctx, id, owner)
-		return nil, "", err
+}
+
+func sessionAcquireRetryDelay(remaining time.Duration) time.Duration {
+	delay := sessionAcquireRetryMin + time.Duration(mathrand.Int64N(int64(sessionAcquireRetryMax-sessionAcquireRetryMin+1)))
+	if delay > remaining {
+		return remaining
 	}
-	if _, err := sessionDeadline(&value, s.nowTime()); err != nil {
-		s.release(ctx, id, owner)
-		return nil, "", err
-	}
-	return &value, owner, nil
+	return delay
 }
 func (s *store) release(requestContext context.Context, id, owner string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(requestContext), time.Second)
