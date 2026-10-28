@@ -14,33 +14,41 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/JUXON-AI/jxpkg/requestid"
 )
 
 const (
-	tokenPath      = "/oidc/token"
-	snapshotPath   = "/api/workload-directory/snapshot"
-	directoryScope = "directory:read"
+	tokenPath         = "/oidc/token"
+	snapshotPath      = "/api/workload-directory/snapshot"
+	organizationsPath = "/api/workload-directory/organizations"
+	directoryScope    = "directory:read"
+
+	organizationDeniedBody = `{"error":"organization_access_denied"}`
 
 	defaultTimeout = 10 * time.Second
 	minTimeout     = time.Second
 	maxTimeout     = 30 * time.Second
 
-	maxOrganizationIDRunes = 21
-	maxMemberIDRunes       = 128
-	maxDepartmentIDRunes   = 21
-	maxPermissionRunes     = 256
-	maxClientIDRunes       = 128
-	maxSecretBytes         = 4096
-	maxTokenRunes          = 32768
-	maxMembers             = 256
-	maxDepartments         = 1000
-	maxDirectDepartments   = 100
-	maxPermissions         = 32
-	maxRequestBytes        = 32 << 10
-	maxTokenBodyBytes      = 64 << 10
-	maxSnapshotBodyBytes   = 4 << 20
-	maxTokenLifetime       = int64(3600)
-	tokenExpirySkew        = 30 * time.Second
+	maxOrganizationIDRunes    = 21
+	maxOrganizationQueryRunes = 128
+	maxMemberIDRunes          = 128
+	maxDepartmentIDRunes      = 21
+	maxPermissionRunes        = 256
+	maxClientIDRunes          = 128
+	maxSecretBytes            = 4096
+	maxTokenRunes             = 32768
+	maxMembers                = 256
+	maxOrganizations          = 100
+	maxDepartments            = 1000
+	maxDirectDepartments      = 100
+	maxPermissions            = 32
+	maxRequestBytes           = 32 << 10
+	maxTokenBodyBytes         = 64 << 10
+	maxSnapshotBodyBytes      = 4 << 20
+	maxErrorBodyBytes         = 256
+	maxTokenLifetime          = int64(3600)
+	tokenExpirySkew           = 30 * time.Second
 )
 
 type snapshotRequest struct {
@@ -60,6 +68,12 @@ type listPageRequest struct {
 	IncludeMembershipEpoch bool     `json:"include_membership_epoch,omitempty"`
 }
 
+type organizationSearchRequest struct {
+	Query  string `json:"query"`
+	Cursor string `json:"cursor,omitempty"`
+	Limit  int    `json:"limit"`
+}
+
 type tokenResponse struct {
 	AccessToken *string         `json:"access_token"`
 	TokenType   *string         `json:"token_type"`
@@ -77,6 +91,13 @@ func NewClient(config Config) (*Client, error) {
 	}
 	transport := defaultTransport.Clone()
 	transport.Proxy = nil
+	return NewClientWithTransport(config, transport)
+}
+
+// NewClientWithTransport creates a fixed-origin HTTPS client with an explicit
+// startup-injected transport. The caller owns that trusted dependency and any
+// connection policy it applies; request callers cannot replace it.
+func NewClientWithTransport(config Config, transport http.RoundTripper) (*Client, error) {
 	return newClient(config, transport, false)
 }
 
@@ -109,6 +130,15 @@ func newClient(config Config, transport http.RoundTripper, allowPlainHTTP bool) 
 		},
 		now: time.Now,
 	}, nil
+}
+
+// Close releases idle HTTP connections held by the client. It does not cancel
+// in-flight requests or invalidate cached credentials.
+func (client *Client) Close() error {
+	if client != nil && client.http != nil {
+		client.http.CloseIdleConnections()
+	}
+	return nil
 }
 
 // Snapshot reads one online snapshot for organizationID and the optional
@@ -164,10 +194,8 @@ func (client *Client) Snapshot(ctx context.Context, organizationID string, userI
 }
 
 // ListPage reads one bounded provider page from the same snapshot endpoint.
-// The provider Logto handler and real interop for this listing contract are
-// pending; this client method must not be described as live until that joint
-// provider review is complete. A zero limit defaults to 100. The returned
-// cursor is nil only for an explicit JSON null.
+// The provider registry must explicitly enable member listing. A zero limit
+// defaults to 100. The returned cursor is nil only for an explicit JSON null.
 func (client *Client) ListPage(ctx context.Context, organizationID, cursor string, limit int, options Options) (Snapshot, *string, error) {
 	if !client.ready(ctx) {
 		return Snapshot{}, nil, ErrUnavailable
@@ -231,12 +259,57 @@ func (client *Client) ListPage(ctx context.Context, organizationID, cursor strin
 	return snapshot, nextCursor, nil
 }
 
+// SearchOrganizations reads one bounded page of organizations admitted to the
+// configured workload client. A nil cursor omits the provider cursor; the same
+// absence in the response means the page is terminal.
+func (client *Client) SearchOrganizations(ctx context.Context, query, cursor string, limit int) ([]Organization, *string, error) {
+	if !client.ready(ctx) {
+		return nil, nil, ErrUnavailable
+	}
+	if !validOrganizationQuery(query) || limit < 1 || limit > maxOrganizations ||
+		(cursor != "" && !validOrganizationID(cursor)) {
+		return nil, nil, ErrProtocol
+	}
+	body, err := json.Marshal(organizationSearchRequest{Query: query, Cursor: cursor, Limit: limit})
+	if err != nil {
+		return nil, nil, ErrUnavailable
+	}
+	if len(body) > maxRequestBytes {
+		return nil, nil, ErrProtocol
+	}
+	token, err := client.accessToken(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	document, err := client.postDirectory(ctx, organizationsPath, token, body)
+	if err != nil {
+		return nil, nil, err
+	}
+	var response wireOrganizationSearch
+	if err := strictJSON(document, &response); err != nil {
+		return nil, nil, ErrProtocol
+	}
+	nextCursor, err := parseOptionalOrganizationCursor(response.NextCursor)
+	if err != nil {
+		return nil, nil, ErrProtocol
+	}
+	organizations, err := validateOrganizationSearch(response.Organizations, cursor, nextCursor, limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	return organizations, nextCursor, nil
+}
+
 func (client *Client) ready(ctx context.Context) bool {
 	return client != nil && client.http != nil && client.now != nil && ctx != nil
 }
 
 func (client *Client) postSnapshot(ctx context.Context, token string, body []byte) ([]byte, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.config.Endpoint+snapshotPath, bytes.NewReader(body))
+	return client.postDirectory(ctx, snapshotPath, token, body)
+}
+
+func (client *Client) postDirectory(ctx context.Context, path, token string, body []byte) ([]byte, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.config.Endpoint+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, ErrUnavailable
 	}
@@ -248,7 +321,7 @@ func (client *Client) postSnapshot(ctx context.Context, token string, body []byt
 		return nil, requestFailure(ctx, err)
 	}
 	defer response.Body.Close()
-	if err := classifyStatus(response.StatusCode, false); err != nil {
+	if err := classifyDirectoryResponse(response); err != nil {
 		return nil, err
 	}
 	return readJSONResponse(ctx, response, maxSnapshotBodyBytes)
@@ -392,6 +465,31 @@ func classifyStatus(status int, tokenRequest bool) error {
 	return ErrProtocol
 }
 
+func classifyDirectoryResponse(response *http.Response) error {
+	if response == nil {
+		return ErrProtocol
+	}
+	if response.StatusCode != http.StatusForbidden {
+		return classifyStatus(response.StatusCode, false)
+	}
+	if organizationAccessDenied(response) {
+		return ErrOrganizationDenied
+	}
+	return ErrDenied
+}
+
+func organizationAccessDenied(response *http.Response) bool {
+	if response.Body == nil || response.ContentLength > maxErrorBodyBytes {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		return false
+	}
+	document, err := io.ReadAll(io.LimitReader(response.Body, maxErrorBodyBytes+1))
+	return err == nil && bytes.Equal(document, []byte(organizationDeniedBody))
+}
+
 func readJSONResponse(ctx context.Context, response *http.Response, limit int64) ([]byte, error) {
 	if ctx != nil && ctx.Err() != nil {
 		return nil, wrapContextFailure(ctx.Err())
@@ -480,10 +578,24 @@ type boundedTransport struct {
 func (transport *boundedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	if transport == nil || transport.base == nil || request == nil || request.URL == nil ||
 		request.Method != http.MethodPost || request.URL.Scheme+"://"+request.URL.Host != transport.origin ||
-		(request.URL.Path != tokenPath && request.URL.Path != snapshotPath) || request.URL.RawQuery != "" {
+		(request.URL.Path != tokenPath && request.URL.Path != snapshotPath && request.URL.Path != organizationsPath) ||
+		request.URL.RawQuery != "" {
 		return nil, errors.New("logtodirectory: unregistered endpoint")
 	}
-	return transport.base.RoundTrip(request)
+	clone := request.Clone(request.Context())
+	if id := requestid.FromContext(request.Context()); id != "" {
+		clone.Header.Set("X-Request-Id", id)
+	}
+	return transport.base.RoundTrip(clone)
+}
+
+func (transport *boundedTransport) CloseIdleConnections() {
+	if transport == nil || transport.base == nil {
+		return
+	}
+	if closer, ok := transport.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 }
 
 func canonicalValue(value string, limit int) bool {
@@ -507,6 +619,30 @@ func displayValue(value string, limit int, allowEmpty bool) bool {
 	}
 	for _, character := range value {
 		if unicode.IsControl(character) && character != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
+func validOrganizationQuery(value string) bool {
+	if !utf8.ValidString(value) || utf8.RuneCountInString(value) > maxOrganizationQueryRunes {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
+}
+
+func validOrganizationID(value string) bool {
+	if value == "" || !utf8.ValidString(value) || utf8.RuneCountInString(value) > maxOrganizationIDRunes {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsSpace(character) || unicode.IsControl(character) || character == '\ufeff' {
 			return false
 		}
 	}

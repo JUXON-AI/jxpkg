@@ -2,6 +2,7 @@ package logtodirectory
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -11,6 +12,10 @@ var (
 	// ErrDenied reports that the configured workload client, organization, or
 	// requested member is not authorized for the directory operation.
 	ErrDenied = errors.New("logtodirectory: denied")
+	// ErrOrganizationDenied reports that the authenticated workload client is
+	// allowed to use the directory but the requested organization is not. It
+	// wraps ErrDenied so existing consumers retain their denial behavior.
+	ErrOrganizationDenied = fmt.Errorf("%w: organization access denied", ErrDenied)
 	// ErrUnavailable reports a temporary transport, dependency, timeout, or
 	// context failure. Callers may retry according to their own policy.
 	ErrUnavailable = errors.New("logtodirectory: unavailable")
@@ -46,7 +51,8 @@ type Options struct {
 	IncludeMembershipEpoch bool
 }
 
-// Organization is the organization identity returned with a directory snapshot.
+// Organization is an organization identity returned by a snapshot or bounded
+// search page.
 type Organization struct {
 	// ID is the Logto organization identifier.
 	ID string `json:"id"`
