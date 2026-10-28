@@ -19,7 +19,7 @@ const (
 type Department struct {
 	// ID 来自权威目录，必须属于 Authorization.Member 所在组织，不转换为数字标识。
 	ID string `json:"id"`
-	// AncestorIDs 来自同一组织的权威目录，按 root 到 parent 排列，不包含部门自身。
+	// AncestorIDs 来自同一组织的权威目录，不包含部门自身，保留生产者提供的顺序。
 	AncestorIDs []string `json:"ancestor_ids"`
 }
 
