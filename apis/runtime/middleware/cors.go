@@ -21,7 +21,7 @@ var (
 	defaultCORSMethods = []string{"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"}
 
 	// defaultCORSHeaders 是默认允许跨源调用显式发送的请求头集合。
-	defaultCORSHeaders = []string{"Accept", "Authorization", "Content-Type", "Env", DefaultCSRFHeader}
+	defaultCORSHeaders = []string{"Accept", "Authorization", "Content-Type", "Env", "X-CSRF-Token"}
 
 	// defaultCORSExposedHeaders 是默认允许浏览器脚本读取的响应头集合。
 	defaultCORSExposedHeaders = []string{"Content-Length"}

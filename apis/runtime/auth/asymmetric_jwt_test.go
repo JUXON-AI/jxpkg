@@ -132,28 +132,6 @@ func TestTokenVerifierRejectsSignedInvalidJSONEnvelopes(t *testing.T) {
 	}
 }
 
-func TestTokenVerifierRejectsLegacyHS256(t *testing.T) {
-	secret := strings.Repeat("s", minimumJWTSecretBytes)
-	setJWTConfig(JWTConfig{Secret: secret, Expire: time.Hour})
-	t.Cleanup(func() { setJWTConfig(JWTConfig{}) })
-	legacyRaw, _, err := IssueIdentityToken(42, 84, 126, 7, LoginWayEmail)
-	if err != nil {
-		t.Fatalf("IssueIdentityToken: %v", err)
-	}
-
-	_, verificationKey, err := GenerateTokenSigner("key-1")
-	if err != nil {
-		t.Fatalf("GenerateTokenSigner: %v", err)
-	}
-	verifier, err := NewTokenVerifier([]VerificationKey{verificationKey})
-	if err != nil {
-		t.Fatalf("NewTokenVerifier: %v", err)
-	}
-	if _, err := verifier.Verify(context.Background(), legacyRaw, testIssuer, testAudience); !errors.Is(err, ErrInvalidCredential) {
-		t.Fatalf("Verify legacy HS256 error = %v, want ErrInvalidCredential", err)
-	}
-}
-
 func TestTokenSignerAndVerifier(t *testing.T) {
 	signer, verificationKey, err := GenerateTokenSigner("active-2026-09")
 	if err != nil {
@@ -177,8 +155,8 @@ func TestTokenSignerAndVerifier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
-	if got.Subject != claims.Subject || got.UserID != claims.UserID || got.ID != claims.ID {
-		t.Fatalf("claims = %+v, want subject %q, user %d, jti %q", got, claims.Subject, claims.UserID, claims.ID)
+	if got.Subject != claims.Subject || got.ID != claims.ID {
+		t.Fatalf("claims = %+v, want subject %q, jti %q", got, claims.Subject, claims.ID)
 	}
 
 	parsed, _, err := jwt.NewParser().ParseUnverified(raw, jwt.MapClaims{})
@@ -540,11 +518,6 @@ func validAsymmetricClaims(now time.Time) *UserClaims {
 			IssuedAt:  jwt.NewNumericDate(now.Add(-time.Minute)),
 			ID:        "token-123",
 		},
-		UserID:          42,
-		UIN:             84,
-		CompanyID:       126,
-		MembershipEpoch: 7,
-		LoginWay:        LoginWayEmail,
 	}
 }
 
@@ -576,7 +549,7 @@ func (verifier fakeTokenVerifier) Verify(context.Context, string, string, string
 
 func validSignedPayload(now time.Time, prefix string) string {
 	return fmt.Sprintf(
-		`{%s"iss":%q,"sub":"user-42","aud":[%q],"exp":%d,"iat":%d,"jti":"token-123","c":42,"u":84,"o":126,"m":7,"l":2}`,
+		`{%s"iss":%q,"sub":"user-42","aud":[%q],"exp":%d,"iat":%d,"jti":"token-123"}`,
 		prefix,
 		testIssuer,
 		testAudience,
