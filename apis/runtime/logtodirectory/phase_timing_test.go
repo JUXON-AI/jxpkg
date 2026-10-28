@@ -17,8 +17,10 @@ import (
 
 // The diagnostic must preserve trace correlation without inheriting arbitrary sensitive logger fields.
 func TestPhaseTimingOnlyEmitsBoundedMetadata(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "phase.log")
-	config := logs.LogsConfig{"default": {{Writer: logs.WriterFile, Encoder: logs.EncoderStandard, Level: zapcore.InfoLevel, Logger: &lumberjack.Logger{Filename: path}}}}
+	var (
+		path   = filepath.Join(t.TempDir(), "phase.log")
+		config = logs.LogsConfig{"default": {{Writer: logs.WriterFile, Encoder: logs.EncoderStandard, Level: zapcore.InfoLevel, Logger: &lumberjack.Logger{Filename: path}}}}
+	)
 	if err := logs.ReloadConfig("phase-test", config); err != nil {
 		t.Fatal(err)
 	}

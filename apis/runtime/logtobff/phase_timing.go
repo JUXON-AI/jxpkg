@@ -8,13 +8,12 @@ import (
 	"github.com/JUXON-AI/jxpkg/requestid"
 )
 
-const _phaseTimingThreshold = 100 * time.Millisecond
-
 // recordIdentityPhase exposes slow dependency waits without logging identity, credentials or errors.
 // Phase names are fixed internally; only lease acquisition supplies a busy count.
 func recordIdentityPhase(ctx context.Context, phase string, started time.Time, busyCount ...int) {
+	const phaseTimingThreshold = 100 * time.Millisecond
 	elapsed := time.Since(started)
-	if elapsed < _phaseTimingThreshold {
+	if elapsed < phaseTimingThreshold {
 		return
 	}
 	fields := make([]any, 0, 6)

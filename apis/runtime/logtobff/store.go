@@ -242,8 +242,10 @@ func (s *store) create(ctx context.Context, value *session, previous string) (st
 // A fixed 30s lease outlives the entire 20s request budget. All commits are fenced
 // by lease ownership and source existence; a late writer cannot revive logout.
 func (s *store) acquire(ctx context.Context, id string) (*session, string, error) {
-	started := time.Now()
-	busyCount := 0
+	var (
+		started   = time.Now()
+		busyCount = 0
+	)
 	defer func() { recordIdentityPhase(ctx, "bff.lease.acquire", started, busyCount) }()
 	if !_opaquePattern.MatchString(id) {
 		return nil, "", _errMissing

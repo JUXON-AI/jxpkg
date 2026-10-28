@@ -8,13 +8,12 @@ import (
 	"github.com/JUXON-AI/jxpkg/requestid"
 )
 
-const _phaseTimingThreshold = 100 * time.Millisecond
-
 // recordDirectoryPhase exposes slow dependency waits without logging identity, credentials or errors.
 // Phase names are fixed at internal call sites; errors keep their existing owner.
 func recordDirectoryPhase(ctx context.Context, phase string, started time.Time) {
+	const phaseTimingThreshold = 100 * time.Millisecond
 	elapsed := time.Since(started)
-	if elapsed < _phaseTimingThreshold {
+	if elapsed < phaseTimingThreshold {
 		return
 	}
 	safe := logs.WithContextFields(context.Background(), "request_id", requestid.FromContext(ctx))
