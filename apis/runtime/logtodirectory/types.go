@@ -22,6 +22,11 @@ var (
 	// ErrProtocol reports invalid input or a response that violates the fixed
 	// workload-directory protocol.
 	ErrProtocol = errors.New("logtodirectory: protocol violation")
+	// ErrUnexpectedStatus reports a non-success HTTP response that has no more
+	// specific denial or availability classification. It wraps ErrProtocol so
+	// existing callers retain that classification while adapters can identify
+	// the HTTP-status boundary without exposing provider details.
+	ErrUnexpectedStatus = fmt.Errorf("%w: unexpected HTTP status", ErrProtocol)
 )
 
 // Config configures a fixed Logto workload-directory client.

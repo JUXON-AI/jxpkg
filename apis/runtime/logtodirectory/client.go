@@ -462,7 +462,7 @@ func classifyStatus(status int, tokenRequest bool) error {
 		status >= http.StatusInternalServerError {
 		return ErrUnavailable
 	}
-	return ErrProtocol
+	return ErrUnexpectedStatus
 }
 
 func classifyDirectoryResponse(response *http.Response) error {
