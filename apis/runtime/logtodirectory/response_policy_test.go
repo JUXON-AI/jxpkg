@@ -16,14 +16,14 @@ func TestOrganizationDeniedIsOnlyRecognizedFromExactDirectoryJSON(t *testing.T) 
 		tokenDenied bool
 		wantSubtype bool
 	}{
-		{name: "exact organization denial", contentType: "application/json", body: organizationDeniedBody, wantSubtype: true},
+		{name: "exact organization denial", contentType: "application/json", body: _organizationDeniedBody, wantSubtype: true},
 		{name: "generic forbidden", contentType: "application/json", body: `{"error":"forbidden"}`},
 		{name: "malformed JSON", contentType: "application/json", body: `{"error":"organization_access_denied"`},
 		{name: "extra field", contentType: "application/json", body: `{"error":"organization_access_denied","extra":true}`},
 		{name: "null", contentType: "application/json", body: `null`},
-		{name: "wrong content type", contentType: "text/plain", body: organizationDeniedBody},
-		{name: "oversize body", contentType: "application/json", body: strings.Repeat("x", maxErrorBodyBytes+1)},
-		{name: "token endpoint exact body", contentType: "application/json", body: organizationDeniedBody, tokenDenied: true},
+		{name: "wrong content type", contentType: "text/plain", body: _organizationDeniedBody},
+		{name: "oversize body", contentType: "application/json", body: strings.Repeat("x", _maxErrorBodyBytes+1)},
+		{name: "token endpoint exact body", contentType: "application/json", body: _organizationDeniedBody, tokenDenied: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

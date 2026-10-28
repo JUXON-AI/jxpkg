@@ -19,36 +19,36 @@ import (
 )
 
 const (
-	tokenPath         = "/oidc/token"
-	snapshotPath      = "/api/workload-directory/snapshot"
-	organizationsPath = "/api/workload-directory/organizations"
-	directoryScope    = "directory:read"
+	tokenPath          = "/oidc/token"
+	snapshotPath       = "/api/workload-directory/snapshot"
+	_organizationsPath = "/api/workload-directory/organizations"
+	directoryScope     = "directory:read"
 
-	organizationDeniedBody = `{"error":"organization_access_denied"}`
+	_organizationDeniedBody = `{"error":"organization_access_denied"}`
 
 	defaultTimeout = 10 * time.Second
 	minTimeout     = time.Second
 	maxTimeout     = 30 * time.Second
 
-	maxOrganizationIDRunes    = 21
-	maxOrganizationQueryRunes = 128
-	maxMemberIDRunes          = 128
-	maxDepartmentIDRunes      = 21
-	maxPermissionRunes        = 256
-	maxClientIDRunes          = 128
-	maxSecretBytes            = 4096
-	maxTokenRunes             = 32768
-	maxMembers                = 256
-	maxOrganizations          = 100
-	maxDepartments            = 1000
-	maxDirectDepartments      = 100
-	maxPermissions            = 32
-	maxRequestBytes           = 32 << 10
-	maxTokenBodyBytes         = 64 << 10
-	maxSnapshotBodyBytes      = 4 << 20
-	maxErrorBodyBytes         = 256
-	maxTokenLifetime          = int64(3600)
-	tokenExpirySkew           = 30 * time.Second
+	maxOrganizationIDRunes     = 21
+	_maxOrganizationQueryRunes = 128
+	maxMemberIDRunes           = 128
+	maxDepartmentIDRunes       = 21
+	maxPermissionRunes         = 256
+	maxClientIDRunes           = 128
+	maxSecretBytes             = 4096
+	maxTokenRunes              = 32768
+	maxMembers                 = 256
+	_maxOrganizations          = 100
+	maxDepartments             = 1000
+	maxDirectDepartments       = 100
+	maxPermissions             = 32
+	maxRequestBytes            = 32 << 10
+	maxTokenBodyBytes          = 64 << 10
+	maxSnapshotBodyBytes       = 4 << 20
+	_maxErrorBodyBytes         = 256
+	maxTokenLifetime           = int64(3600)
+	tokenExpirySkew            = 30 * time.Second
 )
 
 type snapshotRequest struct {
@@ -266,7 +266,7 @@ func (client *Client) SearchOrganizations(ctx context.Context, query, cursor str
 	if !client.ready(ctx) {
 		return nil, nil, ErrUnavailable
 	}
-	if !validOrganizationQuery(query) || limit < 1 || limit > maxOrganizations ||
+	if !validOrganizationQuery(query) || limit < 1 || limit > _maxOrganizations ||
 		(cursor != "" && !validOrganizationID(cursor)) {
 		return nil, nil, ErrProtocol
 	}
@@ -281,7 +281,7 @@ func (client *Client) SearchOrganizations(ctx context.Context, query, cursor str
 	if err != nil {
 		return nil, nil, err
 	}
-	document, err := client.postDirectory(ctx, organizationsPath, token, body)
+	document, err := client.postDirectory(ctx, _organizationsPath, token, body)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -479,15 +479,15 @@ func classifyDirectoryResponse(response *http.Response) error {
 }
 
 func organizationAccessDenied(response *http.Response) bool {
-	if response.Body == nil || response.ContentLength > maxErrorBodyBytes {
+	if response.Body == nil || response.ContentLength > _maxErrorBodyBytes {
 		return false
 	}
 	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		return false
 	}
-	document, err := io.ReadAll(io.LimitReader(response.Body, maxErrorBodyBytes+1))
-	return err == nil && bytes.Equal(document, []byte(organizationDeniedBody))
+	document, err := io.ReadAll(io.LimitReader(response.Body, _maxErrorBodyBytes+1))
+	return err == nil && bytes.Equal(document, []byte(_organizationDeniedBody))
 }
 
 func readJSONResponse(ctx context.Context, response *http.Response, limit int64) ([]byte, error) {
@@ -578,7 +578,7 @@ type boundedTransport struct {
 func (transport *boundedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	if transport == nil || transport.base == nil || request == nil || request.URL == nil ||
 		request.Method != http.MethodPost || request.URL.Scheme+"://"+request.URL.Host != transport.origin ||
-		(request.URL.Path != tokenPath && request.URL.Path != snapshotPath && request.URL.Path != organizationsPath) ||
+		(request.URL.Path != tokenPath && request.URL.Path != snapshotPath && request.URL.Path != _organizationsPath) ||
 		request.URL.RawQuery != "" {
 		return nil, errors.New("logtodirectory: unregistered endpoint")
 	}
@@ -625,8 +625,13 @@ func displayValue(value string, limit int, allowEmpty bool) bool {
 	return true
 }
 
+func validOrganizationName(value string) bool {
+	const maxOrganizationNameRunes = 128
+	return value != "" && utf8.ValidString(value) && utf8.RuneCountInString(value) <= maxOrganizationNameRunes
+}
+
 func validOrganizationQuery(value string) bool {
-	if !utf8.ValidString(value) || utf8.RuneCountInString(value) > maxOrganizationQueryRunes {
+	if !utf8.ValidString(value) || utf8.RuneCountInString(value) > _maxOrganizationQueryRunes {
 		return false
 	}
 	for _, character := range value {

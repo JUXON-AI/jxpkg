@@ -28,7 +28,7 @@ func TestSearchOrganizationsContractAndOptionalEndCursor(t *testing.T) {
 				switch request.URL.Path {
 				case tokenPath:
 					writeToken(response)
-				case organizationsPath:
+				case _organizationsPath:
 					fields := decodeRawObject(t, request)
 					assertRawJSON(t, fields, "query", string(mustJSON(t, test.query)))
 					assertRawJSON(t, fields, "limit", `100`)
@@ -146,6 +146,37 @@ func TestSearchOrganizationsAcceptsProviderInputBoundaries(t *testing.T) {
 	}
 }
 
+func TestSearchOrganizationsPreservesProviderLegalNames(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+	}{
+		{name: "line feed", value: "Company\nResearch"},
+		{name: "carriage return", value: "Company\rResearch"},
+		{name: "maximum runes", value: strings.Repeat("界", 128)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := string(mustJSON(t, map[string]any{
+				"organizations": []Organization{{ID: "org-1", Name: test.value}},
+			}))
+			client, _ := newPlainTestClient(t, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.URL.Path == tokenPath {
+					writeToken(response)
+					return
+				}
+				writeJSON(response, http.StatusOK, body)
+			}))
+			organizations, next, err := client.SearchOrganizations(context.Background(), "", "", 1)
+			if err != nil {
+				t.Fatalf("SearchOrganizations() error = %v", err)
+			}
+			if next != nil || len(organizations) != 1 || organizations[0] != (Organization{ID: "org-1", Name: test.value}) {
+				t.Fatalf("SearchOrganizations() organizations = %#v, next = %v", organizations, next)
+			}
+		})
+	}
+}
+
 func TestSearchOrganizationsResponseValidation(t *testing.T) {
 	organizations100 := make([]Organization, 100)
 	for index := range organizations100 {
@@ -166,8 +197,10 @@ func TestSearchOrganizationsResponseValidation(t *testing.T) {
 		{name: "unknown top-level field", body: `{"organizations":[],"extra":true}`, limit: 1, wantErr: true},
 		{name: "unknown organization field", body: `{"organizations":[{"id":"org-1","name":"Company","extra":true}]}`, limit: 1, wantErr: true},
 		{name: "missing id", body: `{"organizations":[{"name":"Company"}]}`, limit: 1, wantErr: true},
+		{name: "missing name", body: `{"organizations":[{"id":"org-1"}]}`, limit: 1, wantErr: true},
 		{name: "null name", body: `{"organizations":[{"id":"org-1","name":null}]}`, limit: 1, wantErr: true},
 		{name: "empty name", body: `{"organizations":[{"id":"org-1","name":""}]}`, limit: 1, wantErr: true},
+		{name: "oversize name", body: string(mustJSON(t, map[string]any{"organizations": []Organization{{ID: "org-1", Name: strings.Repeat("界", 129)}}})), limit: 1, wantErr: true},
 		{name: "whitespace id", body: `{"organizations":[{"id":"org 1","name":"Company"}]}`, limit: 1, wantErr: true},
 		{name: "oversize id", body: `{"organizations":[{"id":"` + strings.Repeat("o", 22) + `","name":"Company"}]}`, limit: 1, wantErr: true},
 		{name: "duplicate id", body: `{"organizations":[{"id":"org-1","name":"One"},{"id":"org-1","name":"Two"}]}`, limit: 2, wantErr: true},
@@ -269,96 +302,97 @@ func TestSearchOrganizationsPreservesCancellationAndHidesTransportFailure(t *tes
 
 func TestConcurrentColdDirectoryReadsShareTokenAndRemainParallel(t *testing.T) {
 	const requests = 4
-	dataStarted := make(chan struct{}, requests)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dataStarted := make(chan struct{})
 	releaseData := make(chan struct{})
+	release := sync.OnceFunc(func() { close(releaseData) })
 	var tokenCalls atomic.Int32
 	var dataCalls atomic.Int32
 	var headerMu sync.Mutex
 	dataRequestIDs := make(map[string]int, requests)
 	tokenRequestIDs := make(chan string, 1)
+	var tokenRequestIDOverflow atomic.Bool
 
 	client, _ := newPlainTestClient(t, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case tokenPath:
 			tokenCalls.Add(1)
-			tokenRequestIDs <- request.Header.Get("X-Request-Id")
+			select {
+			case tokenRequestIDs <- request.Header.Get("X-Request-Id"):
+			default:
+				tokenRequestIDOverflow.Store(true)
+			}
 			writeToken(response)
-		case snapshotPath:
+		case snapshotPath, _organizationsPath:
 			dataCalls.Add(1)
 			headerMu.Lock()
 			dataRequestIDs[request.Header.Get("X-Request-Id")]++
 			headerMu.Unlock()
-			dataStarted <- struct{}{}
-			<-releaseData
+			select {
+			case dataStarted <- struct{}{}:
+			case <-releaseData:
+				return
+			case <-request.Context().Done():
+				return
+			}
+			select {
+			case <-releaseData:
+			case <-request.Context().Done():
+				return
+			}
+			if request.URL.Path == _organizationsPath {
+				writeJSON(response, http.StatusOK, `{"organizations":[]}`)
+				return
+			}
 			fields := decodeRawObject(t, request)
 			if _, list := fields["list_members"]; list {
 				writeJSON(response, http.StatusOK, `{"organization":{"id":"org-1","name":"Company"},"members":[],"departments":[],"next_cursor":null}`)
 				return
 			}
 			writeJSON(response, http.StatusOK, emptySnapshotBody)
-		case organizationsPath:
-			dataCalls.Add(1)
-			headerMu.Lock()
-			dataRequestIDs[request.Header.Get("X-Request-Id")]++
-			headerMu.Unlock()
-			dataStarted <- struct{}{}
-			<-releaseData
-			writeJSON(response, http.StatusOK, `{"organizations":[]}`)
 		default:
 			http.NotFound(response, request)
 		}
 	}))
 
-	start := make(chan struct{})
-	errs := make(chan error, requests)
-	var wait sync.WaitGroup
-	wait.Add(requests)
-	go func() {
-		defer wait.Done()
-		<-start
-		_, err := client.Snapshot(requestid.WithContext(context.Background(), "request-1"), "org-1", nil, Options{})
-		errs <- err
-	}()
-	go func() {
-		defer wait.Done()
-		<-start
-		_, err := client.Snapshot(requestid.WithContext(context.Background(), "request-2"), "org-1", nil, Options{})
-		errs <- err
-	}()
-	go func() {
-		defer wait.Done()
-		<-start
-		_, _, err := client.ListPage(requestid.WithContext(context.Background(), "request-3"), "org-1", "", 1, Options{})
-		errs <- err
-	}()
-	go func() {
-		defer wait.Done()
-		<-start
-		_, _, err := client.SearchOrganizations(requestid.WithContext(context.Background(), "request-4"), "query", "", 1)
-		errs <- err
-	}()
-	close(start)
+	errs, callers := startConcurrentColdDirectoryReads(ctx, client)
+	registerConcurrentColdCleanup(t, release, callers)
 
-	for range requests {
+	started := 0
+	barrierCtx, cancelBarrier := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelBarrier()
+	for started < requests {
 		select {
 		case <-dataStarted:
-		case <-time.After(2 * time.Second):
-			t.Fatal("directory data request was serialized behind another request")
+			started++
+		case <-barrierCtx.Done():
+			t.Fatalf("directory data request was serialized behind another request: %v", barrierCtx.Err())
 		}
 	}
-	close(releaseData)
-	wait.Wait()
-	close(errs)
-	for err := range errs {
-		if err != nil {
+	release()
+	if err := waitForConcurrentColdReaders(ctx, callers); err != nil {
+		t.Fatalf("waiting for concurrent directory reads: %v", err)
+	}
+	for range requests {
+		if err := <-errs; err != nil {
 			t.Fatalf("concurrent directory read error = %v", err)
 		}
 	}
 	if tokenCalls.Load() != 1 || dataCalls.Load() != requests {
 		t.Fatalf("token calls = %d, data calls = %d; want 1/%d", tokenCalls.Load(), dataCalls.Load(), requests)
 	}
-	if leaderID := <-tokenRequestIDs; leaderID < "request-1" || leaderID > "request-4" {
-		t.Fatalf("token request ID = %q, want one caller context", leaderID)
+	if tokenRequestIDOverflow.Load() {
+		t.Fatal("unexpected duplicate token request IDs overflowed the capture channel")
+	}
+	select {
+	case leaderID := <-tokenRequestIDs:
+		if leaderID < "request-1" || leaderID > "request-4" {
+			t.Fatalf("token request ID = %q, want one caller context", leaderID)
+		}
+	default:
+		t.Fatal("token request ID was not captured")
 	}
 	headerMu.Lock()
 	defer headerMu.Unlock()
@@ -367,6 +401,140 @@ func TestConcurrentColdDirectoryReadsShareTokenAndRemainParallel(t *testing.T) {
 		if dataRequestIDs[key] != 1 {
 			t.Fatalf("data request ID counts = %v, want each caller once", dataRequestIDs)
 		}
+	}
+}
+
+func TestConcurrentColdDirectoryFailureEndsBoundedAndPreservesCause(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dataStarted := make(chan struct{})
+	releaseData := make(chan struct{})
+	release := sync.OnceFunc(func() { close(releaseData) })
+	client, _ := newPlainTestClient(t, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case tokenPath:
+			writeToken(response)
+		case _organizationsPath:
+			writeJSON(response, http.StatusServiceUnavailable, `{"error":"injected"}`)
+		case snapshotPath:
+			select {
+			case dataStarted <- struct{}{}:
+			case <-releaseData:
+				return
+			case <-request.Context().Done():
+				return
+			}
+			select {
+			case <-releaseData:
+			case <-request.Context().Done():
+				return
+			}
+			fields := decodeRawObject(t, request)
+			if _, list := fields["list_members"]; list {
+				writeJSON(response, http.StatusOK, `{"organization":{"id":"org-1","name":"Company"},"members":[],"departments":[],"next_cursor":null}`)
+				return
+			}
+			writeJSON(response, http.StatusOK, emptySnapshotBody)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+
+	errs, callers := startConcurrentColdDirectoryReads(ctx, client)
+	registerConcurrentColdCleanup(t, release, callers)
+
+	started := 0
+	barrierCtx, cancelBarrier := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelBarrier()
+	for started < 3 {
+		select {
+		case <-dataStarted:
+			started++
+		case <-barrierCtx.Done():
+			t.Fatalf("three successful reads did not reach the data barrier before the injected failure: %v", barrierCtx.Err())
+		}
+	}
+	release()
+	if err := waitForConcurrentColdReaders(ctx, callers); err != nil {
+		t.Fatalf("waiting after injected directory failure: %v", err)
+	}
+
+	failures := 0
+	for range 4 {
+		err := <-errs
+		switch {
+		case err == nil:
+		case errors.Is(err, ErrUnavailable):
+			failures++
+		default:
+			t.Errorf("injected directory failure changed to an unexpected error: %v", err)
+		}
+	}
+	if failures != 1 {
+		t.Fatalf("injected directory failure count = %d, want 1; original 503 must remain ErrUnavailable", failures)
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("injected directory failure cleanup exceeded its context: %v", err)
+	}
+}
+
+func startConcurrentColdDirectoryReads(ctx context.Context, client *Client) (<-chan error, *sync.WaitGroup) {
+	start := make(chan struct{})
+	errs := make(chan error, 4)
+	var callers sync.WaitGroup
+	run := func(id int, request func(context.Context) error) {
+		callers.Add(1)
+		go func() {
+			defer callers.Done()
+			<-start
+			requestCtx := requestid.WithContext(ctx, fmt.Sprintf("request-%d", id))
+			errs <- request(requestCtx)
+		}()
+	}
+	run(1, func(ctx context.Context) error {
+		_, err := client.Snapshot(ctx, "org-1", nil, Options{})
+		return err
+	})
+	run(2, func(ctx context.Context) error {
+		_, err := client.Snapshot(ctx, "org-1", nil, Options{})
+		return err
+	})
+	run(3, func(ctx context.Context) error {
+		_, _, err := client.ListPage(ctx, "org-1", "", 1, Options{})
+		return err
+	})
+	run(4, func(ctx context.Context) error {
+		_, _, err := client.SearchOrganizations(ctx, "query", "", 1)
+		return err
+	})
+	close(start)
+	return errs, &callers
+}
+
+func registerConcurrentColdCleanup(t *testing.T, release func(), callers *sync.WaitGroup) {
+	t.Helper()
+	t.Cleanup(func() {
+		release()
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		defer cancel()
+		if err := waitForConcurrentColdReaders(ctx, callers); err != nil {
+			t.Errorf("joining concurrent cold-read callers during cleanup: %v", err)
+		}
+	})
+}
+
+func waitForConcurrentColdReaders(ctx context.Context, callers *sync.WaitGroup) error {
+	done := make(chan struct{})
+	go func() {
+		callers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -382,7 +550,7 @@ func TestDirectoryRequestsForwardContextRequestIDIndividually(t *testing.T) {
 			writeToken(response)
 		case snapshotPath:
 			writeJSON(response, http.StatusOK, emptySnapshotBody)
-		case organizationsPath:
+		case _organizationsPath:
 			writeJSON(response, http.StatusOK, `{"organizations":[]}`)
 		default:
 			http.NotFound(response, request)
@@ -398,7 +566,7 @@ func TestDirectoryRequestsForwardContextRequestIDIndividually(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if headers[tokenPath] != "leader-request" || headers[snapshotPath] != "leader-request" ||
-		headers[organizationsPath] != "search-request" {
+		headers[_organizationsPath] != "search-request" {
 		t.Fatalf("forwarded request IDs = %v", headers)
 	}
 }

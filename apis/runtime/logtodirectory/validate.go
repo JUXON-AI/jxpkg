@@ -362,7 +362,7 @@ func parseOptionalOrganizationCursor(raw json.RawMessage) (*string, error) {
 }
 
 func validateOrganizationSearch(organizations []wireOrganization, cursor string, nextCursor *string, limit int) ([]Organization, error) {
-	if organizations == nil || len(organizations) > maxOrganizations || len(organizations) > limit {
+	if organizations == nil || len(organizations) > _maxOrganizations || len(organizations) > limit {
 		return nil, ErrProtocol
 	}
 	validated := make([]Organization, 0, len(organizations))
@@ -370,7 +370,7 @@ func validateOrganizationSearch(organizations []wireOrganization, cursor string,
 	previousID := ""
 	for _, organization := range organizations {
 		if organization.ID == nil || organization.Name == nil || !validOrganizationID(*organization.ID) ||
-			!displayValue(*organization.Name, 128, false) {
+			!validOrganizationName(*organization.Name) {
 			return nil, ErrProtocol
 		}
 		if _, duplicate := seen[*organization.ID]; duplicate ||

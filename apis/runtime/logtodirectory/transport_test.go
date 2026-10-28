@@ -147,8 +147,8 @@ func TestBoundedTransportRejectsUnregisteredRequests(t *testing.T) {
 	}{
 		{name: "GET", method: http.MethodGet, url: "https://logto.example" + snapshotPath},
 		{name: "unknown path", method: http.MethodPost, url: "https://logto.example/api/workload-directory/unknown"},
-		{name: "query", method: http.MethodPost, url: "https://logto.example" + organizationsPath + "?limit=1"},
-		{name: "cross origin", method: http.MethodPost, url: "https://other.example" + organizationsPath},
+		{name: "query", method: http.MethodPost, url: "https://logto.example" + _organizationsPath + "?limit=1"},
+		{name: "cross origin", method: http.MethodPost, url: "https://other.example" + _organizationsPath},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			base := &countingTransport{}
