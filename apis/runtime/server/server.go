@@ -10,8 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/JUXON-AI/jxpkg/apis/constants"
-	"github.com/JUXON-AI/jxpkg/apis/runtime/auth"
 	"github.com/JUXON-AI/jxpkg/apis/runtime/middleware"
 	"github.com/JUXON-AI/jxpkg/config"
 	"github.com/JUXON-AI/jxpkg/lifecycle"
@@ -76,22 +74,6 @@ type Router struct {
 
 	// corsMiddleware 保存默认链首部调用的 CORS 中间件。
 	corsMiddleware gin.HandlerFunc
-
-	// browserSessionMiddleware 保存浏览器会话解析中间件。
-	browserSessionMiddleware           gin.HandlerFunc
-	browserAuthorizedSessionMiddleware func([]auth.PermissionCode) gin.HandlerFunc
-
-	// browserCSRFMiddleware 保存浏览器会话 CSRF 中间件。
-	browserCSRFMiddleware gin.HandlerFunc
-
-	// browserBearerMiddleware selects the current Host's Cookie rejection boundary.
-	browserBearerMiddleware gin.HandlerFunc
-
-	// browserSessionErr 保存浏览器会话中间件的静态配置错误。
-	browserSessionErr error
-
-	// authInjector 保存业务认证主体注入器。
-	*authInjector
 }
 
 // RouterOption Router 配置选项。
@@ -136,26 +118,6 @@ func WithCORS(corsMiddleware gin.HandlerFunc) RouterOption {
 	}
 }
 
-// NewBrowserSessionOption validates and installs the complete browser Session
-// route boundary. Applications normally receive this option from sso.Runtime;
-// they do not assemble the Session and CSRF middleware themselves.
-func NewBrowserSessionOption(options middleware.BrowserSessionOptions) (RouterOption, error) {
-	handlers, err := middleware.NewBrowserSessionHandlers(options)
-	if err != nil {
-		return nil, err
-	}
-	return func(svr *Router) {
-		if svr == nil {
-			return
-		}
-		svr.browserBearerMiddleware = handlers.Bearer
-		svr.browserSessionMiddleware = handlers.Session
-		svr.browserAuthorizedSessionMiddleware = handlers.AuthorizedSession
-		svr.browserCSRFMiddleware = handlers.CSRF
-		svr.browserSessionErr = nil
-	}, nil
-}
-
 // WithGracefulShutdownTimeout sets the maximum time Close waits for active HTTP
 // handlers. Non-positive values keep the ten-second default. Applications must
 // configure their lifecycle and orchestrator termination deadlines to exceed
@@ -169,7 +131,7 @@ func WithGracefulShutdownTimeout(timeout time.Duration) RouterOption {
 	}
 }
 
-// NewRouter 创建 Router 实例，默认启用 CORS、日志、Recovery、登录态等中间件。
+// NewRouter 创建 Router 实例，默认启用 CORS、日志和 Recovery 中间件。
 func NewRouter(apiPrefix string, opts ...RouterOption) *Router {
 	if apiPrefix == "" {
 		apiPrefix = PrefixAPIDefault
@@ -180,7 +142,6 @@ func NewRouter(apiPrefix string, opts ...RouterOption) *Router {
 		Prefix:                  apiPrefix,
 		routerMap:               map[string]interface{}{},
 		routeGroups:             map[string]*gin.RouterGroup{},
-		authInjector:            &authInjector{},
 		corsMiddleware:          middleware.CORS(),
 		gracefulShutdownTimeout: defaultGracefulShutdownTimeout,
 	}
@@ -288,70 +249,6 @@ func (svr *Router) G(action string, hdrs ...interface{}) {
 		registerRoute(pg.GET, action, hdrs...)
 	}
 }
-
-// PRequireBrowserSession registers a POST route behind the complete browser
-// authentication boundary: resolve Session, publish the verified principal,
-// require authentication, validate Origin/CSRF, then run business handlers.
-func (svr *Router) PRequireBrowserSession(action string, handlers ...interface{}) {
-	resolveSession, validateCSRF := svr.browserSessionHandlers()
-	chain := []interface{}{
-		resolveSession,
-		svr.publishBrowserPrincipal,
-		middleware.RequireAuthenticated,
-		validateCSRF,
-	}
-	svr.Post(action, append(chain, handlers...)...)
-}
-
-// PRequireAuthorizedBrowserSession 通过一次 Account 解析完成浏览器认证和组织授权。
-func (svr *Router) PRequireAuthorizedBrowserSession(action string, permissions []auth.PermissionCode, handlers ...interface{}) {
-	_, validateCSRF := svr.browserSessionHandlers()
-	resolve := unavailableLoginStatus(auth.AuthModeBrowserSession, auth.ErrAuthBackendUnavailable)
-	if svr.browserSessionErr == nil && svr.browserAuthorizedSessionMiddleware != nil {
-		resolve = svr.browserAuthorizedSessionMiddleware(permissions)
-	}
-	chain := []interface{}{resolve, svr.publishBrowserPrincipal, middleware.RequireAuthenticated, validateCSRF}
-	svr.Post(action, append(chain, handlers...)...)
-}
-
-// PRequireBearer 注册仅接受 Bearer Token 的 POST 路由。
-func (svr *Router) PRequireBearer(action string, hdrs ...interface{}) {
-	parser := svr.browserBearerMiddleware
-	if parser == nil {
-		parser = middleware.BearerLoginStatusMiddleware("")
-	}
-	newhdrs := append([]interface{}{parser, svr.Inject, middleware.RequireAuthenticated}, hdrs...)
-	svr.Post(action, newhdrs...)
-}
-
-// PRequireLogin 注册保持旧版 Bearer 语义的 POST 路由。
-// Deprecated: 请显式使用 PRequireBearer。
-func (svr *Router) PRequireLogin(action string, hdrs ...interface{}) {
-	svr.PRequireBearer(action, hdrs...)
-}
-
-func (svr *Router) browserSessionHandlers() (gin.HandlerFunc, gin.HandlerFunc) {
-	if svr.browserSessionErr != nil {
-		return unavailableLoginStatus(auth.AuthModeBrowserSession, svr.browserSessionErr), emptyMiddleware
-	}
-	if svr.browserSessionMiddleware == nil || svr.browserCSRFMiddleware == nil {
-		err := fmt.Errorf("%w: browser session middleware is not configured", auth.ErrAuthBackendUnavailable)
-		return unavailableLoginStatus(auth.AuthModeBrowserSession, err), emptyMiddleware
-	}
-	return svr.browserSessionMiddleware, svr.browserCSRFMiddleware
-}
-
-func unavailableLoginStatus(mode auth.AuthMode, err error) gin.HandlerFunc {
-	return func(ctx *gin.Context) {
-		ctx.Set(constants.CtxKeyLoginStatus, &auth.LoginStatus{
-			Err:      err,
-			State:    auth.StateFailed,
-			AuthMode: mode,
-		})
-	}
-}
-
-func emptyMiddleware(*gin.Context) {}
 
 func registerRoute(mf MethodFunc, action string, hdrs ...interface{}) {
 	ginhdrs := make([]gin.HandlerFunc, 0, len(hdrs))

@@ -41,14 +41,15 @@ make clean       # 清理 Go test cache
 | 包 | 用途 | 主要入口 |
 | --- | --- | --- |
 | [`apis/apiobj`](#apisapiobj) | 通用分页、筛选和详情请求/响应 DTO | `PageQuery`、`QueryRequest`、`QueryResponse` |
-| [`apis/constants`](#apisconstants) | Gin Context 的稳定键名 | `CtxKeyRequestID`、`CtxKeyUserID` |
+| [`apis/constants`](#apisconstants) | Gin Context 的稳定请求键名 | `CtxKeyRequestID`、`CtxKeyCode` |
 | [`apis/errcode`](#apiserrcode) | 业务错误码注册和消息查询 | `Register`、`GetMessage` |
-| [`apis/runtime`](#apisruntime) | HTTP 响应与已验证身份读取 | `Success`、`BadRequest`、`UserID` |
+| [`apis/runtime`](#apisruntime) | HTTP 响应和请求元数据 helper | `Success`、`BadRequest`、`RequestID` |
+| [`apis/runtime/logtobff`](#apisruntimelogtobff) | Logto Browser BFF、主体发布和 CSRF 边界 | `New`、`Runtime.Require`、`FromContext` |
 | [`apis/runtime/logtodirectory`](#apisruntimelogtodirectory) | 固定用途 Logto workload-directory M2M 客户端 | `NewClient`、`Snapshot`、`ListPage` |
-| [`apis/runtime/auth`](#apisruntimeauth) | Bearer/JWT、Browser Session 和授权上下文的共享契约 | `TokenSigner`、`SessionResolver`、`AuthorizationContextResolver` |
-| [`apis/runtime/middleware`](#apisruntimemiddleware) | Gin 日志、恢复、CORS、认证、CSRF 与权限中间件 | `NewCORS`、`ResolveAuthorizationContext`、`RequirePermission` |
-| [`apis/runtime/server`](#apisruntimeserver) | Gin Router、路由认证模式和 API 适配 | `NewRouter`、`API` |
-| [`apis/runtime/sso`](docs/sso-integration-guide.md) | 开箱即用的 Consumer runtime 与 Account Provider | `LoadEnv`、`LoadProviderEnv` |
+| [`apis/runtime/auth`](#apisruntimeauth) | 通用权限错误、权限编码和严格 EdDSA 验签 | `PermissionCode`、`NewTokenVerifier` |
+| [`apis/runtime/middleware`](#apisruntimemiddleware) | Gin 日志、恢复、CORS 与 Credits 执行绑定 | `NewCORS`、`BindCreditsExecution` |
+| [`apis/runtime/server`](#apisruntimeserver) | Gin Router、DTO 适配和显式 handler 组合 | `NewRouter`、`Post`、`API` |
+| [`identity`](#identity) | 原生组织和用户身份及授权上下文 | `Member`、`Authorization`、`WithAuthorization` |
 | [`config`](#config) | YAML 和环境变量配置加载 | `LoadCoreConfigFromEnv` |
 | [`dbtools`](#dbtools) | GORM 多数据库连接和显式迁移 | `InitDBConn`、`DoInitModels` |
 | [`dbtools/redispool`](#dbtoolsredispool) | Redis 连接及常用数据结构操作 | `InitRedisWithConfig`、`Redis` |
@@ -79,7 +80,7 @@ type ListUsersRequest struct {
 
 ### `apis/constants`
 
-集中声明 middleware 与 handler 之间传递请求 ID、用户、UIN、公司、成员代次和响应码时使用的 Gin Context key。业务代码应通过 `apis/runtime` 的读取函数访问常用身份字段，避免直接散落字符串 key。
+集中声明 middleware 与 handler 之间传递请求 ID、日志器和响应码时使用的 Gin Context key。身份与授权数据由 `logtobff` 或 `identity` 的显式 context API 承载。
 
 ### `apis/errcode`
 
@@ -87,20 +88,20 @@ type ListUsersRequest struct {
 
 ### `apis/runtime`
 
-提供标准 JSON 响应 helper，以及从已经通过认证和业务注入的 Gin Context 中读取 `UserID`、`UIN`、`CompanyID`、`MembershipEpoch`、`RequestID` 和 `LoginStatus`。
+提供标准 JSON 响应、请求 ID、环境和客户端地址 helper。
 
 ```go
 func GetProfile(ctx *gin.Context) {
-    userID := runtime.UserID(ctx)
-    if userID == 0 {
-        runtime.BadRequest(ctx, "missing user")
+    requestID := runtime.RequestID(ctx)
+    if requestID == "" {
+        runtime.BadRequest(ctx, "missing request id")
         return
     }
-    runtime.Success(ctx, gin.H{"user_id": userID})
+    runtime.Success(ctx, gin.H{"request_id": requestID})
 }
 ```
 
-这些读取函数不执行认证；认证必须由对应路由 middleware 完成。
+这些 helper 不解析身份；认证必须由路由上显式安装的 handler 完成。
 
 ### `apis/runtime/logtodirectory`
 
@@ -125,54 +126,31 @@ snapshot, err := client.Snapshot(ctx, organizationID, userIDs, logtodirectory.Op
 
 `ListPage` 使用同一 snapshot path 的单页列出契约；SDK 与配套 Logto handler 已通过本地 HTTPS、数据库联合测试及独立复审。使用前仍须部署配套 provider，并在 provider registry 为该 workload 显式启用 `allowMemberListing`；省略时禁止列出。SDK 不提供 capability 覆盖或跨页聚合，调用方须自行设置完整性、人数、页数和总时限。
 
+### `identity`
+
+`identity.Member` 仅使用原生 `organization_id` 与 `user_id` 字符串。`identity.Authorization` 在同一权威目录快照内绑定成员、组织 Owner 标记、原生部门祖先链和显式权限；`Allows` 不根据 Owner、部门或客户端输入推断权限。
+
+`WithAuthorization` 与 `AuthorizationFromContext` 深复制切片并拒绝无效授权。业务服务只读取这个 context，不把请求体或旧数值身份投影升级为授权事实。
+
+### `apis/runtime/logtobff`
+
+`logtobff.Runtime` 拥有 Logto Browser BFF、Host-only Session Cookie、Origin/CSRF 校验、主体重验证和登出。应用把 `Handler()` 挂到 `/auth/*path`，并在每条受保护业务路由上显式安装 `Require()`：
+
+```go
+bff, err := logtobff.New(ctx, config)
+if err != nil {
+    return err
+}
+router := server.NewRouter("/v1/")
+router.GinEngine().Any("/auth/*path", gin.WrapH(bff.Handler()))
+router.Post("profile.Get", bff.Require(), server.API(handler.GetProfile))
+```
+
+`Require` 成功后，`FromContext` 返回已认证成员的原生 `Principal` 和有效标志。应用须通过在线权威目录校验该成员，自行组合 `identity.Authorization` 并通过 `identity.WithAuthorization` 写入请求上下文。副作用请求必须由 BFF 完成 CSRF 校验；调用方不得恢复 Cookie 与 Bearer 间的静默回退。
+
 ### `apis/runtime/auth`
 
-认证包包含两条明确分离的链路：
-
-- 新的 Browser Session：浏览器只持有 Host-only 不透明 Cookie，业务服务通过 `SessionResolver` 获取最小主体快照。
-- 兼容 Bearer：旧服务可继续使用 HS256 迁移 API；新服务间 token 使用 Ed25519/EdDSA 签发和验证。
-
-#### Browser Session
-
-`NewInternalSessionResolverClient` 实现 `SessionResolver`，调用 Account 固定内部接口：
-
-```go
-resolver, err := auth.NewInternalSessionResolverClient(auth.SessionResolverClientOptions{
-    Endpoint:  "https://account.internal/internal/session/resolve",
-    Service:   "juxonone",
-    Transport: workloadAuthenticatedTransport,
-    Timeout:   750 * time.Millisecond,
-})
-```
-
-`Transport` 必须已经配置 mTLS 或等价的工作负载认证。客户端不使用匿名默认 Transport、不跟随重定向、不缓存、不重试，并严格校验 HTTPS 地址、JSON 类型、响应大小和主体字段。Account 的 401/404 映射为 `ErrInvalidCredential`；Transport、超时、限流、调用方认证失败和畸形响应均 fail closed 为 `ErrAuthBackendUnavailable`。
-
-有效主体必须同时包含非零 `UserID`、`UIN`、`CompanyID`、`MembershipEpoch` 和 `SessionVersion`。`membership_epoch=0` 不代表有效旧成员关系。
-
-同一个受认证客户端还实现 `CompanyIdentityResolver`，供业务服务按公司和一组
-UIN 批量取得成员授权所需的最小权威快照。该调用只返回请求集合中仍存在的身份，
-调用方必须把缺失、非 `active` 或 epoch 不匹配的身份视为不可授权：
-
-```go
-identities, err := resolver.ResolveCompanyIdentities(ctx, auth.CompanyIdentityResolveRequest{
-    Service:   "juxonone",
-    CompanyID: companyID,
-    UINs:      targetUINs,
-})
-```
-
-公司身份解析复用 Session Resolve 的 mTLS Transport、总超时和 Account 内部
-Origin，不增加第二组凭据；它不会接受浏览器 Cookie、Bearer 或调用方提交的用户
-身份作为认证依据。响应只包含 UIN、成员代次、显示资料、状态和公司 Owner 标记，
-不返回邮箱、Token、Session 或 Account 数据库对象。
-
-同一客户端还实现 `AuthorizationContextResolver` 和
-`AuthorizationSubjectsResolver`。前者按已认证的公司、UIN 和 MembershipEpoch
-解析公司所有者标记、有效部门路径以及调用方请求的组织权限子集；后者返回资源授权
-界面使用的有效公司身份和部门目录。两种响应都必须与原请求作用域完全一致，否则客户端
-按授权服务故障默认拒绝。
-
-#### EdDSA JWT
+认证包提供业务服务共享的 `PermissionCode`、稳定认证错误和严格 EdDSA/JWK 验签原语。它不再提供 Account numeric Session Resolver、UIN/CompanyID 授权上下文或旧 HS256 Bearer API。
 
 ```go
 signer, publicKey, err := auth.GenerateTokenSigner("2026-09")
@@ -200,16 +178,11 @@ verified, err := verifier.Verify(ctx, raw, "https://issuer.example.com", "orders
 
 验证器固定要求 `typ=JWT`、已知且非空的 `kid`、`alg=EdDSA`，并校验 `iss`、`aud`、`sub`、`iat`、可选 `nbf`、`exp` 和 `jti`。多受众 token 还必须提供与预期受众相等的 `azp`。JOSE header 和 claims 使用有大小/深度限制且拒绝重复字段的严格 JSON 解析。
 
-`Ed25519TokenVerifier.JWKS`/`PublicJWKS` 只输出公开密钥材料。`JWTConfig`、`LoadJWTConfig`、`IssueIdentityToken` 和 `ParseLegacyToken` 仅用于旧 HS256 Bearer 迁移；Browser Session 不得调用这些旧 API。
+`Ed25519TokenVerifier.JWKS`/`PublicJWKS` 只输出公开密钥材料，claims 不携带旧 numeric UIN/CompanyID 或短字段兼容投影。
 
 ### `apis/runtime/middleware`
 
-提供请求日志、panic 恢复、自定义 header、显式 Bearer、Browser Session、CORS 和 CSRF 中间件。应用不应自行拼接 Browser Session 中间件；`sso.Runtime.RouterOption()` 会安装完整且已校验的顺序。Cookie 和 Bearer 互斥，不会在失败时互相回退。副作用请求必须通过 CSRF token 校验。
-
-`ResolveAuthorizationContext` 在登录中间件之后调用 Account 权威服务并把结果写入
-Gin Context；`RequirePermission` 只检查该权威结果。具体权限常量和路由映射由业务服务
-维护，`jxpkg` 不保存业务权限名，也不从数据库动态装载路由规则。业务服务必须提供失败
-响应转换函数，并区分无权限和授权服务不可用。
+提供请求日志、panic 恢复、自定义 header、严格 CORS 和 Credits 执行绑定。Browser Cookie、注册、登录、登出和 CSRF 边界属于 `logtobff`；共享 middleware 不解析旧 Bearer 或 Account Session。
 
 `NewCORS` 只接受精确 HTTP(S) origin，不接受通配符、域名后缀、路径或动态反射。CORS 决定浏览器能否读取响应，不是 CSRF 防护。位于可信反向代理之后时，CORS 与 Browser Session 必须配置同一个 `ExternalOrigin`；两者都不会信任客户端提供的 `X-Forwarded-Host`/`X-Forwarded-Proto`。
 
@@ -221,48 +194,16 @@ corsMiddleware, err := middleware.NewCORS(middleware.CORSOptions{
 })
 ```
 
-`CORS()` 是兼容旧代码的入口。新代码应优先使用显式构造器并处理配置错误。
+`CORS()` 是 Router 使用的安全默认入口；需要额外 Origin allowlist 时应优先使用显式构造器并处理配置错误。
 
 ### `apis/runtime/server`
 
-`Router` 在 Gin 之上统一 API prefix、DTO 适配和逐路由认证模式：
-
-- `Post`、`G`：匿名路由，不解析认证凭据。
-- `PRequireBrowserSession`：只接受配置的 Browser Session，并固定执行 Session、主体发布、认证要求和 CSRF。
-- `PRequireAuthorizedBrowserSession`：通过一次 Account 请求取得已验证会话和所需组织权限，再执行相同的主体发布与 CSRF 校验。
-- `PRequireBearer`：只接受 Bearer，并拒绝浏览器 Session Cookie。
-- `PRequireLogin`：兼容旧代码的 Bearer 别名；新代码不应使用。
-
-```go
-runtime, err := sso.LoadEnv(
-    os.Getenv,
-    "API",
-    sso.WithHTTPAddress(cfg.HTTPAddr),
-    sso.WithDevIdentity(devIdentity),
-)
-if err != nil {
-    return err
-}
-defer runtime.Close()
-router := server.NewRouter("/v1/", runtime.RouterOption())
-router.PRequireBrowserSession("profile.Get", server.API(handler.GetProfile))
-```
-
-`DevIdentity` 可以直接绑定 Cobra 的 `--dev=user_id:uin:company_id`；不传 flag 且
-`<PREFIX>_SSO_MODE=local` 时，runtime 也可从 `.authjson` 读取同一种身份。两种来源共用
-同一个 loopback-only Runtime，`curl` 只需增加 `X-JX-Dev-UIN: active`。完整说明见
-[JX SSO 接入指南：最小本地调试](docs/sso-integration-guide.md#最小本地调试)。
-
-新业务域名和新 JXX 服务请按 [JX SSO 接入指南](docs/sso-integration-guide.md)
-同步完成 Go 依赖、Account Client/caller 注册、Ingress、公网 TLS、resolver mTLS、
-Secret 与验证。不要只复制上面的 Go 代码后跳过部署身份和证书配置。
-
-Browser Session 路由顺序固定为 Session Resolve、业务身份注入、登录要求、unsafe-method CSRF、业务 handler。`API` 支持请求体大小限制；不要在 handler 中重新实现认证分支。
+`Router` 在 Gin 之上统一 API prefix、DTO 适配和 handler 组合。`Post`、`G` 本身不解析认证凭据；受保护业务必须像上面的 `bff.Require()` 示例一样显式安装当前产品自己的登录与 CSRF handler。Router 不提供隐式 Account 认证，也不会在 handler 失败后回退到其他身份模式。`API` 支持请求体大小限制。
 
 应用创建 listener 后调用 `Run`，再交给同一个进程级 lifecycle 等待退出信号：
 
 ```go
-listener, err := net.Listen("tcp", runtime.HTTPAddress())
+listener, err := net.Listen("tcp", cfg.HTTPAddr)
 if err != nil {
     return err
 }
