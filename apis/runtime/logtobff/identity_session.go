@@ -53,7 +53,9 @@ func (a *Runtime) prepareIdentity(ctx context.Context, value *session) error {
 
 // beginIdentity 在短租约内持久化凭据轮换，随后释放租约供普通请求并行在线复核。
 func (a *Runtime) beginIdentity(ctx context.Context, id string) (*session, error) {
+	started := time.Now()
 	value, owner, err := a.store.acquire(ctx, id)
+	recordIdentityPhase(ctx, "bff.begin.acquire", started)
 	if err != nil {
 		return nil, err
 	}
@@ -63,7 +65,9 @@ func (a *Runtime) beginIdentity(ctx context.Context, id string) (*session, error
 			a.store.release(ctx, id, owner)
 		}
 	}()
+	started = time.Now()
 	prepareErr := a.prepareIdentity(ctx, value)
+	recordIdentityPhase(ctx, "bff.begin.prepare", started)
 	remove := false
 	if prepareErr != nil {
 		outcome := classify(prepareErr)
@@ -75,8 +79,11 @@ func (a *Runtime) beginIdentity(ctx context.Context, id string) (*session, error
 	// 即使后续 UserInfo 失败，也保存已轮换的 refresh token，避免永久丢失有效凭据。
 	save, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 	defer cancel()
-	if err := a.store.commit(save, id, owner, id, value, remove); err != nil {
-		return nil, err
+	started = time.Now()
+	commitErr := a.store.commit(save, id, owner, id, value, remove)
+	recordIdentityPhase(ctx, "bff.begin.commit", started)
+	if commitErr != nil {
+		return nil, commitErr
 	}
 	committed = true
 	return value, prepareErr
@@ -85,7 +92,9 @@ func (a *Runtime) beginIdentity(ctx context.Context, id string) (*session, error
 // finishIdentity 重新读取最新会话，只合并安全快照仍匹配的身份结果，不写回旧 SDK。
 // SDK/展示资料更新不影响并行读；退出、身份或 CSRF 变化使旧请求失效。
 func (a *Runtime) finishIdentity(ctx context.Context, id, nextID string, before, value *session, remove bool) error {
+	started := time.Now()
 	current, owner, err := a.store.acquire(ctx, id)
+	recordIdentityPhase(ctx, "bff.finish.acquire", started)
 	if err != nil {
 		return err
 	}
@@ -101,8 +110,11 @@ func (a *Runtime) finishIdentity(ctx context.Context, id, nextID string, before,
 	current.Organization, current.Revision, current.CSRF = value.Organization, value.Revision, value.CSRF
 	save, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 	defer cancel()
-	if err := a.store.commit(save, id, owner, nextID, current, remove); err != nil {
-		return err
+	started = time.Now()
+	commitErr := a.store.commit(save, id, owner, nextID, current, remove)
+	recordIdentityPhase(ctx, "bff.finish.commit", started)
+	if commitErr != nil {
+		return commitErr
 	}
 	committed = true
 	value.SDK = current.SDK
