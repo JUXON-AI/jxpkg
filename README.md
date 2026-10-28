@@ -146,7 +146,7 @@ router.GinEngine().Any("/auth/*path", gin.WrapH(bff.Handler()))
 router.Post("profile.Get", bff.Require(), server.API(handler.GetProfile))
 ```
 
-`Require` 成功后，`FromContext` 返回已验证原生主体和 `identity.Authorization`。副作用请求必须由 BFF 完成 CSRF 校验；调用方不得恢复 Cookie 与 Bearer 间的静默回退。
+`Require` 成功后，`FromContext` 返回已认证成员的原生 `Principal` 和有效标志。应用须通过在线权威目录校验该成员，自行组合 `identity.Authorization` 并通过 `identity.WithAuthorization` 写入请求上下文。副作用请求必须由 BFF 完成 CSRF 校验；调用方不得恢复 Cookie 与 Bearer 间的静默回退。
 
 ### `apis/runtime/auth`
 
