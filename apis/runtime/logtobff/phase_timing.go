@@ -2,9 +2,10 @@ package logtobff
 
 import (
 	"context"
+	"time"
+
 	"github.com/JUXON-AI/jxpkg/logs"
 	"github.com/JUXON-AI/jxpkg/requestid"
-	"time"
 )
 
 const _phaseTimingThreshold = 100 * time.Millisecond

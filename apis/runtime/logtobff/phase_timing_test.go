@@ -3,15 +3,16 @@ package logtobff
 import (
 	"context"
 	"encoding/json"
-	"github.com/JUXON-AI/jxpkg/logs"
-	"github.com/JUXON-AI/jxpkg/requestid"
-	"go.uber.org/zap/zapcore"
-	"gopkg.in/natefinch/lumberjack.v2"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/JUXON-AI/jxpkg/logs"
+	"github.com/JUXON-AI/jxpkg/requestid"
+	"go.uber.org/zap/zapcore"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 // The diagnostic must preserve trace correlation without inheriting arbitrary sensitive logger fields.
