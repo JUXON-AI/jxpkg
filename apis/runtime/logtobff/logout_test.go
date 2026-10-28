@@ -108,7 +108,7 @@ func (p logoutFuncTransport) RoundTrip(r *http.Request) (*http.Response, error) 
 }
 
 func TestLogoutUnknownStatusesKeepLocal(t *testing.T) {
-	for _, status := range []int{200, 201, 202, 301, 302, 303, 307, 308, 400, 401, 403, 404, 409, 429, 500, 502, 503} {
+	for _, status := range []int{200, 201, 202, 301, 302, 303, 307, 308, 400, 403, 404, 409, 429, 500, 502, 503} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			var (
 				a, f   = fixtureRuntime(t)

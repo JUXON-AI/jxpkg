@@ -546,6 +546,14 @@ func (a *Runtime) logout(r *http.Request, value *session) (outcome result) {
 			outcome = failure
 		}
 	}()
+	// A rejected bearer no longer authorizes this local session. Expire only
+	// that capability; never retry the mutation against a newer SSO session.
+	if response.StatusCode == http.StatusUnauthorized {
+		logs.WarnContextw(r.Context(), "logtobff.Runtime.logout 失败", "reason", "center_session_rejected", "upstream_status", response.StatusCode)
+		outcome = problem(http.StatusUnauthorized, "session_invalid")
+		outcome.failureHandled = true
+		return outcome
+	}
 	if response.StatusCode != http.StatusNoContent {
 		logs.WarnContextw(r.Context(), "logtobff.Runtime.logout 失败", "reason", "center_status_rejected", "upstream_status", response.StatusCode)
 		return failure
