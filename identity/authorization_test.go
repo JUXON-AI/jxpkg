@@ -91,7 +91,7 @@ func TestAuthorizationContextRejectsInvalidIdentity(t *testing.T) {
 			name: "overlong permission",
 			value: Authorization{
 				Member:      valid.Member,
-				Permissions: []string{strings.Repeat("a", maximumPermissionRunes+1)},
+				Permissions: []string{strings.Repeat("a", _maximumPermissionRunes+1)},
 			},
 		},
 		{

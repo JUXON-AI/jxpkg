@@ -2,28 +2,37 @@ package identity
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 )
 
 const (
-	maximumDepartmentIDRunes = 128
-	maximumPermissionRunes   = 128
+	// 本次原生授权输入契约沿用 128 个 Unicode rune 作为部门及祖先 ID 的校验上限。
+	_maximumDepartmentIDRunes = 128
+	// 本次原生授权输入契约沿用 128 个 Unicode rune 作为显式权限名称的校验上限。
+	_maximumPermissionRunes = 128
 )
 
 // Department 表示原生组织目录中的一个部门及其有向祖先链。
 type Department struct {
-	ID          string   `json:"id"`
+	// ID 来自权威目录，必须属于 Authorization.Member 所在组织，不转换为数字标识。
+	ID string `json:"id"`
+	// AncestorIDs 来自同一组织的权威目录，按 root 到 parent 排列，不包含部门自身。
 	AncestorIDs []string `json:"ancestor_ids"`
 }
 
 // Authorization 表示一次已验证目录快照中的成员授权；它不推断组织或权限。
 type Authorization struct {
-	Member              Member
+	// Member 来自已验证会话或服务端权威记录，是本授权唯一的组织及用户作用域。
+	Member Member
+	// IsOrganizationOwner 来自该组织的权威目录，不隐含授予 Permissions 或 company:owner。
 	IsOrganizationOwner bool
-	Departments         []Department
-	Permissions         []string
+	// Departments 来自权威目录，均须属于 Member 所在组织；部门归属不隐含授予 Permissions。
+	Departments []Department
+	// Permissions 是 Member 所在组织权威授予的显式权限，区分大小写，不由 owner 或部门隐含继承。
+	Permissions []string
 }
 
 // Allows 判断授权中是否明确包含指定平台权限。权限区分大小写且不继承。
@@ -72,17 +81,17 @@ func validAuthorization(value Authorization) bool {
 		return false
 	}
 	for _, department := range value.Departments {
-		if !validAuthorizationText(department.ID, maximumDepartmentIDRunes) {
+		if !validAuthorizationText(department.ID, _maximumDepartmentIDRunes) {
 			return false
 		}
 		for _, ancestorID := range department.AncestorIDs {
-			if !validAuthorizationText(ancestorID, maximumDepartmentIDRunes) {
+			if !validAuthorizationText(ancestorID, _maximumDepartmentIDRunes) {
 				return false
 			}
 		}
 	}
 	for _, permission := range value.Permissions {
-		if !validAuthorizationText(permission, maximumPermissionRunes) {
+		if !validAuthorizationText(permission, _maximumPermissionRunes) {
 			return false
 		}
 	}
@@ -102,21 +111,14 @@ func validAuthorizationText(value string, limit int) bool {
 }
 
 func cloneAuthorization(value Authorization) Authorization {
-	departments := cloneSlice(value.Departments)
+	departments := slices.Clone(value.Departments)
 	for index := range departments {
-		departments[index].AncestorIDs = cloneSlice(departments[index].AncestorIDs)
+		departments[index].AncestorIDs = slices.Clone(departments[index].AncestorIDs)
 	}
 	return Authorization{
 		Member:              value.Member,
 		IsOrganizationOwner: value.IsOrganizationOwner,
 		Departments:         departments,
-		Permissions:         cloneSlice(value.Permissions),
+		Permissions:         slices.Clone(value.Permissions),
 	}
-}
-
-func cloneSlice[T any](value []T) []T {
-	if value == nil {
-		return nil
-	}
-	return append([]T{}, value...)
 }
