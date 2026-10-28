@@ -174,11 +174,15 @@ func (client *Client) Snapshot(ctx context.Context, organizationID string, userI
 	if len(body) > maxRequestBytes {
 		return Snapshot{}, ErrProtocol
 	}
+	started := time.Now()
 	token, err := client.accessToken(ctx)
+	recordDirectoryPhase(ctx, "directory.token", started)
 	if err != nil {
 		return Snapshot{}, err
 	}
+	started = time.Now()
 	document, err := client.postSnapshot(ctx, token, body)
+	recordDirectoryPhase(ctx, "directory.snapshot", started)
 	if err != nil {
 		return Snapshot{}, err
 	}

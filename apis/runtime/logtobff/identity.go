@@ -344,6 +344,8 @@ func (a *Runtime) refresh(ctx context.Context, value *session) (profile, error) 
 	return user, nil
 }
 func (a *Runtime) organizations(ctx context.Context, value *session) ([]organization, error) {
+	started := time.Now()
+	defer func() { recordIdentityPhase(ctx, "bff.current.organization", started) }()
 	req, err := http.NewRequestWithContext(ctx, "GET", a.config.Endpoint+"/api/my-account/organization-identity", nil)
 	if err != nil {
 		return nil, err
