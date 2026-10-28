@@ -148,6 +148,8 @@ router.Post("profile.Get", bff.Require(), server.API(handler.GetProfile))
 
 `Require` 成功后，`FromContext` 返回已认证成员的原生 `Principal` 和有效标志。应用须通过在线权威目录校验该成员，自行组合 `identity.Authorization` 并通过 `identity.WithAuthorization` 写入请求上下文。副作用请求必须由 BFF 完成 CSRF 校验；调用方不得恢复 Cookie 与 Bearer 间的静默回退。
 
+退出时，中央端点明确返回 401 会按本地会话失效处理，BFF 返回 `401 session_invalid`，清理被拒绝的旧本地会话；这不表示新 SSO 会话已被退出，也不会重试中央退出动作。超时、5xx、未知状态或响应关闭异常仍返回 503 并保留恢复状态；旧请求不能清除已更新的会话状态。
+
 ### `apis/runtime/auth`
 
 认证包提供业务服务共享的 `PermissionCode`、稳定认证错误和严格 EdDSA/JWK 验签原语。它不再提供 Account numeric Session Resolver、UIN/CompanyID 授权上下文或旧 HS256 Bearer API。
