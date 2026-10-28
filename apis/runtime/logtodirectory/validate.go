@@ -22,6 +22,11 @@ type wireListPage struct {
 	NextCursor   json.RawMessage   `json:"next_cursor"`
 }
 
+type wireOrganizationSearch struct {
+	Organizations []wireOrganization `json:"organizations"`
+	NextCursor    json.RawMessage    `json:"next_cursor"`
+}
+
 type wireOrganization struct {
 	ID   *string `json:"id"`
 	Name *string `json:"name"`
@@ -339,6 +344,48 @@ func parseNextCursor(raw json.RawMessage) (*string, error) {
 		return nil, ErrProtocol
 	}
 	return &cursor, nil
+}
+
+func parseOptionalOrganizationCursor(raw json.RawMessage) (*string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, nil
+	}
+	if bytes.Equal(trimmed, []byte("null")) || trimmed[0] != '"' {
+		return nil, ErrProtocol
+	}
+	var cursor string
+	if err := json.Unmarshal(trimmed, &cursor); err != nil || !validOrganizationID(cursor) {
+		return nil, ErrProtocol
+	}
+	return &cursor, nil
+}
+
+func validateOrganizationSearch(organizations []wireOrganization, cursor string, nextCursor *string, limit int) ([]Organization, error) {
+	if organizations == nil || len(organizations) > _maxOrganizations || len(organizations) > limit {
+		return nil, ErrProtocol
+	}
+	validated := make([]Organization, 0, len(organizations))
+	seen := make(map[string]struct{}, len(organizations))
+	previousID := ""
+	for _, organization := range organizations {
+		if organization.ID == nil || organization.Name == nil || !validOrganizationID(*organization.ID) ||
+			!validOrganizationName(*organization.Name) {
+			return nil, ErrProtocol
+		}
+		if _, duplicate := seen[*organization.ID]; duplicate ||
+			(previousID != "" && *organization.ID <= previousID) ||
+			(cursor != "" && *organization.ID <= cursor) {
+			return nil, ErrProtocol
+		}
+		seen[*organization.ID] = struct{}{}
+		previousID = *organization.ID
+		validated = append(validated, Organization{ID: *organization.ID, Name: *organization.Name})
+	}
+	if nextCursor != nil && (len(validated) == 0 || *nextCursor < validated[len(validated)-1].ID) {
+		return nil, ErrProtocol
+	}
+	return validated, nil
 }
 
 func strictJSON(document []byte, target any) error {

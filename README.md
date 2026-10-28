@@ -45,7 +45,7 @@ make clean       # 清理 Go test cache
 | [`apis/errcode`](#apiserrcode) | 业务错误码注册和消息查询 | `Register`、`GetMessage` |
 | [`apis/runtime`](#apisruntime) | HTTP 响应和请求元数据 helper | `Success`、`BadRequest`、`RequestID` |
 | [`apis/runtime/logtobff`](#apisruntimelogtobff) | Logto Browser BFF、主体发布和 CSRF 边界 | `New`、`Runtime.Require`、`FromContext` |
-| [`apis/runtime/logtodirectory`](#apisruntimelogtodirectory) | 固定用途 Logto workload-directory M2M 客户端 | `NewClient`、`Snapshot`、`ListPage` |
+| [`apis/runtime/logtodirectory`](#apisruntimelogtodirectory) | 固定用途 Logto workload-directory M2M 客户端 | `NewClient`、`Snapshot`、`ListPage`、`SearchOrganizations` |
 | [`apis/runtime/auth`](#apisruntimeauth) | 通用权限错误、权限编码和严格 EdDSA 验签 | `PermissionCode`、`NewTokenVerifier` |
 | [`apis/runtime/middleware`](#apisruntimemiddleware) | Gin 日志、恢复、CORS 与 Credits 执行绑定 | `NewCORS`、`BindCreditsExecution` |
 | [`apis/runtime/server`](#apisruntimeserver) | Gin Router、DTO 适配和显式 handler 组合 | `NewRouter`、`Post`、`API` |
@@ -105,7 +105,7 @@ func GetProfile(ctx *gin.Context) {
 
 ### `apis/runtime/logtodirectory`
 
-提供 JXX 现有目录传输迁移和 JXONE 有界成员列举共用的固定 Logto workload-directory M2M 客户端。应用必须显式读取自己的启动配置并传给 `NewClient(Config)`；SDK 不读取环境、数据库或 coresetting，导入和构造不执行网络、迁移或其他初始化副作用。`Endpoint` 只接受精确 HTTPS origin，客户端只派生 `/oidc/token` 和 `/api/workload-directory/snapshot`，不接受任意 URL、scope、token 转发或 Management API 请求。
+提供 JXX 原生目录适配和 JXONE 有界成员列举共用的固定 Logto workload-directory M2M 客户端。应用必须显式读取自己的启动配置并传给 `NewClient(Config)`；SDK 不读取环境、数据库或 coresetting，导入和构造不执行网络、迁移或其他初始化副作用。`Endpoint` 只接受精确 HTTPS origin，客户端只派生 `/oidc/token`、`/api/workload-directory/snapshot` 和 `/api/workload-directory/organizations`，不接受任意 URL、scope、token 转发或 Management API 请求。`NewClientWithTransport` 只用于启动期注入可信 transport；默认 `NewClient` 不继承系统 proxy。
 
 ```go
 client, err := logtodirectory.NewClient(logtodirectory.Config{
@@ -122,9 +122,11 @@ snapshot, err := client.Snapshot(ctx, organizationID, userIDs, logtodirectory.Op
 })
 ```
 
-`Snapshot` 不缓存成员、角色、资料或部门，只缓存有界 M2M access token；默认超时 10 秒，显式范围 1..30 秒。`Options.IncludeMembershipEpoch` 要求每个成员返回 canonical 正整数 decimal string，SDK 不把 epoch 解码为浮点数。错误通过 `ErrDenied`、`ErrUnavailable`、`ErrProtocol` 分类；调用方仍可用 `errors.Is` 检查 context cancellation。响应正文、token、Client Secret 和配置不会被写入错误。
+`Snapshot` 不缓存成员、角色、资料或部门，只缓存有界 M2M access token；默认超时 10 秒，显式范围 1..30 秒。同一 client 的冷 token 刷新会合并等待者，目录数据请求仍可并行；现有 request ID 会透传到 token 和每个目录请求。`Options.IncludeMembershipEpoch` 要求每个成员返回 canonical 正整数 decimal string，SDK 不把 epoch 解码为浮点数。错误通过 `ErrDenied`、`ErrUnavailable`、`ErrProtocol` 分类；固定目录 403 仅在严格精确的 `organization_access_denied` JSON 下返回包装 `ErrDenied` 的 `ErrOrganizationDenied`。调用方仍可用 `errors.Is` 检查 context cancellation。响应正文、token、Client Secret 和配置不会被写入错误。
 
 `ListPage` 使用同一 snapshot path 的单页列出契约；SDK 与配套 Logto handler 已通过本地 HTTPS、数据库联合测试及独立复审。使用前仍须部署配套 provider，并在 provider registry 为该 workload 显式启用 `allowMemberListing`；省略时禁止列出。SDK 不提供 capability 覆盖或跨页聚合，调用方须自行设置完整性、人数、页数和总时限。
+
+`SearchOrganizations` 使用固定的 organizations path，查询上限 128 runes、页大小 1..100、组织 ID/cursor 上限 21 runes；结果保持 provider 的 ID 顺序并要求唯一。该页的结束游标按 provider 契约可省略并返回 `nil`，不能复用 `ListPage` 的必需 JSON `null` 规则。`Close` 只转发 idle connection 回收，不取消 in-flight 请求。
 
 ### `identity`
 

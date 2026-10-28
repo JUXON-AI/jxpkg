@@ -108,6 +108,100 @@ func TestSnapshotRejectsRedirectWithoutFollowing(t *testing.T) {
 	}
 }
 
+func TestNewClientWithTransportRequiresHTTPSAndPreservesDefaultProxyPolicy(t *testing.T) {
+	transport := &closeTrackingTransport{}
+	if _, err := NewClientWithTransport(testConfig("http://logto.example"), transport); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("NewClientWithTransport(http) error = %v, want ErrUnavailable", err)
+	}
+	if _, err := NewClientWithTransport(testConfig("https://logto.example"), nil); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("NewClientWithTransport(nil) error = %v, want ErrUnavailable", err)
+	}
+	client, err := NewClientWithTransport(testConfig("https://logto.example"), transport)
+	if err != nil {
+		t.Fatalf("NewClientWithTransport(https) error = %v", err)
+	}
+	bounded, ok := client.http.Transport.(*boundedTransport)
+	if !ok || bounded.base != transport {
+		t.Fatal("NewClientWithTransport() did not retain the trusted transport")
+	}
+
+	defaultClient, err := NewClient(testConfig("https://logto.example"))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	bounded, ok = defaultClient.http.Transport.(*boundedTransport)
+	if !ok {
+		t.Fatalf("NewClient() transport = %T, want *boundedTransport", defaultClient.http.Transport)
+	}
+	base, ok := bounded.base.(*http.Transport)
+	if !ok || base.Proxy != nil {
+		t.Fatalf("NewClient() base transport = %T proxyConfigured=%t, want cloned transport without proxy", bounded.base, base.Proxy != nil)
+	}
+}
+
+func TestBoundedTransportRejectsUnregisteredRequests(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		method string
+		url    string
+	}{
+		{name: "GET", method: http.MethodGet, url: "https://logto.example" + snapshotPath},
+		{name: "unknown path", method: http.MethodPost, url: "https://logto.example/api/workload-directory/unknown"},
+		{name: "query", method: http.MethodPost, url: "https://logto.example" + _organizationsPath + "?limit=1"},
+		{name: "cross origin", method: http.MethodPost, url: "https://other.example" + _organizationsPath},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := &countingTransport{}
+			transport := &boundedTransport{base: base, origin: "https://logto.example"}
+			request, err := http.NewRequestWithContext(context.Background(), test.method, test.url, nil)
+			if err != nil {
+				t.Fatalf("NewRequestWithContext() error = %v", err)
+			}
+			if _, err := transport.RoundTrip(request); err == nil {
+				t.Fatal("RoundTrip() error = nil, want unregistered endpoint rejection")
+			}
+			if base.calls.Load() != 0 {
+				t.Fatalf("base transport calls = %d, want 0", base.calls.Load())
+			}
+		})
+	}
+}
+
+func TestCloseForwardsIdleConnectionClosure(t *testing.T) {
+	transport := &closeTrackingTransport{}
+	client, err := NewClientWithTransport(testConfig("https://logto.example"), transport)
+	if err != nil {
+		t.Fatalf("NewClientWithTransport() error = %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if transport.closeCalls.Load() != 1 {
+		t.Fatalf("CloseIdleConnections calls = %d, want 1", transport.closeCalls.Load())
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("repeated Close() error = %v", err)
+	}
+}
+
+type countingTransport struct {
+	calls atomic.Int32
+}
+
+func (transport *countingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	transport.calls.Add(1)
+	return nil, errors.New("unexpected transport call")
+}
+
+type closeTrackingTransport struct {
+	countingTransport
+	closeCalls atomic.Int32
+}
+
+func (transport *closeTrackingTransport) CloseIdleConnections() {
+	transport.closeCalls.Add(1)
+}
+
 func TestResponseAndRequestBodyLimits(t *testing.T) {
 	t.Run("request", func(t *testing.T) {
 		var calls atomic.Int32

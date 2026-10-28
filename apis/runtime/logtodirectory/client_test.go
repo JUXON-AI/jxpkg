@@ -112,6 +112,46 @@ func TestSnapshotDoesNotInferCompanyOwnerFromPermission(t *testing.T) {
 	}
 }
 
+func TestSnapshotRequiresCurrentCompanyOwnerWireField(t *testing.T) {
+	tests := []struct {
+		name    string
+		owner   string
+		wantErr bool
+	}{
+		{name: "current true", owner: `"is_company_owner":true`},
+		{name: "current false", owner: `"is_company_owner":false`},
+		{name: "missing", owner: "", wantErr: true},
+		{name: "retired", owner: `"is_organization_owner":true`, wantErr: true},
+		{name: "dual", owner: `"is_company_owner":true,"is_organization_owner":true`, wantErr: true},
+		{name: "null current", owner: `"is_company_owner":null`, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			member := `{"user_id":"user-1","name":"User","avatar_url":"","permissions":[],"department_ids":[]`
+			if test.owner != "" {
+				member += "," + test.owner
+			}
+			member += "}"
+			body := `{"organization":{"id":"org-1","name":"Company"},"members":[` + member + `],"departments":[]}`
+			client, _ := newPlainTestClient(t, directoryResponseHandler(body))
+			snapshot, err := client.Snapshot(context.Background(), "org-1", []string{"user-1"}, Options{})
+			if test.wantErr {
+				if !errors.Is(err, ErrProtocol) {
+					t.Fatalf("Snapshot() error = %v, want ErrProtocol", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Snapshot() error = %v", err)
+			}
+			wantOwner := test.name == "current true"
+			if snapshot.Members[0].IsCompanyOwner != wantOwner {
+				t.Fatalf("IsCompanyOwner = %t, want %t", snapshot.Members[0].IsCompanyOwner, wantOwner)
+			}
+		})
+	}
+}
+
 func TestSnapshotAllowsMemberDepartmentsWithoutTree(t *testing.T) {
 	client, _ := newPlainTestClient(t, directoryResponseHandler(
 		`{"organization":{"id":"org-1","name":"Company"},"members":[{"user_id":"user-1","name":"User One","avatar_url":"","permissions":[],"department_ids":["dept-1"],"is_company_owner":false}],"departments":[]}`,
