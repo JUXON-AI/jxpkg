@@ -150,6 +150,8 @@ router.Post("profile.Get", bff.Require(), server.API(handler.GetProfile))
 
 `Require` 成功后，`FromContext` 返回已认证成员的原生 `Principal` 和有效标志。应用须通过在线权威目录校验该成员，自行组合 `identity.Authorization` 并通过 `identity.WithAuthorization` 写入请求上下文。副作用请求必须由 BFF 完成 CSRF 校验；调用方不得恢复 Cookie 与 Bearer 间的静默回退。
 
+纯身份模式（`APIResource` 为空）把资料展示绑定到每次必做的在线组织身份检查：BFF 仅在该检查中请求受限的 `user` 投影，并在发布前校验其 subject 与已验证 Token 一致且资料字段有界。该模式不读取分钟级 UserInfo 资料缓存，也不会在投影缺失或畸形时回退到 UserInfo；资源 Token 模式继续使用既有 UserInfo 与组织权限流程。
+
 退出时，中央端点明确返回 401 会按本地会话失效处理，BFF 返回 `401 session_invalid`，清理被拒绝的旧本地会话；这不表示新 SSO 会话已被退出，也不会重试中央退出动作。超时、5xx、未知状态或响应关闭异常仍返回 503 并保留恢复状态；旧请求不能清除已更新的会话状态。
 
 ### `apis/runtime/auth`

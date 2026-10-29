@@ -32,9 +32,10 @@ func (f integrationTransport) RoundTrip(r *http.Request) (*http.Response, error)
 // This authority runs only on a disposable loopback server; it models identity-only login,
 // leaving the real SDK, signature verification, Redis, CSRF and router chain in place.
 type creditsAuthority struct {
-	key             *rsa.PrivateKey
-	endpoint, nonce string
-	status          atomic.Int32
+	key                       *rsa.PrivateKey
+	endpoint, nonce           string
+	status                    atomic.Int32
+	onlineProfileWasRequested atomic.Bool
 }
 
 func (a *creditsAuthority) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +69,12 @@ func (a *creditsAuthority) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/oidc/me":
 		body = map[string]any{"sub": "user-one", "organizations": []string{"org-one"}}
 	case "/api/my-account/organization-identity":
-		body = map[string]any{"organization_id": "org-one", "revision": "1", "organizations": []map[string]string{{"id": "org-one", "name": "Synthetic company"}}}
+		identity := map[string]any{"organization_id": "org-one", "revision": "1", "organizations": []map[string]string{{"id": "org-one", "name": "Synthetic company"}}}
+		if values := r.URL.Query()["include_profile"]; len(values) == 1 && values[0] == "true" {
+			a.onlineProfileWasRequested.Store(true)
+			identity["user"] = map[string]string{"sub": "user-one", "name": "Synthetic member"}
+		}
+		body = identity
 	default:
 		w.WriteHeader(404)
 		return
@@ -154,6 +160,9 @@ func TestLogtoCreditsExecutionAndBalanceIntegration(t *testing.T) {
 	}
 	if session.Code != 200 || json.Unmarshal(session.Body.Bytes(), &info) != nil || info.CSRF == "" {
 		t.Fatal("session unavailable")
+	}
+	if !authority.onlineProfileWasRequested.Load() {
+		t.Fatal("identity-only request omitted the online profile projection")
 	}
 	calls := 0
 	client, err := credits.NewClientWithTransport(credits.Config{Endpoint: "https://credits.invalid"}, integrationTransport(func(r *http.Request) (*http.Response, error) {

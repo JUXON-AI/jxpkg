@@ -343,52 +343,81 @@ func (a *Runtime) refresh(ctx context.Context, value *session) (profile, error) 
 	}
 	return user, nil
 }
-func (a *Runtime) organizations(ctx context.Context, value *session) ([]organization, error) {
+func (a *Runtime) organizations(ctx context.Context, value *session, includeProfile bool) (profile, []organization, error) {
 	started := time.Now()
 	defer func() { recordIdentityPhase(ctx, "bff.current.organization", started) }()
-	req, err := http.NewRequestWithContext(ctx, "GET", a.config.Endpoint+"/api/my-account/organization-identity", nil)
+	endpoint := a.config.Endpoint + "/api/my-account/organization-identity"
+	if includeProfile {
+		endpoint += "?include_profile=true"
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
-		return nil, err
+		return profile{}, nil, err
 	}
 	token, tokenErr := a.sdk(ctx, value.SDK).GetAccessToken("")
 	if tokenErr != nil {
-		return nil, sdkFailure(tokenErr)
+		return profile{}, nil, sdkFailure(tokenErr)
 	}
 	req.Header.Set("Authorization", "Bearer "+token.Token)
 	response, err := a.http.Do(req)
 	if err != nil {
-		return nil, err
+		return profile{}, nil, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != 200 {
-		return nil, providerFailure(response, true /* account */)
+		return profile{}, nil, providerFailure(response, true /* account */)
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
 	if err != nil || len(data) > 1<<20 {
-		return nil, errors.New("invalid directory response")
+		return profile{}, nil, errors.New("invalid directory response")
 	}
 	var identity struct {
 		Organizations  []organization `json:"organizations"`
 		OrganizationID string         `json:"organization_id"`
 		Revision       string         `json:"revision"`
+		User           *profile       `json:"user"`
 	}
 	if json.Unmarshal(data, &identity) != nil || identity.Organizations == nil || len(identity.Organizations) > 1000 || !validRevision(identity.Revision) || !_orgPattern.MatchString(identity.OrganizationID) {
-		return nil, errors.New("invalid directory")
+		return profile{}, nil, errors.New("invalid directory")
 	}
 	rows := identity.Organizations
 	seen := make(map[string]bool, len(rows))
 	for _, row := range rows {
 		if !_orgPattern.MatchString(row.ID) || len(row.Name) > 512 || seen[row.ID] {
-			return nil, errors.New("invalid directory entry")
+			return profile{}, nil, errors.New("invalid directory entry")
 		}
 		seen[row.ID] = true
 	}
 	if !contains(rows, identity.OrganizationID) {
-		return nil, &accessError{status: 403, code: "organization_not_enabled_for_app"}
+		return profile{}, nil, &accessError{status: 403, code: "organization_not_enabled_for_app"}
+	}
+	var user profile
+	if includeProfile {
+		if identity.User == nil {
+			return profile{}, nil, errors.New("identity profile missing")
+		}
+		if err := validateDisplayProfile(*identity.User); err != nil {
+			return profile{}, nil, err
+		}
+		if identity.User.Subject != value.Subject {
+			return profile{}, nil, &accessError{status: 401, code: "subject_mismatch"}
+		}
+		user = *identity.User
+		// The authority endpoint exposes display claims only. Roles and directory
+		// collections remain owned by the current organization/revision response.
+		user.Organizations, user.Roles = nil, nil
 	}
 	value.Organization, value.Revision = identity.OrganizationID, identity.Revision
-	return rows, nil
+	return user, rows, nil
 }
+
+func validateDisplayProfile(user profile) error {
+	if user.Subject == "" || len(user.Username) > 512 || len(user.Name) > 512 || len(user.Avatar) > 4096 || len(user.Email) > 320 {
+		return errors.New("invalid identity profile")
+	}
+	return nil
+}
+
 func contains(rows []organization, id string) bool {
 	for _, row := range rows {
 		if row.ID == id {
@@ -398,21 +427,19 @@ func contains(rows []organization, id string) bool {
 	return false
 }
 func (a *Runtime) currentRequest(ctx context.Context, value *session) (profile, []organization, error) {
-	var user profile
+	var (
+		user profile
+		rows []organization
+		err  error
+	)
 	if a.config.APIResource == "" {
-		if value.Profile == nil {
-			return user, nil, errors.New("session profile unavailable")
-		}
-		user = *value.Profile
+		user, rows, err = a.organizations(ctx, value, true /* includeProfile */)
 	} else {
-		var err error
 		user, err = a.refresh(ctx, value)
-		if err != nil {
-			value.Organization = ""
-			return user, nil, err
+		if err == nil {
+			_, rows, err = a.organizations(ctx, value, false /* includeProfile */)
 		}
 	}
-	rows, err := a.organizations(ctx, value)
 	if err != nil {
 		value.Organization = ""
 		return user, nil, err

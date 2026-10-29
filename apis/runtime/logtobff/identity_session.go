@@ -3,6 +3,7 @@ package logtobff
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"time"
 
@@ -10,13 +11,12 @@ import (
 	"github.com/logto-io/go/v2/client"
 )
 
-// prepareIdentity 按分钟更新展示资料，刷新时同步更新；授权状态由在线 identity 接口确认。
-// Token 至少覆盖整个认证预算，解锁后的 SDK 读取不得自行轮换 refresh token。
+// prepareIdentity proves the subject and rotates tokens under the fenced lease.
+// Display authority is fetched by currentRequest from the mandatory online identity read.
 func (a *Runtime) prepareIdentity(ctx context.Context, value *session) error {
 	if value.SDK == nil {
 		return &accessError{status: 401, code: "session_invalid"}
 	}
-	previous := value.SDK[client.StorageKeyAccessTokenMap]
 	token, err := a.sdk(ctx, value.SDK).GetAccessToken("")
 	if err != nil {
 		return sdkFailure(err)
@@ -34,19 +34,6 @@ func (a *Runtime) prepareIdentity(ctx context.Context, value *session) error {
 	claims, err := a.sdk(ctx, value.SDK).GetIdTokenClaims()
 	if err != nil || claims.Sub != value.Subject {
 		return &accessError{status: 401, code: "subject_mismatch"}
-	}
-	if value.Profile == nil || !time.Now().Before(value.ProfileUntil) || previous != value.SDK[client.StorageKeyAccessTokenMap] {
-		user, err := a.refresh(ctx, value)
-		if err != nil {
-			return err
-		}
-		if len(user.Username) > 512 || len(user.Name) > 512 || len(user.Avatar) > 4096 || len(user.Email) > 320 {
-			return errors.New("identity profile too large")
-		}
-		// 部门、角色不由展示缓存发布，纯会话调用方不能把它当授权依据。
-		user.Organizations, user.Roles = nil, nil
-		value.Profile = &user
-		value.ProfileUntil = time.Now().Add(time.Minute)
 	}
 	return nil
 }
@@ -76,7 +63,8 @@ func (a *Runtime) beginIdentity(ctx context.Context, id string) (*session, error
 			value.Organization = ""
 		}
 	}
-	// 即使后续 UserInfo 失败，也保存已轮换的 refresh token，避免永久丢失有效凭据。
+	// Even when the later online authority check fails, persist a rotated refresh
+	// token so a provider response cannot strand a still-valid browser session.
 	save, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 	defer cancel()
 	started = time.Now()
@@ -90,7 +78,9 @@ func (a *Runtime) beginIdentity(ctx context.Context, id string) (*session, error
 }
 
 // finishIdentity 重新读取最新会话，只合并安全快照仍匹配的身份结果，不写回旧 SDK。
-// SDK/展示资料更新不影响并行读；退出、身份或 CSRF 变化使旧请求失效。
+// SDK updates do not affect parallel reads; logout, identity or CSRF changes
+// invalidate an old request, and destructive invalidation requires the captured
+// SDK generation to remain current.
 func (a *Runtime) finishIdentity(ctx context.Context, id, nextID string, before, value *session, remove bool) error {
 	started := time.Now()
 	current, owner, err := a.store.acquire(ctx, id)
@@ -104,6 +94,9 @@ func (a *Runtime) finishIdentity(ctx context.Context, id, nextID string, before,
 			a.store.release(ctx, id, owner)
 		}
 	}()
+	if remove && !maps.Equal(before.SDK, current.SDK) {
+		return identityUpdateConflict()
+	}
 	if err := mergeIdentityUpdate(current, before, value, a.store.nowTime()); err != nil {
 		return err
 	}
@@ -118,8 +111,6 @@ func (a *Runtime) finishIdentity(ctx context.Context, id, nextID string, before,
 	}
 	committed = true
 	value.SDK = current.SDK
-	value.Profile = current.Profile
-	value.ProfileUntil = current.ProfileUntil
 	value.Until = current.Until
 	value.PolicyVersion = current.PolicyVersion
 	value.AuthenticatedAt = current.AuthenticatedAt
@@ -128,13 +119,15 @@ func (a *Runtime) finishIdentity(ctx context.Context, id, nextID string, before,
 	return nil
 }
 
+func identityUpdateConflict() error {
+	return &accessError{status: 409, code: "organization_identity_changed"}
+}
+
 // mergeIdentityUpdate adopts only a deadline extension from a snapshot that may
 // have run in parallel with an identity read. The current Redis record remains
-// authoritative for SDK/profile rotation, logout, CSRF and identity changes.
+// authoritative for SDK rotation, logout, CSRF and identity changes.
 func mergeIdentityUpdate(current, before, value *session, now time.Time) error {
-	changed := func() error {
-		return &accessError{status: 409, code: "organization_identity_changed"}
-	}
+	changed := identityUpdateConflict
 	if current.Subject != before.Subject || current.Organization != before.Organization || current.Revision != before.Revision || current.CSRF != before.CSRF {
 		return changed()
 	}
