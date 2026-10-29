@@ -1,9 +1,20 @@
 package logtobff
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/JUXON-AI/jxpkg/logs"
+	"github.com/JUXON-AI/jxpkg/requestid"
+	"go.uber.org/zap/zapcore"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 func TestAutoLoginUsesPromptNoneAndKeepsGuestReturnNonAuthoritative(t *testing.T) {
@@ -123,5 +134,203 @@ func TestSilentLoginErrorsAndGuestRedirectAreStrictlySeparated(t *testing.T) {
 	}
 	if got, want := silentGuestRedirect(origin, "/credits?view=keys&sso_auto=stale#section"), origin+"/credits?sso_auto=guest&view=keys#section"; got != want {
 		t.Fatalf("query fallback=%q want=%q", got, want)
+	}
+}
+
+func callAuthWithLogContext(a *Runtime, ctx context.Context, path string, cookie *http.Cookie) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(http.MethodGet, "http://localhost:5180"+path, nil).WithContext(ctx)
+	r.RequestURI = r.URL.RequestURI()
+	if cookie != nil {
+		r.AddCookie(cookie)
+	}
+	w := httptest.NewRecorder()
+	a.Handler().ServeHTTP(w, r)
+	return w
+}
+
+func captureSilentLoginLogs(t *testing.T) func() []map[string]any {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "silent-login.log")
+	config := logs.LogsConfig{"default": {{Writer: logs.WriterFile, Encoder: logs.EncoderStandard, Level: zapcore.InfoLevel, Logger: &lumberjack.Logger{Filename: path}}}}
+	if err := logs.ReloadConfig("silent-login-test", config); err != nil {
+		t.Fatal(err)
+	}
+	closed := false
+	closeLogger := func() {
+		if closed {
+			return
+		}
+		closed = true
+		if err := logs.ReloadConfig("-", nil); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(closeLogger)
+	return func() []map[string]any {
+		closeLogger()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(string(data)) == "" {
+			return nil
+		}
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+		entries := make([]map[string]any, 0, len(lines))
+		for _, line := range lines {
+			var entry map[string]any
+			if err := json.Unmarshal([]byte(line), &entry); err != nil {
+				t.Fatal(err)
+			}
+			entries = append(entries, entry)
+		}
+		return entries
+	}
+}
+
+func TestSilentLoginUnavailableLogsOnlyAllowlistedReasons(t *testing.T) {
+	readLogs := captureSilentLoginLogs(t)
+	a, _ := fixtureRuntime(t)
+	reasons := []string{"login_required", "interaction_required", "consent_required", "unmet_authentication_requirements", "access_denied", "server_error", "temporarily_unavailable"}
+	seen := map[string]bool{}
+	requestIDs := map[string]string{}
+	for _, reason := range reasons {
+		start := callAuth(a, http.MethodGet, "/auth/auto-login?return_to=%2Fcatalog", "", nil, "")
+		if start.Code != http.StatusFound {
+			t.Fatalf("auto login HTTP %d", start.Code)
+		}
+		target, err := url.Parse(start.Header().Get("Location"))
+		if err != nil {
+			t.Fatal("auto login redirect invalid")
+		}
+		state := target.Query().Get("state")
+		nonce := target.Query().Get("nonce")
+		requestID := "silent-request-" + reason
+		ctx := requestid.WithContext(context.Background(), requestID)
+		ctx = logs.WithContextFields(ctx,
+			"authorization", "private-authorization",
+			"cookie", "private-cookie",
+			"access_token", "private-token",
+			"state", state,
+			"nonce", nonce,
+			"code", "private-code",
+			"user_id", "private-user",
+			"organization_id", "private-organization",
+			"url", "https://private.invalid/callback?secret=private-query",
+		)
+		callback := "/auth/callback?error=" + url.QueryEscape(reason) + "&state=" + url.QueryEscape(state)
+		tx := start.Result().Cookies()[0]
+		response := callAuthWithLogContext(a, ctx, callback, tx)
+		if response.Code != http.StatusFound {
+			t.Fatalf("%s fallback HTTP %d %s", reason, response.Code, response.Body.String())
+		}
+		if location := response.Header().Get("Location"); location != "http://localhost:5180/catalog?sso_auto=guest" {
+			t.Fatalf("%s fallback location=%q", reason, location)
+		}
+		for _, cookie := range response.Result().Cookies() {
+			if cookie.Name == a.config.CookieName {
+				t.Fatalf("%s fallback published a session", reason)
+			}
+		}
+		replay := callAuthWithLogContext(a, context.Background(), callback, tx)
+		if replay.Code != http.StatusBadRequest {
+			t.Fatalf("%s replay HTTP %d", reason, replay.Code)
+		}
+		seen[reason] = true
+		requestIDs[reason] = requestID
+	}
+	entries := readLogs()
+	diagnostics := make([]map[string]any, 0, len(reasons))
+	for _, entry := range entries {
+		if entry["msg"] == "logtobff.silent_login.unavailable" {
+			diagnostics = append(diagnostics, entry)
+		}
+	}
+	if len(diagnostics) != len(reasons) {
+		t.Fatalf("silent diagnostic entries=%d, want %d", len(diagnostics), len(reasons))
+	}
+	for _, entry := range diagnostics {
+		if entry["lvl"] != "INFO" {
+			t.Fatalf("unexpected silent diagnostic entry: %v", entry)
+		}
+		reason, ok := entry["reason"].(string)
+		if !ok || !seen[reason] {
+			t.Fatalf("unexpected silent diagnostic reason: %v", entry["reason"])
+		}
+		if entry["request_id"] != requestIDs[reason] {
+			t.Fatalf("silent diagnostic request identity mismatch: %v", entry)
+		}
+		delete(seen, reason)
+		for _, field := range []string{"authorization", "cookie", "access_token", "state", "nonce", "code", "user_id", "organization_id", "url"} {
+			if _, exists := entry[field]; exists {
+				t.Fatalf("silent diagnostic retained forbidden field %q", field)
+			}
+		}
+		encoded, err := json.Marshal(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, private := range []string{"private-authorization", "private-cookie", "private-token", "private-code", "private-user", "private-organization", "private.invalid", "private-query"} {
+			if strings.Contains(string(encoded), private) {
+				t.Fatalf("silent diagnostic leaked %q", private)
+			}
+		}
+	}
+	if len(seen) != 0 {
+		t.Fatalf("missing silent diagnostic reasons: %v", seen)
+	}
+}
+
+func TestSilentLoginDiagnosticDoesNotLogSuccessfulAuthentication(t *testing.T) {
+	readLogs := captureSilentLoginLogs(t)
+	a, f := fixtureRuntime(t)
+	if session := loginFixture(t, a, f); session == nil {
+		t.Fatal("successful callback did not publish a session")
+	}
+	for _, entry := range readLogs() {
+		if entry["msg"] == "logtobff.silent_login.unavailable" {
+			t.Fatalf("successful authentication emitted silent fallback diagnostic: %v", entry)
+		}
+	}
+}
+
+func TestSilentLoginDiagnosticRejectsInvalidStateAndErrorInjection(t *testing.T) {
+	readLogs := captureSilentLoginLogs(t)
+	a, _ := fixtureRuntime(t)
+	cases := []func(state string) string{
+		func(string) string { return "/auth/callback?error=login_required&state=wrong" },
+		func(state string) string {
+			return "/auth/callback?error=" + url.QueryEscape("login_required\nforged") + "&state=" + url.QueryEscape(state)
+		},
+		func(state string) string {
+			return "/auth/callback?error=login_required&code=private-code&state=" + url.QueryEscape(state)
+		},
+		func(state string) string {
+			return "/auth/callback?error_description=login_required&state=" + url.QueryEscape(state)
+		},
+	}
+	for index, callbackFor := range cases {
+		start := callAuth(a, http.MethodGet, "/auth/auto-login?return_to=%2F", "", nil, "")
+		if start.Code != http.StatusFound {
+			t.Fatalf("case %d auto login HTTP %d", index, start.Code)
+		}
+		target, err := url.Parse(start.Header().Get("Location"))
+		if err != nil {
+			t.Fatal("auto login redirect invalid")
+		}
+		response := callAuthWithLogContext(a, context.Background(), callbackFor(target.Query().Get("state")), start.Result().Cookies()[0])
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("case %d invalid callback HTTP %d %s", index, response.Code, response.Body.String())
+		}
+		for _, cookie := range response.Result().Cookies() {
+			if cookie.Name == a.config.CookieName {
+				t.Fatalf("case %d published a session", index)
+			}
+		}
+	}
+	for _, entry := range readLogs() {
+		if entry["msg"] == "logtobff.silent_login.unavailable" {
+			t.Fatalf("invalid callback emitted silent fallback diagnostic: %v", entry)
+		}
 	}
 }
