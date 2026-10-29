@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -57,6 +58,17 @@ type fakeAuthority struct {
 	resourceRevokeBody             string
 	resourceRevokeRequestID        string
 	refreshes                      int
+	userInfoCalls                  atomic.Int64
+	profileRequests                atomic.Int64
+	legacyIdentityRequests         atomic.Int64
+	identityInvalid                bool
+	identityMalformed              bool
+	profileMissing                 bool
+	profileSubjectMissing          bool
+	profileSubjectMismatch         bool
+	profileOversize                bool
+	profileSubOnly                 bool
+	identityOrganizations          []organization
 	organization, revision         string
 }
 
@@ -124,6 +136,7 @@ func (f *fakeAuthority) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "/oidc/me":
+		f.userInfoCalls.Add(1)
 		if f.userInvalid {
 			w.WriteHeader(401)
 			if _, err := fmt.Fprint(w, `{"error":"invalid_token"}`); err != nil {
@@ -139,7 +152,13 @@ func (f *fakeAuthority) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "/api/my-account/organization-identity":
-		if f.userInvalid || f.nativeSessionConsumed {
+		includeProfile := r.URL.Query().Get("include_profile") == "true"
+		if includeProfile {
+			f.profileRequests.Add(1)
+		} else {
+			f.legacyIdentityRequests.Add(1)
+		}
+		if f.identityInvalid || f.nativeSessionConsumed {
 			w.WriteHeader(401)
 			if _, err := fmt.Fprint(w, `{"error":"invalid_token"}`); err != nil {
 				return
@@ -153,7 +172,38 @@ func (f *fakeAuthority) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		if err := json.NewEncoder(w).Encode(map[string]any{"organization_id": f.organization, "revision": f.revision, "organizations": []organization{{ID: "org-one", Name: "Company One"}, {ID: "org-two", Name: "Company Two"}}}); err != nil {
+		if f.identityMalformed {
+			if _, err := fmt.Fprint(w, `{"organization_id":`); err != nil {
+				return
+			}
+			return
+		}
+		organizations := f.identityOrganizations
+		if organizations == nil {
+			organizations = []organization{{ID: "org-one", Name: "Company One"}, {ID: "org-two", Name: "Company Two"}}
+		}
+		response := map[string]any{"organization_id": f.organization, "revision": f.revision, "organizations": organizations}
+		if includeProfile {
+			user := map[string]any{"sub": "user-one", "username": "user-one", "name": "Synthetic member"}
+			if f.profileSubOnly {
+				user = map[string]any{
+					"sub":                "user-one",
+					"organizations":      []string{"org-one"},
+					"organization_roles": []string{"org-one:admin"},
+					"customData":         "must-not-publish",
+				}
+			} else if f.profileMissing {
+				user = nil
+			} else if f.profileSubjectMissing {
+				delete(user, "sub")
+			} else if f.profileSubjectMismatch {
+				user["sub"] = "user-two"
+			} else if f.profileOversize {
+				user["name"] = strings.Repeat("n", 513)
+			}
+			response["user"] = user
+		}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
 			return
 		}
 	case "/api/my-account/browser-session/logout":
@@ -440,6 +490,9 @@ func testOpaque(t *testing.T) string {
 func TestUserInfoInvalidatesSessionButClientFailureDoesNot(t *testing.T) {
 	a, f := fixtureRuntime(t)
 	cookie := loginFixture(t, a, f)
+	if f.userInfoCalls.Load() == 0 || f.legacyIdentityRequests.Load() == 0 || f.profileRequests.Load() != 0 {
+		t.Fatal("resource mode did not preserve UserInfo and legacy identity shape")
+	}
 	f.clientInvalid = true
 	if callAuth(a, "GET", "/auth/session", "", cookie, "").Code != 503 {
 		t.Fatal("client configuration failure classified as user logout")

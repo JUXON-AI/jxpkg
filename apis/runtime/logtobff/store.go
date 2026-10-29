@@ -65,8 +65,6 @@ type session struct {
 	AuthenticatedAt time.Time `json:"authenticated_at,omitempty"`
 	IdleUntil       time.Time `json:"idle_until,omitempty"`
 	AbsoluteUntil   time.Time `json:"absolute_until,omitempty"`
-	Profile         *profile  `json:"profile,omitempty"`
-	ProfileUntil    time.Time `json:"profile_until,omitempty"`
 }
 type transaction struct {
 	SDK      map[string]string `json:"sdk"`

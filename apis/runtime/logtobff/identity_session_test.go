@@ -58,9 +58,12 @@ func observeIdentity(t *testing.T, a *Runtime, block bool) *observedTransport {
 func TestIdentityOnlyWarmSessionUsesOneOnlineRequestAndRejectsScopes(t *testing.T) {
 	a, f := fixtureRuntime(t, "")
 	cookie := loginFixture(t, a, f)
+	if f.userInfoCalls.Load() != 0 || f.profileRequests.Load() == 0 {
+		t.Fatal("login used userinfo instead of the online profile projection")
+	}
 	observer := observeIdentity(t, a, false)
 	response := callAuth(a, "GET", "/auth/session", "", cookie, "")
-	if response.Code != 200 || observer.paths["/api/my-account/organization-identity"] != 1 || len(observer.paths) != 1 {
+	if response.Code != 200 || observer.paths["/api/my-account/organization-identity"] != 1 || len(observer.paths) != 1 || f.userInfoCalls.Load() != 0 {
 		t.Fatal("warm session repeated token/profile/metadata requests")
 	}
 	body := sessionBody(t, response)
@@ -99,6 +102,9 @@ func TestIdentityOnlyWarmSessionUsesOneOnlineRequestAndRejectsScopes(t *testing.
 func TestIdentityOnlyParallelRefreshOccursOnce(t *testing.T) {
 	a, f := fixtureRuntime(t, "")
 	cookie := loginFixture(t, a, f)
+	if f.userInfoCalls.Load() != 0 {
+		t.Fatal("identity-only login issued UserInfo")
+	}
 	value, owner, err := a.store.acquire(context.Background(), cookie.Value)
 	if err != nil {
 		t.Fatal(err)
@@ -146,6 +152,9 @@ func TestIdentityOnlyParallelRefreshOccursOnce(t *testing.T) {
 		if code := <-responses; code != 200 {
 			t.Fatalf("parallel unchanged session failed: %d", code)
 		}
+	}
+	if f.userInfoCalls.Load() != 0 {
+		t.Fatal("parallel online profile reads issued UserInfo")
 	}
 }
 
@@ -218,11 +227,11 @@ func TestIdentityOnlyRevalidationAndDependencyFailure(t *testing.T) {
 		t.Fatal("authority outage served cached identity")
 	}
 	f.unavailable = false
-	f.userInvalid = true
+	f.identityInvalid = true
 	if callAuth(a, "GET", "/auth/session", "", cookie, "").Code != 401 {
 		t.Fatal("current user revocation ignored")
 	}
-	f.userInvalid = false
+	f.identityInvalid = false
 	if callAuth(a, "GET", "/auth/session", "", cookie, "").Code != 401 {
 		t.Fatal("revoked session revived")
 	}
