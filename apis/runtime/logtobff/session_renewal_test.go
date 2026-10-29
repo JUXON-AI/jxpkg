@@ -2,15 +2,19 @@ package logtobff
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/logto-io/go/v2/client"
 	"github.com/redis/go-redis/v9"
 )
@@ -83,6 +87,237 @@ func renewalPolicySession(now time.Time) *session {
 		AuthenticatedAt: now,
 		IdleUntil:       now.Add(sessionIdleLifetime),
 		AbsoluteUntil:   now.Add(sessionAbsoluteLifetime),
+	}
+}
+
+func putEncryptedSessionFixture(t *testing.T, a *Runtime, id string, value any, ttl time.Duration) {
+	t.Helper()
+	key := a.store.prefix + "s:" + id
+	data, err := a.store.seal(key, value)
+	if err != nil {
+		t.Fatal("seal session fixture")
+	}
+	if err := a.store.db.Set(context.Background(), key, data, ttl).Err(); err != nil {
+		t.Fatal("write session fixture")
+	}
+	t.Cleanup(func() {
+		_ = a.store.db.Del(context.Background(), key).Err()
+	})
+}
+
+func legacySessionPayload(t *testing.T, value *session, now time.Time, policyVersion *uint64) map[string]any {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal("marshal session payload seed")
+	}
+	var payload map[string]any
+	if json.Unmarshal(data, &payload) != nil {
+		t.Fatal("decode session payload seed")
+	}
+	payload["until"] = now.Add(30 * time.Minute)
+	delete(payload, "authenticated_at")
+	delete(payload, "idle_until")
+	delete(payload, "absolute_until")
+	delete(payload, "policy_version")
+	if policyVersion != nil {
+		payload["policy_version"] = *policyVersion
+	}
+	return payload
+}
+
+func requireNoRuntimeCookie(t *testing.T, response http.Response, name string) {
+	t.Helper()
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == name {
+			t.Fatalf("unexpected session cookie: %#v", cookie)
+		}
+	}
+}
+
+type responseDeliveryBarrier struct {
+	header   http.Header
+	entered  chan struct{}
+	release  chan struct{}
+	blocked  sync.Once
+	status   int
+	bodySize int
+}
+
+func newResponseDeliveryBarrier() *responseDeliveryBarrier {
+	return &responseDeliveryBarrier{header: make(http.Header), entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (w *responseDeliveryBarrier) Header() http.Header { return w.header }
+
+func (w *responseDeliveryBarrier) WriteHeader(status int) {
+	w.blocked.Do(func() {
+		close(w.entered)
+		<-w.release
+	})
+	if w.status == 0 {
+		w.status = status
+	}
+}
+
+func (w *responseDeliveryBarrier) Write(data []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	w.bodySize += len(data)
+	return len(data), nil
+}
+
+func TestLegacySessionPolicyFailsClosedBeforeAuthorityOrBusiness(t *testing.T) {
+	for _, policy := range []struct {
+		name  string
+		value *uint64
+	}{
+		{name: "missing version"},
+		{name: "explicit zero", value: func() *uint64 { value := uint64(0); return &value }()},
+	} {
+		for _, route := range []string{"session", "protected"} {
+			t.Run(policy.name+"/"+route, func(t *testing.T) {
+				a, f := fixtureRuntime(t, "")
+				cookie := loginFixture(t, a, f)
+				current := renewalReadSession(t, a, cookie)
+				now := a.store.nowTime()
+				putEncryptedSessionFixture(t, a, cookie.Value, legacySessionPayload(t, current, now, policy.value), 30*time.Minute)
+
+				observer := observeIdentity(t, a, false)
+				refreshes := f.refreshes
+				profileRequests := f.profileRequests.Load()
+				userInfoCalls := f.userInfoCalls.Load()
+				businessCalls := 0
+				var response *httptest.ResponseRecorder
+				if route == "session" {
+					response = callAuth(a, "GET", "/auth/session", "", cookie, "")
+				} else {
+					router := gin.New()
+					router.POST("/protected", a.Require(), func(c *gin.Context) {
+						businessCalls++
+						c.Status(http.StatusNoContent)
+					})
+					request := httptest.NewRequest(http.MethodPost, "http://localhost:5180/protected", nil)
+					request.AddCookie(cookie)
+					request.Header.Set("Origin", a.config.Origin)
+					request.Header.Set("X-CSRF-Token", current.CSRF)
+					request.Header.Set("X-Organization-ID", current.Organization)
+					request.Header.Set("X-Organization-Revision", current.Revision)
+					response = httptest.NewRecorder()
+					router.ServeHTTP(response, request)
+				}
+
+				if response.Code != http.StatusUnauthorized {
+					t.Fatalf("legacy policy status = %d body=%s", response.Code, response.Body.String())
+				}
+				requireNoRuntimeCookie(t, *response.Result(), a.config.CookieName)
+				if businessCalls != 0 || len(observer.paths) != 0 || f.refreshes != refreshes || f.profileRequests.Load() != profileRequests || f.userInfoCalls.Load() != userInfoCalls {
+					t.Fatalf("legacy policy crossed authority/business boundary: business=%d paths=%v refreshes=%d->%d profile=%d->%d userinfo=%d->%d", businessCalls, observer.paths, refreshes, f.refreshes, profileRequests, f.profileRequests.Load(), userInfoCalls, f.userInfoCalls.Load())
+				}
+				if remaining := a.store.db.Exists(context.Background(), a.store.prefix+"s:"+cookie.Value).Val(); remaining != 1 {
+					t.Fatalf("invalid session store state = %d, want retained until TTL", remaining)
+				}
+				// A copied/replayed request cannot cross the authority boundary while the old record remains valid for cleanup by TTL.
+				replay := callAuth(a, "GET", "/auth/session", "", cookie, "")
+				if replay.Code != http.StatusUnauthorized || len(observer.paths) != 0 {
+					t.Fatalf("legacy replay crossed authority: HTTP %d paths=%v", replay.Code, observer.paths)
+				}
+				requireNoRuntimeCookie(t, *replay.Result(), a.config.CookieName)
+			})
+		}
+	}
+}
+
+func TestLateInvalidResponseCannotClearNewV2SessionCookie(t *testing.T) {
+	a, f := fixtureRuntime(t, "")
+	oldCookie := loginFixture(t, a, f)
+	current := renewalReadSession(t, a, oldCookie)
+	putEncryptedSessionFixture(t, a, oldCookie.Value, legacySessionPayload(t, current, a.store.nowTime(), nil), 30*time.Minute)
+
+	observer := observeIdentity(t, a, false)
+	refreshes := f.refreshes
+	profileRequests := f.profileRequests.Load()
+	userInfoCalls := f.userInfoCalls.Load()
+	businessCalls := 0
+	router := gin.New()
+	router.POST("/protected", a.Require(), func(c *gin.Context) {
+		businessCalls++
+		c.Status(http.StatusNoContent)
+	})
+	origin, err := url.Parse(a.config.Origin)
+	if err != nil {
+		t.Fatal("parse fixture origin")
+	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal("create cookie jar")
+	}
+	jar.SetCookies(origin, []*http.Cookie{oldCookie})
+
+	oldRequest := httptest.NewRequest(http.MethodPost, a.config.Origin+"/protected", nil)
+	oldRequest.AddCookie(oldCookie)
+	oldRequest.Header.Set("Origin", a.config.Origin)
+	oldRequest.Header.Set("X-CSRF-Token", current.CSRF)
+	oldRequest.Header.Set("X-Organization-ID", current.Organization)
+	oldRequest.Header.Set("X-Organization-Revision", current.Revision)
+	oldResponse := newResponseDeliveryBarrier()
+	oldDone := make(chan struct{})
+	go func() {
+		defer close(oldDone)
+		router.ServeHTTP(oldResponse, oldRequest)
+	}()
+	select {
+	case <-oldResponse.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("old invalid response did not reach delivery barrier")
+	}
+	if businessCalls != 0 || len(observer.paths) != 0 || f.refreshes != refreshes || f.profileRequests.Load() != profileRequests || f.userInfoCalls.Load() != userInfoCalls {
+		t.Fatalf("old invalid request crossed authority/business before response delivery: business=%d paths=%v refreshes=%d->%d profile=%d->%d userinfo=%d->%d", businessCalls, observer.paths, refreshes, f.refreshes, profileRequests, f.profileRequests.Load(), userInfoCalls, f.userInfoCalls.Load())
+	}
+
+	newCookie := loginFixture(t, a, f)
+	jar.SetCookies(origin, []*http.Cookie{newCookie})
+	close(oldResponse.release)
+	select {
+	case <-oldDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("old invalid response did not complete after new login")
+	}
+	if oldResponse.status != http.StatusUnauthorized || businessCalls != 0 {
+		t.Fatalf("old invalid response status=%d business=%d", oldResponse.status, businessCalls)
+	}
+	oldHTTPResponse := &http.Response{Header: oldResponse.header}
+	requireNoRuntimeCookie(t, *oldHTTPResponse, a.config.CookieName)
+	// Deliver the old response last, as a browser would apply it after S1 was installed.
+	jar.SetCookies(origin, oldHTTPResponse.Cookies())
+	cookies := jar.Cookies(origin)
+	var active *http.Cookie
+	for _, cookie := range cookies {
+		if cookie.Name == a.config.CookieName {
+			active = cookie
+			break
+		}
+	}
+	if active == nil || active.Value != newCookie.Value {
+		t.Fatalf("late invalid response removed new v2 cookie: %#v, want new cookie present", active)
+	}
+
+	session := callAuth(a, "GET", "/auth/session", "", active, "")
+	if session.Code != http.StatusOK {
+		t.Fatalf("new v2 session failed after late invalid delivery: HTTP %d body=%s", session.Code, session.Body.String())
+	}
+	csrf := sessionBody(t, session)["csrf_token"].(string)
+	protected := httptest.NewRequest(http.MethodPost, a.config.Origin+"/protected", nil)
+	protected.AddCookie(active)
+	protected.Header.Set("Origin", a.config.Origin)
+	protected.Header.Set("X-CSRF-Token", csrf)
+	protected.Header.Set("X-Organization-ID", "org-one")
+	protected.Header.Set("X-Organization-Revision", "1")
+	protectedResponse := httptest.NewRecorder()
+	router.ServeHTTP(protectedResponse, protected)
+	if protectedResponse.Code != http.StatusNoContent || businessCalls != 1 {
+		t.Fatalf("new v2 Require failed after late invalid delivery: HTTP %d business=%d", protectedResponse.Code, businessCalls)
 	}
 }
 
@@ -168,42 +403,19 @@ func TestSessionRenewalIdleIsCappedByAbsoluteDeadline(t *testing.T) {
 	if got := sessionCookieMaxAge(renewalPolicySession(now), now); got != int(sessionAbsoluteLifetime/time.Second) {
 		t.Fatalf("policy cookie max age = %d", got)
 	}
-	legacyUntil := now.Add(30 * time.Minute)
-	if got := sessionCookieMaxAge(&session{Until: legacyUntil}, now); got != int((30*time.Minute)/time.Second) {
-		t.Fatalf("legacy cookie max age = %d", got)
+	if got := sessionCookieMaxAge(&session{Until: now.Add(30 * time.Minute)}, now); got != -1 {
+		t.Fatalf("legacy cookie was accepted: max age = %d", got)
 	}
 }
 
-func TestLegacyUntilOnlySessionCannotBeUpgradedOrRenewed(t *testing.T) {
-	a, f := fixtureRuntime(t, "")
-	cookie := loginFixture(t, a, f)
-	current := sessionBody(t, callAuth(a, "GET", "/auth/session", "", cookie, ""))
-	csrf := current["csrf_token"].(string)
-	value, owner, err := a.store.acquire(context.Background(), cookie.Value)
-	if err != nil {
-		t.Fatal(err)
+func TestLegacyUntilOnlySessionPolicyIsRejected(t *testing.T) {
+	now := time.Date(2026, 10, 24, 10, 0, 0, 0, time.UTC)
+	value := &session{Until: now.Add(30 * time.Minute)}
+	if err := validateSessionSchema(value, now); !errors.Is(err, _errInvalid) {
+		t.Fatalf("legacy policy accepted: %v", err)
 	}
-	now := a.store.nowTime()
-	legacyUntil := now.Add(30 * time.Minute)
-	value.PolicyVersion = 0
-	value.AuthenticatedAt = time.Time{}
-	value.IdleUntil = time.Time{}
-	value.AbsoluteUntil = time.Time{}
-	value.Until = legacyUntil
-	if err := a.store.commit(context.Background(), cookie.Value, owner, cookie.Value, value, false); err != nil {
-		t.Fatal(err)
-	}
-	get := callAuth(a, "GET", "/auth/session", "", cookie, "")
-	if get.Code != 200 || renewalExpiresAt(t, sessionBody(t, get)).Unix() != legacyUntil.Unix() {
-		t.Fatalf("legacy fixed expiry changed: %d %s", get.Code, get.Body.String())
-	}
-	touch := renewalRequest(a, cookie, csrf, nil)
-	if touch.Code != http.StatusConflict || sessionBody(t, touch)["error"] != "session_renewal_unsupported" || len(touch.Result().Cookies()) != 0 {
-		t.Fatalf("legacy session renewed: HTTP %d %s", touch.Code, touch.Body.String())
-	}
-	after := renewalReadSession(t, a, cookie)
-	if after.PolicyVersion != 0 || !after.IdleUntil.IsZero() || !after.AbsoluteUntil.IsZero() || !after.Until.Equal(legacyUntil) {
-		t.Fatalf("legacy record upgraded: %#v", after)
+	if _, err := sessionDeadline(value, now); !errors.Is(err, _errInvalid) {
+		t.Fatalf("legacy deadline accepted: %v", err)
 	}
 }
 
@@ -214,8 +426,14 @@ func TestMalformedSessionPolicyFailsClosed(t *testing.T) {
 		name   string
 		change func(*session)
 	}{
-		{name: "empty legacy", change: func(value *session) { value.PolicyVersion = 0; value.Until = time.Time{} }},
-		{name: "mixed legacy", change: func(value *session) { value.PolicyVersion = 0 }},
+		{name: "zero version", change: func(value *session) {
+			value.PolicyVersion = 0
+			value.AuthenticatedAt = time.Time{}
+			value.IdleUntil = time.Time{}
+			value.AbsoluteUntil = time.Time{}
+			value.Until = now.Add(30 * time.Minute)
+		}},
+		{name: "mixed zero version", change: func(value *session) { value.PolicyVersion = 0 }},
 		{name: "unknown policy", change: func(value *session) { value.PolicyVersion = 3 }},
 		{name: "missing authentication", change: func(value *session) { value.AuthenticatedAt = time.Time{} }},
 		{name: "missing idle", change: func(value *session) { value.IdleUntil = time.Time{} }},

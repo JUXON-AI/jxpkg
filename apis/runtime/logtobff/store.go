@@ -110,18 +110,10 @@ func validateSessionSchema(value *session, now time.Time) error {
 	if value == nil {
 		return _errInvalid
 	}
-	switch value.PolicyVersion {
-	case 0:
-		if value.Until.IsZero() || !value.AuthenticatedAt.IsZero() || !value.IdleUntil.IsZero() || !value.AbsoluteUntil.IsZero() {
-			return _errInvalid
-		}
-	case sessionPolicyVersion:
-		if value.AuthenticatedAt.IsZero() || value.AuthenticatedAt.After(now) || value.IdleUntil.IsZero() || value.AbsoluteUntil.IsZero() ||
-			!value.Until.Equal(value.IdleUntil) || value.IdleUntil.Before(value.AuthenticatedAt) || value.IdleUntil.After(value.AbsoluteUntil) ||
-			!value.AbsoluteUntil.Equal(value.AuthenticatedAt.Add(sessionAbsoluteLifetime)) {
-			return _errInvalid
-		}
-	default:
+	if value.PolicyVersion != sessionPolicyVersion ||
+		value.AuthenticatedAt.IsZero() || value.AuthenticatedAt.After(now) || value.IdleUntil.IsZero() || value.AbsoluteUntil.IsZero() ||
+		!value.Until.Equal(value.IdleUntil) || value.IdleUntil.Before(value.AuthenticatedAt) || value.IdleUntil.After(value.AbsoluteUntil) ||
+		!value.AbsoluteUntil.Equal(value.AuthenticatedAt.Add(sessionAbsoluteLifetime)) {
 		return _errInvalid
 	}
 	return nil
@@ -131,12 +123,9 @@ func sessionDeadline(value *session, now time.Time) (time.Time, error) {
 	if err := validateSessionSchema(value, now); err != nil {
 		return time.Time{}, err
 	}
-	deadline := value.Until
-	if value.PolicyVersion == sessionPolicyVersion {
-		deadline = value.IdleUntil
-		if value.AbsoluteUntil.Before(deadline) {
-			deadline = value.AbsoluteUntil
-		}
+	deadline := value.IdleUntil
+	if value.AbsoluteUntil.Before(deadline) {
+		deadline = value.AbsoluteUntil
 	}
 	if !now.Before(deadline) {
 		return time.Time{}, _errMissing
