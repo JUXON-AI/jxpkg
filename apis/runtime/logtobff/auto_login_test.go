@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JUXON-AI/jxpkg/logs"
 	"github.com/JUXON-AI/jxpkg/requestid"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -66,6 +68,238 @@ func TestAutoLoginUsesPromptNoneAndKeepsGuestReturnNonAuthoritative(t *testing.T
 	replay := callAuth(a, http.MethodGet, callback, "", tx, "")
 	if replay.Code != http.StatusBadRequest {
 		t.Fatalf("silent fallback replay HTTP %d", replay.Code)
+	}
+}
+
+func TestSilentConsentRequiredStartsFreshNormalAuthorization(t *testing.T) {
+	a, f := fixtureRuntime(t)
+	start := callAuth(a, http.MethodGet, "/auth/auto-login?return_to="+url.QueryEscape("/credits?view=keys#section"), "", nil, "")
+	if start.Code != http.StatusFound {
+		t.Fatalf("auto login HTTP %d", start.Code)
+	}
+	silentTarget, err := url.Parse(start.Header().Get("Location"))
+	if err != nil {
+		t.Fatal("silent authorization URL invalid")
+	}
+	silentTX := loginTransactionCookie(t, a, start)
+	silentCallback := "/auth/callback?error=consent_required&return_to=" + url.QueryEscape("/attacker") + "&state=" + url.QueryEscape(silentTarget.Query().Get("state"))
+	continuation := callAuth(a, http.MethodGet, silentCallback, "", silentTX, "")
+	if continuation.Code != http.StatusFound {
+		t.Fatalf("consent continuation HTTP %d %s", continuation.Code, continuation.Body.String())
+	}
+	normalTarget, err := url.Parse(continuation.Header().Get("Location"))
+	if err != nil {
+		t.Fatal("normal authorization URL invalid")
+	}
+	normalQuery := normalTarget.Query()
+	if normalQuery.Get("prompt") != "consent" {
+		t.Fatalf("normal continuation prompt=%q", normalQuery.Get("prompt"))
+	}
+	for name, oldValue := range map[string]string{
+		"state":          silentTarget.Query().Get("state"),
+		"nonce":          silentTarget.Query().Get("nonce"),
+		"code_challenge": silentTarget.Query().Get("code_challenge"),
+	} {
+		if newValue := normalQuery.Get(name); newValue == "" || newValue == oldValue {
+			t.Fatalf("normal continuation %s was not fresh", name)
+		}
+	}
+	if normalQuery.Get("code_challenge_method") != "S256" || normalQuery.Get("organization_identity") != "required" {
+		t.Fatalf("normal continuation capabilities incomplete: %v", normalQuery)
+	}
+	normalTX := loginTransactionCookie(t, a, continuation)
+	if normalTX.Value == silentTX.Value {
+		t.Fatal("normal continuation reused silent transaction")
+	}
+
+	f.nonce = normalQuery.Get("nonce")
+	normalCallback := "/auth/callback?code=fixture-code&state=" + url.QueryEscape(normalQuery.Get("state"))
+	response := callAuth(a, http.MethodGet, normalCallback, "", normalTX, "")
+	if response.Code != http.StatusFound {
+		t.Fatalf("normal callback HTTP %d %s", response.Code, response.Body.String())
+	}
+	if location := response.Header().Get("Location"); location != "http://localhost:5180/credits?view=keys#section" {
+		t.Fatalf("trusted return path=%q", location)
+	}
+	if sessionCookie(response, a) == nil {
+		t.Fatal("normal callback did not publish a session")
+	}
+	replay := callAuth(a, http.MethodGet, silentCallback, "", silentTX, "")
+	if replay.Code != http.StatusBadRequest {
+		t.Fatalf("silent callback replay HTTP %d", replay.Code)
+	}
+}
+
+func TestSilentConsentContinuationIsOneShotAndKeepsExistingSession(t *testing.T) {
+	a, f := fixtureRuntime(t)
+	existing := loginFixture(t, a, f)
+	start := callAuth(a, http.MethodGet, "/auth/auto-login?return_to=%2Fnext", "", nil, "")
+	silentTarget, err := url.Parse(start.Header().Get("Location"))
+	if err != nil {
+		t.Fatal("silent authorization URL invalid")
+	}
+	silentTX := loginTransactionCookie(t, a, start)
+	silentCallback := "/auth/callback?error=consent_required&state=" + url.QueryEscape(silentTarget.Query().Get("state"))
+	continuation := callAuth(a, http.MethodGet, silentCallback, "", silentTX, "")
+	if continuation.Code != http.StatusFound {
+		t.Fatalf("consent continuation HTTP %d %s", continuation.Code, continuation.Body.String())
+	}
+	normalTarget, err := url.Parse(continuation.Header().Get("Location"))
+	if err != nil {
+		t.Fatal("normal authorization URL invalid")
+	}
+	normalTX := loginTransactionCookie(t, a, continuation)
+	secondError := "/auth/callback?error=consent_required&state=" + url.QueryEscape(normalTarget.Query().Get("state"))
+	response := callAuthWithCookies(a, http.MethodGet, secondError, existing, normalTX)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("second normal error HTTP %d %s", response.Code, response.Body.String())
+	}
+	if sessionCookie(response, a) != nil {
+		t.Fatal("failed continuation replaced the existing session")
+	}
+	if callAuth(a, http.MethodGet, "/auth/session", "", existing, "").Code != http.StatusOK {
+		t.Fatal("failed continuation cleared the existing session")
+	}
+	replay := callAuth(a, http.MethodGet, silentCallback, "", silentTX, "")
+	if replay.Code != http.StatusBadRequest {
+		t.Fatalf("silent callback replay HTTP %d", replay.Code)
+	}
+}
+
+func TestSilentConsentRequiredRejectsInvalidCallbacksWithoutContinuation(t *testing.T) {
+	cases := []struct {
+		name     string
+		path     func(state string) string
+		expire   bool
+		wantCode int
+	}{
+		{name: "invalid-state", path: func(string) string { return "/auth/callback?error=consent_required&state=wrong" }, wantCode: http.StatusBadRequest},
+		{name: "duplicate-state", path: func(state string) string {
+			return "/auth/callback?error=consent_required&state=wrong&state=" + url.QueryEscape(state)
+		}, wantCode: http.StatusBadRequest},
+		{name: "unknown-error", path: func(state string) string { return "/auth/callback?error=invalid_scope&state=" + url.QueryEscape(state) }, wantCode: http.StatusBadRequest},
+		{name: "error-with-code", path: func(state string) string {
+			return "/auth/callback?error=consent_required&code=private&state=" + url.QueryEscape(state)
+		}, wantCode: http.StatusBadRequest},
+		{name: "duplicate-error", path: func(state string) string {
+			return "/auth/callback?error=consent_required&error=login_required&state=" + url.QueryEscape(state)
+		}, wantCode: http.StatusBadRequest},
+		{name: "expired-transaction", path: func(state string) string {
+			return "/auth/callback?error=consent_required&state=" + url.QueryEscape(state)
+		}, expire: true, wantCode: http.StatusBadRequest},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			a, _ := fixtureRuntime(t)
+			start := callAuth(a, http.MethodGet, "/auth/auto-login?return_to=%2Fnext", "", nil, "")
+			target, err := url.Parse(start.Header().Get("Location"))
+			if err != nil {
+				t.Fatal("silent authorization URL invalid")
+			}
+			tx := loginTransactionCookie(t, a, start)
+			if test.expire {
+				if err := a.store.db.Del(context.Background(), a.store.prefix+"tx:"+tx.Value).Err(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			response := callAuth(a, http.MethodGet, test.path(target.Query().Get("state")), "", tx, "")
+			if response.Code != test.wantCode {
+				t.Fatalf("HTTP %d, want %d: %s", response.Code, test.wantCode, response.Body.String())
+			}
+			if next := loginTransactionCookieOptional(a, response); next != nil {
+				t.Fatal("invalid callback started a normal authorization")
+			}
+			if sessionCookie(response, a) != nil {
+				t.Fatal("invalid callback published a session")
+			}
+		})
+	}
+}
+
+func TestSilentConsentContinuationFailsClosedWhenDependenciesUnavailable(t *testing.T) {
+	t.Run("provider", func(t *testing.T) {
+		a, f := fixtureRuntime(t)
+		start := callAuth(a, http.MethodGet, "/auth/auto-login?return_to=%2Fnext", "", nil, "")
+		target, err := url.Parse(start.Header().Get("Location"))
+		if err != nil {
+			t.Fatal("silent authorization URL invalid")
+		}
+		tx := loginTransactionCookie(t, a, start)
+		expireDiscoveryCache(t, a)
+		f.unavailable = true
+		callback := "/auth/callback?error=consent_required&state=" + url.QueryEscape(target.Query().Get("state"))
+		response := callAuth(a, http.MethodGet, callback, "", tx, "")
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("provider unavailable HTTP %d %s", response.Code, response.Body.String())
+		}
+		if next := loginTransactionCookieOptional(a, response); next != nil || sessionCookie(response, a) != nil {
+			t.Fatal("provider unavailable published continuation state or session")
+		}
+	})
+
+	t.Run("redis", func(t *testing.T) {
+		a, _ := fixtureRuntime(t)
+		start := callAuth(a, http.MethodGet, "/auth/auto-login?return_to=%2Fnext", "", nil, "")
+		target, err := url.Parse(start.Header().Get("Location"))
+		if err != nil {
+			t.Fatal("silent authorization URL invalid")
+		}
+		tx := loginTransactionCookie(t, a, start)
+		original := a.store.db
+		a.store.db = redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", DialTimeout: 20 * time.Millisecond, MaxRetries: -1})
+		defer func() {
+			_ = a.store.db.Close()
+			a.store.db = original
+		}()
+		callback := "/auth/callback?error=consent_required&state=" + url.QueryEscape(target.Query().Get("state"))
+		response := callAuth(a, http.MethodGet, callback, "", tx, "")
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("Redis unavailable HTTP %d %s", response.Code, response.Body.String())
+		}
+		if next := loginTransactionCookieOptional(a, response); next != nil || sessionCookie(response, a) != nil {
+			t.Fatal("Redis unavailable published continuation state or session")
+		}
+	})
+}
+
+func TestSilentConsentContinuationWithCachedDiscoveryDoesNotPublishAuthority(t *testing.T) {
+	a, f := fixtureRuntime(t)
+	existing := loginFixture(t, a, f)
+	start := callAuth(a, http.MethodGet, "/auth/auto-login?return_to=%2Fnext", "", nil, "")
+	silentTarget, err := url.Parse(start.Header().Get("Location"))
+	if err != nil {
+		t.Fatal("silent authorization URL invalid")
+	}
+	silentTX := loginTransactionCookie(t, a, start)
+
+	// Cached discovery can form navigation after the authority becomes unavailable,
+	// but navigation alone must not mint or replace a session.
+	f.unavailable = true
+	silentCallback := "/auth/callback?error=consent_required&state=" + url.QueryEscape(silentTarget.Query().Get("state"))
+	continuation := callAuth(a, http.MethodGet, silentCallback, "", silentTX, "")
+	if continuation.Code != http.StatusFound {
+		t.Fatalf("cached-discovery continuation HTTP %d %s", continuation.Code, continuation.Body.String())
+	}
+	normalTarget, err := url.Parse(continuation.Header().Get("Location"))
+	if err != nil || normalTarget.Query().Get("prompt") != "consent" {
+		t.Fatalf("cached-discovery normal authorization location=%q", continuation.Header().Get("Location"))
+	}
+	normalTX := loginTransactionCookie(t, a, continuation)
+	if sessionCookie(continuation, a) != nil {
+		t.Fatal("cached navigation published a session")
+	}
+
+	normalCallback := "/auth/callback?code=fixture-code&state=" + url.QueryEscape(normalTarget.Query().Get("state"))
+	redemption := callAuthWithCookies(a, http.MethodGet, normalCallback, existing, normalTX)
+	if redemption.Code != http.StatusUnauthorized {
+		t.Fatalf("unavailable token redemption HTTP %d %s", redemption.Code, redemption.Body.String())
+	}
+	if sessionCookie(redemption, a) != nil {
+		t.Fatal("failed redemption replaced the existing session")
+	}
+	f.unavailable = false
+	if callAuth(a, http.MethodGet, "/auth/session", "", existing, "").Code != http.StatusOK {
+		t.Fatal("failed redemption cleared the existing session")
 	}
 }
 
@@ -148,6 +382,57 @@ func callAuthWithLogContext(a *Runtime, ctx context.Context, path string, cookie
 	return w
 }
 
+func expireDiscoveryCache(t *testing.T, a *Runtime) {
+	t.Helper()
+	cache, ok := a.http.Transport.(*discoveryTransport)
+	if !ok {
+		t.Fatalf("unexpected HTTP transport %T", a.http.Transport)
+	}
+	cache.mu.Lock()
+	cache.until = time.Now().Add(-time.Second)
+	cache.mu.Unlock()
+}
+
+func callAuthWithCookies(a *Runtime, method, path string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, "http://localhost:5180"+path, nil)
+	r.RequestURI = r.URL.RequestURI()
+	for _, cookie := range cookies {
+		if cookie != nil {
+			r.AddCookie(cookie)
+		}
+	}
+	w := httptest.NewRecorder()
+	a.Handler().ServeHTTP(w, r)
+	return w
+}
+
+func loginTransactionCookieOptional(a *Runtime, w *httptest.ResponseRecorder) *http.Cookie {
+	for _, cookie := range w.Result().Cookies() {
+		if cookie.Name == a.config.CookieName+"_login" && cookie.Value != "" && cookie.MaxAge > 0 {
+			return cookie
+		}
+	}
+	return nil
+}
+
+func loginTransactionCookie(t *testing.T, a *Runtime, w *httptest.ResponseRecorder) *http.Cookie {
+	t.Helper()
+	cookie := loginTransactionCookieOptional(a, w)
+	if cookie == nil {
+		t.Fatal("login transaction cookie absent")
+	}
+	return cookie
+}
+
+func sessionCookie(w *httptest.ResponseRecorder, a *Runtime) *http.Cookie {
+	for _, cookie := range w.Result().Cookies() {
+		if cookie.Name == a.config.CookieName && cookie.Value != "" && cookie.MaxAge > 0 {
+			return cookie
+		}
+	}
+	return nil
+}
+
 func captureSilentLoginLogs(t *testing.T) func() []map[string]any {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "silent-login.log")
@@ -224,7 +509,16 @@ func TestSilentLoginUnavailableLogsOnlyAllowlistedReasons(t *testing.T) {
 		if response.Code != http.StatusFound {
 			t.Fatalf("%s fallback HTTP %d %s", reason, response.Code, response.Body.String())
 		}
-		if location := response.Header().Get("Location"); location != "http://localhost:5180/catalog?sso_auto=guest" {
+		location := response.Header().Get("Location")
+		if reason == "consent_required" {
+			target, err := url.Parse(location)
+			if err != nil || target.Query().Get("prompt") != "consent" || target.Query().Get("state") == "" {
+				t.Fatalf("%s normal continuation location=%q", reason, location)
+			}
+			if next := loginTransactionCookie(t, a, response); next.Value == tx.Value {
+				t.Fatalf("%s reused silent transaction", reason)
+			}
+		} else if location != "http://localhost:5180/catalog?sso_auto=guest" {
 			t.Fatalf("%s fallback location=%q", reason, location)
 		}
 		for _, cookie := range response.Result().Cookies() {

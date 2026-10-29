@@ -94,7 +94,12 @@ func (a *Runtime) startLogin(w http.ResponseWriter, r *http.Request, prompt stri
 		fail(w, r, 400, "login_request_invalid")
 		return
 	}
-	returnTo := r.URL.Query().Get("return_to")
+	a.startLoginTransaction(w, r, prompt, r.URL.Query().Get("return_to"))
+}
+
+// startLoginTransaction creates a fresh provider-backed authorization transaction.
+// Callers must provide a request context that already carries the authentication deadline.
+func (a *Runtime) startLoginTransaction(w http.ResponseWriter, r *http.Request, prompt, returnTo string) {
 	if returnTo == "" {
 		returnTo = "/"
 	}
@@ -190,9 +195,16 @@ func (a *Runtime) callback(w http.ResponseWriter, r *http.Request) {
 	}
 	if tx.Silent && silentLoginUnavailable(q) {
 		// Consuming the transaction and validating state happen before this branch.
-		// The guest marker is navigation state only; no authority is published.
+		// A validated consent requirement enters one normal native authorization flow;
+		// provider consent and application/organization admission still decide the result.
 		safe := logs.WithContextFields(context.Background(), "request_id", requestid.FromContext(r.Context()))
 		logs.InfoContextw(safe, "logtobff.silent_login.unavailable", "reason", q.Get("error"))
+		if q.Get("error") == "consent_required" {
+			// The SDK's empty prompt selects its normal consent flow. A fresh transaction
+			// keeps state, nonce and PKCE isolated from the consumed silent attempt.
+			a.startLoginTransaction(w, r, "", tx.ReturnTo)
+			return
+		}
 		http.Redirect(w, r, silentGuestRedirect(a.config.Origin, tx.ReturnTo), http.StatusFound)
 		return
 	}
