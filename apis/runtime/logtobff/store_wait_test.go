@@ -109,7 +109,7 @@ func assertRedisCommands(t *testing.T, got, want []string) {
 func TestSessionAcquireUsesOneAtomicRedisCommand(t *testing.T) {
 	a, _ := fixtureRuntime(t)
 	ctx := context.Background()
-	id, err := a.store.create(ctx, &session{Until: time.Now().Add(time.Minute)}, "")
+	id, err := a.store.create(ctx, renewalPolicySession(time.Now()), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestSessionAcquireLuaErrorReleasesLateLease(t *testing.T) {
 
 func TestSessionAcquireCanceledLateWriteReleasesOwnedLease(t *testing.T) {
 	a, _ := fixtureRuntime(t)
-	id, err := a.store.create(context.Background(), &session{Until: time.Now().Add(time.Minute)}, "")
+	id, err := a.store.create(context.Background(), renewalPolicySession(time.Now()), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +221,7 @@ func TestIdentityOnlyNoContentionUsesFourRedisRoundTrips(t *testing.T) {
 func TestSessionLeaseOwnerFencesCommitAndRelease(t *testing.T) {
 	a, _ := fixtureRuntime(t)
 	ctx := context.Background()
-	id, err := a.store.create(ctx, &session{Revision: "1", Until: time.Now().Add(time.Minute)}, "")
+	id, err := a.store.create(ctx, renewalPolicySession(time.Now()), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +250,7 @@ func TestSessionWaitReadsCommittedStateAfterSlowOwner(t *testing.T) {
 	a, _ := fixtureRuntime(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	id, err := a.store.create(ctx, &session{Revision: "1", Until: time.Now().Add(time.Minute)}, "")
+	id, err := a.store.create(ctx, renewalPolicySession(time.Now()), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +290,7 @@ func TestSessionWaitReadsCommittedStateAfterSlowOwner(t *testing.T) {
 func TestSessionWaitCancellationKeepsCurrentOwner(t *testing.T) {
 	a, _ := fixtureRuntime(t)
 	ctx := context.Background()
-	id, err := a.store.create(ctx, &session{Until: time.Now().Add(time.Minute)}, "")
+	id, err := a.store.create(ctx, renewalPolicySession(time.Now()), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +314,7 @@ func TestSessionQueueSharesAuthenticationBudgetAndPreservesBusinessContext(t *te
 	a, _ := fixtureRuntime(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	id, err := a.store.create(ctx, &session{Until: time.Now().Add(time.Minute)}, "")
+	id, err := a.store.create(ctx, renewalPolicySession(time.Now()), "")
 	if err != nil {
 		t.Fatal(err)
 	}

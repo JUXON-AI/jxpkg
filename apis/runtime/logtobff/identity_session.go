@@ -137,12 +137,6 @@ func mergeIdentityUpdate(current, before, value *session, now time.Time) error {
 	if err := validateSessionSchema(value, now); err != nil {
 		return err
 	}
-	if before.PolicyVersion == 0 {
-		if current.PolicyVersion != 0 || value.PolicyVersion != 0 || !current.Until.Equal(before.Until) || !value.Until.Equal(before.Until) {
-			return changed()
-		}
-		return nil
-	}
 	if before.PolicyVersion != sessionPolicyVersion || current.PolicyVersion != sessionPolicyVersion || value.PolicyVersion != sessionPolicyVersion ||
 		!current.AuthenticatedAt.Equal(before.AuthenticatedAt) || !value.AuthenticatedAt.Equal(before.AuthenticatedAt) ||
 		!current.AbsoluteUntil.Equal(before.AbsoluteUntil) || !value.AbsoluteUntil.Equal(before.AbsoluteUntil) {

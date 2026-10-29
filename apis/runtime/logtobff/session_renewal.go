@@ -57,8 +57,5 @@ func sessionCookieDeadline(value *session) (time.Time, error) {
 	if err := validateSessionSchema(value, value.AuthenticatedAt); err != nil {
 		return time.Time{}, err
 	}
-	if value.PolicyVersion == sessionPolicyVersion {
-		return value.AbsoluteUntil, nil
-	}
-	return value.Until, nil
+	return value.AbsoluteUntil, nil
 }
