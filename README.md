@@ -302,6 +302,8 @@ logs.Infow("request complete", "request_id", requestID)
 
 浏览器分片直传时，对象存储 CORS 必须允许前端 Origin 的 `PUT`，并在 `ExposeHeaders` 中暴露 `ETag`；否则浏览器即使上传成功，也无法取得完成合并所需的分片标签。
 
+`S3Fs` 还实现可选的 `OriginalFileStorager`。`S3StorageConfig.OriginalImageCI` 默认 false；只有显式开启后，原图签名和读取才使用 COS 的 `ci-process=originImage`。该操作可能计费，且不适用于 MinIO/普通 S3；业务需要原字节契约时应先检查 `OriginalFileSupported`，开启后读取失败不得回退普通对象。原图 URL 由 `s3.NewPresignClient.PresignGetObject` 生成，查询通过 SDK build middleware 在签名前加入，以保留 SDK 的对象 key 编码、UNSIGNED-PAYLOAD 和过期语义。
+
 对象 key 生成、内容 hash 与数据库元数据不能代替上传权限、内容类型校验、病毒扫描或下载授权，这些由业务服务负责。
 
 ### `task`
