@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/JUXON-AI/jxpkg/logs"
+	"github.com/JUXON-AI/jxpkg/requestid"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/logto-io/go/v2/client"
@@ -190,6 +191,8 @@ func (a *Runtime) callback(w http.ResponseWriter, r *http.Request) {
 	if tx.Silent && silentLoginUnavailable(q) {
 		// Consuming the transaction and validating state happen before this branch.
 		// The guest marker is navigation state only; no authority is published.
+		safe := logs.WithContextFields(context.Background(), "request_id", requestid.FromContext(r.Context()))
+		logs.InfoContextw(safe, "logtobff.silent_login.unavailable", "reason", q.Get("error"))
 		http.Redirect(w, r, silentGuestRedirect(a.config.Origin, tx.ReturnTo), http.StatusFound)
 		return
 	}
