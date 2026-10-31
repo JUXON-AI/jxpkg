@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/JUXON-AI/jxpkg/logs"
 	"github.com/JUXON-AI/jxpkg/settings"
 )
 
@@ -101,7 +100,8 @@ func LoadStorager(ctx context.Context, purpose string) (Storager, error) {
 	return s, nil
 }
 
-// NewStorage .
+// NewStorage 创建存储器。
+// 配置和构造错误直接返回，由调用方统一记录，避免重复日志。
 func NewStorage(ctx context.Context, purpose string) (Storager, error) {
 	var (
 		cfg StorageConfig
@@ -111,7 +111,6 @@ func NewStorage(ctx context.Context, purpose string) (Storager, error) {
 	)
 	err = settings.GetYaml(SettingGroupCore, key, &cfg)
 	if err != nil {
-		logs.Errorf("get storage config error: %v", err)
 		return nil, err
 	}
 
@@ -121,7 +120,6 @@ func NewStorage(ctx context.Context, purpose string) (Storager, error) {
 		return nil, fmt.Errorf("not found useful remote storage config")
 	}
 	if err != nil {
-		logs.Errorf("new storage error: %v", err)
 		return nil, err
 	}
 	return s, nil
