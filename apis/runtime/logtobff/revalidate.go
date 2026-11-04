@@ -88,12 +88,13 @@ func (a *Runtime) revalidate(ctx context.Context, id string, expected Principal,
 		// This path cannot send a replacement Cookie; leave adoption to the next session request.
 		value.Organization, value.Revision = originalOrganization, originalRevision
 	}
+	if identityErrorRevokesOrganization(err) {
+		value.Organization = ""
+	}
 	if err != nil {
 		var denied *accessError
 		if errors.As(err, &denied) {
 			remove = denied.status == 401
-		} else {
-			value.Organization = ""
 		}
 	}
 	commit, cancelCommit := context.WithTimeout(context.WithoutCancel(ctx), time.Second)

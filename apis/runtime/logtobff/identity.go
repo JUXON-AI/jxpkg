@@ -48,6 +48,13 @@ type accessError struct {
 }
 
 func (e *accessError) Error() string { return e.code }
+
+// identityErrorRevokesOrganization 只把确定性认证或准入拒绝视为身份撤销。
+func identityErrorRevokesOrganization(err error) bool {
+	var denied *accessError
+	return errors.As(err, &denied) && (denied.status == http.StatusUnauthorized || denied.status == http.StatusForbidden)
+}
+
 func providerFailure(response *http.Response, account bool) error {
 	var body struct {
 		Error string `json:"error"`
@@ -456,7 +463,9 @@ func (a *Runtime) currentRequest(ctx context.Context, value *session) (profile, 
 		}
 	}
 	if err != nil {
-		value.Organization = ""
+		if identityErrorRevokesOrganization(err) {
+			value.Organization = ""
+		}
 		return user, nil, err
 	}
 	if value.Organization != "" && !contains(rows, value.Organization) {

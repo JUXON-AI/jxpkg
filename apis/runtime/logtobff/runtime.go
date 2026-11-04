@@ -213,8 +213,12 @@ func reply(w http.ResponseWriter, r *http.Request, status int, data any) {
 		logs.WarnContext(r.Context(), "logtobff.response.write_failed")
 	}
 }
-func fail(w http.ResponseWriter, r *http.Request, status int, code string) {
-	logs.WarnContextw(r.Context(), "logtobff.request.rejected", "status", status, "reason", code)
+func fail(w http.ResponseWriter, r *http.Request, status int, code string, cause ...error) {
+	fields := []any{"status", status, "reason", code}
+	if len(cause) == 1 {
+		fields = append(fields, sessionFailureFields(cause[0])...)
+	}
+	logs.WarnContextw(sessionDiagnosticContext(r.Context()), "logtobff.request.rejected", fields...)
 	reply(w, r, status, map[string]string{"error": code})
 }
 
@@ -351,7 +355,7 @@ func (a *Runtime) withSession(next sessionHandler, authorized ...http.Handler) h
 			} else if errors.Is(err, _errBusy) {
 				status, code = 409, "session_busy"
 			}
-			fail(w, r, status, code)
+			fail(w, r, status, code, err)
 			return
 		}
 		committed := false
@@ -384,7 +388,7 @@ func (a *Runtime) withSession(next sessionHandler, authorized ...http.Handler) h
 		save, cancelSave := context.WithTimeout(context.WithoutCancel(r.Context()), time.Second)
 		defer cancelSave()
 		if err = a.store.commit(save, cookie.Value, owner, nextID, value, outcome.remove); err != nil {
-			fail(w, r, 503, "session_commit_failed")
+			fail(w, r, 503, "session_commit_failed", err)
 			return
 		}
 		committed = true

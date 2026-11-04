@@ -57,7 +57,7 @@ func (a *Runtime) revokeResourceGrant(ctx context.Context, id string, expected P
 		// This route cannot send a replacement browser Cookie. The next session
 		// request adopts any central identity revision after this mutation.
 		value.Organization, value.Revision = before.Organization, before.Revision
-	} else if authorizationError(currentErr) == ErrUnavailable {
+	} else if identityErrorRevokesOrganization(currentErr) {
 		value.Organization = ""
 	}
 
