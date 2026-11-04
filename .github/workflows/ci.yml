@@ -23,8 +23,8 @@ concurrency:
 
 jobs:
   verify:
-    name: Verify on isolated VM
-    runs-on: [self-hosted, Linux, X64, wzwx-ci-vm]
+    name: Verify on JX-LAN
+    runs-on: {group: JXlan Trusted, labels: jxlan-ci}
     timeout-minutes: 30
     outputs:
       sha: ${{ steps.source.outputs.sha }}
@@ -77,27 +77,11 @@ jobs:
           printf 'workflow_sha=%s\n' "$WORKFLOW_DEFINITION_SHA" >> "$GITHUB_OUTPUT"
           printf '### Frozen source\n\nSource: `%s`\n\nWorkflow definition: `%s`\n' \
             "$source_sha" "$WORKFLOW_DEFINITION_SHA" >> "$GITHUB_STEP_SUMMARY"
-      - name: Install pinned Go toolchain
+      - name: Select the installed JX-LAN Go toolchain
         run: |
-          set -euo pipefail
-          go_archive="$RUNNER_TEMP/go1.25.0.linux-amd64.tar.gz"
-          curl --fail --location --retry 3 --retry-all-errors \
-            --connect-timeout 15 --max-time 300 \
-            https://go.dev/dl/go1.25.0.linux-amd64.tar.gz \
-            --output "$go_archive"
-          printf '%s  %s\n' \
-            2852af0cb20a13139b3448992e69b868e50ed0f8a1e5940ee1de9e19a123b613 \
-            "$go_archive" | sha256sum --check -
-          go_root="$RUNNER_TEMP/go1.25.0"
-          mkdir -p "$go_root"
-          tar -xzf "$go_archive" -C "$go_root"
-          printf '%s\n' "$go_root/go/bin" >> "$GITHUB_PATH"
-          {
-            printf 'GOMODCACHE=%s\n' "$RUNNER_TEMP/go-mod"
-            printf 'GOCACHE=%s\n' "$RUNNER_TEMP/go-build"
-          } >> "$GITHUB_ENV"
-          PATH="$go_root/go/bin:$PATH"
-          test "$(go version)" = 'go version go1.25.0 linux/amd64'
+          test -x /home/zoe/actions-runner/_toolcache/go/1.25.0/x64/bin/go
+          printf '%s\n' /home/zoe/actions-runner/_toolcache/go/1.25.0/x64/bin >> "$GITHUB_PATH"
+          printf 'GOMODCACHE=%s\nGOCACHE=%s\n' "$RUNNER_TEMP/go-mod" "$RUNNER_TEMP/go-build" >> "$GITHUB_ENV"
       - name: Verify source and dependencies
         run: make check
       - name: Test and compile
