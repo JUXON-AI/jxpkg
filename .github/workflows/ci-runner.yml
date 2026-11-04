@@ -1,0 +1,153 @@
+name: JX-LAN source verification
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact source SHA to verify
+        required: true
+        type: string
+    secrets:
+      FEISHU_CICD_WEBHOOK_URL:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: ${{ github.repository == 'JUXON-AI/jxpkg' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    name: Verify on JX-LAN
+    runs-on: {group: JXlan Public Main, labels: jxlan-ci}
+    timeout-minutes: 30
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      workflow_sha: ${{ steps.source.outputs.workflow_sha }}
+    services:
+      redis:
+        image: redis:7.4.11-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+        ports:
+          - 6379/tcp
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - name: Freeze requested source
+        id: request
+        env:
+          REQUESTED_REF: ${{ inputs.ref }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          requested_source=${REQUESTED_REF:-$EVENT_SHA}
+          [[ "$requested_source" =~ ^[a-f0-9]{40}$ ]]
+          if [[ -n "$REQUESTED_REF" ]]; then
+            test "$requested_source" = "$REQUESTED_REF"
+          else
+            test "$requested_source" = "$EVENT_SHA"
+          fi
+          printf 'sha=%s\n' "$requested_source" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.request.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Freeze source and workflow identities
+        id: source
+        env:
+          REQUESTED_SHA: ${{ steps.request.outputs.sha }}
+          WORKFLOW_DEFINITION_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          source_sha=$(git rev-parse HEAD)
+          [[ "$source_sha" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$WORKFLOW_DEFINITION_SHA" =~ ^[a-f0-9]{40}$ ]]
+          test "$source_sha" = "$REQUESTED_SHA"
+          printf 'sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+          printf 'workflow_sha=%s\n' "$WORKFLOW_DEFINITION_SHA" >> "$GITHUB_OUTPUT"
+          printf '### Frozen source\n\nSource: `%s`\n\nWorkflow definition: `%s`\n' \
+            "$source_sha" "$WORKFLOW_DEFINITION_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Select the installed JX-LAN Go toolchain
+        run: |
+          test -x /home/zoe/actions-runner/_toolcache/go/1.25.0/x64/bin/go
+          printf '%s\n' /home/zoe/actions-runner/_toolcache/go/1.25.0/x64/bin >> "$GITHUB_PATH"
+          printf 'GOMODCACHE=%s\nGOCACHE=%s\n' "$RUNNER_TEMP/go-mod" "$RUNNER_TEMP/go-build" >> "$GITHUB_ENV"
+      - name: Verify source and dependencies
+        run: make check
+      - name: Test and compile
+        env:
+          JXPKG_TEST_REDIS_ADDR: 127.0.0.1:${{ job.services.redis.ports['6379'] }}
+        run: |
+          make test
+          make test-race
+          make build
+      - name: Record verified source
+        run: |
+          printf '### Source verification\n\nSource: `%s`\n\nWorkflow definition: `%s`\n\nToolchain: Go 1.25.0; Redis `%s`; stores under `$RUNNER_TEMP`.\n' \
+            "$(git rev-parse HEAD)" "${{ github.workflow_sha }}" \
+            'redis:7.4.11-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf' \
+            >> "$GITHUB_STEP_SUMMARY"
+
+  notify:
+    name: Notify Feishu
+    needs: verify
+    if: ${{ always() && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') }}
+    runs-on:
+      group: JXlan Public Main
+      labels: jxlan-ci
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - name: Send result to Feishu
+        shell: bash
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_CICD_WEBHOOK_URL }}
+          RESULT: ${{ needs.verify.result }}
+          SOURCE_REF: ${{ inputs.ref || github.ref_name }}
+          SOURCE_SHA: ${{ needs.verify.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test -n "$FEISHU_WEBHOOK_URL" || {
+            echo '::warning::FEISHU_CICD_WEBHOOK_URL is empty; notification was not sent'
+            exit 1
+          }
+          echo "::add-mask::$FEISHU_WEBHOOK_URL"
+
+          case "$RESULT" in
+            success) result_label='✅ 成功' ;;
+            failure) result_label='❌ 失败' ;;
+            cancelled) result_label='⏹️ 已取消' ;;
+            skipped) result_label='⏭️ 已跳过' ;;
+            *) result_label='⚠️ 状态未知' ;;
+          esac
+
+          message="[CI][$result_label]
+          仓库: $GITHUB_REPOSITORY
+          行为: JXpKG 源码验证
+          来源: $SOURCE_REF
+          提交: ${SOURCE_SHA:0:12}
+          事件: $GITHUB_EVENT_NAME
+          执行者: $GITHUB_ACTOR
+          详情: 仅表示 CI 完成，不代表镜像已发布或已部署
+          运行: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          payload=$(jq -cn --arg text "$message" '{msg_type:"text",content:{text:$text}}')
+          response_file=$(mktemp "$RUNNER_TEMP/feishu-response.XXXXXX")
+          trap 'rm -f "$response_file"' EXIT
+          http_status=$(curl \
+            --silent \
+            --show-error \
+            --output "$response_file" \
+            --write-out '%{http_code}' \
+            --connect-timeout 10 \
+            --max-time 20 \
+            --retry 2 \
+            --retry-all-errors \
+            --header 'Content-Type: application/json; charset=utf-8' \
+            --data "$payload" \
+            "$FEISHU_WEBHOOK_URL")
+          test "$http_status" = 200
+          jq -e '(.StatusCode? == 0) or (.code? == 0)' "$response_file" >/dev/null
