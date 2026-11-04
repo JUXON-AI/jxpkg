@@ -246,13 +246,15 @@ func (s *store) acquire(ctx context.Context, id string) (*session, string, error
 	// Remote identity checks share the 20s authentication budget with this wait.
 	deadline := time.Now().Add(_authenticationTimeout)
 	for {
+		commandStarted := time.Now()
 		result, err := s.db.Eval(ctx, acquireScript, []string{lock, key}, owner, (30 * time.Second).Milliseconds()).Slice()
 		if err != nil {
 			// Redis does not roll back commands that ran before a Lua error. The
 			// owner fence makes cleanup safe when no lease, another owner's lease,
 			// or this call's late lease is present.
+			failure := s.redisFailure("lease_acquire", commandStarted, err)
 			s.release(ctx, id, owner)
-			return nil, "", err
+			return nil, "", failure
 		}
 		if len(result) == 0 {
 			s.release(ctx, id, owner)
@@ -318,8 +320,10 @@ func (s *store) release(requestContext context.Context, id, owner string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(requestContext), time.Second)
 	defer cancel()
 	// Release is best effort: an unreachable Redis retains the bounded lease until expiry.
+	started := time.Now()
 	if err := s.db.Eval(ctx, `if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('del',KEYS[1]) end return 0`, []string{s.prefix + "lock:" + id}, owner).Err(); err != nil {
-		logs.WarnContext(requestContext, "logtobff.session_lease.release_failed")
+		failure := s.redisFailure("lease_release", started, err)
+		logs.WarnContextw(sessionDiagnosticContext(requestContext), "logtobff.session_lease.release_failed", sessionFailureFields(failure)...)
 	}
 }
 func (s *store) commit(ctx context.Context, id, owner, next string, value *session, remove bool) error {
@@ -340,12 +344,13 @@ func (s *store) commit(ctx context.Context, id, owner, next string, value *sessi
 		}
 		ttl = deadline.Sub(now).Milliseconds()
 	}
+	started := time.Now()
 	result, err := s.db.Eval(ctx, `
  if redis.call('get',KEYS[1])~=ARGV[1] or redis.call('exists',KEYS[2])==0 then return 0 end
  if ARGV[5]=='1' then redis.call('del',KEYS[2]) else redis.call('set',KEYS[3],ARGV[2],'PX',ARGV[3]);if KEYS[2]~=KEYS[3] then redis.call('del',KEYS[2]) end end
  redis.call('del',KEYS[1]);return 1`, []string{s.prefix + "lock:" + id, s.prefix + "s:" + id, key}, owner, data, ttl, "", map[bool]string{true: "1", false: "0"}[remove]).Int()
 	if err != nil {
-		return fmt.Errorf("commit authentication state: %w", err)
+		return fmt.Errorf("commit authentication state: %w", s.redisFailure("lease_commit", started, err))
 	}
 	if result != 1 {
 		return _errMissing

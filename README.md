@@ -154,6 +154,10 @@ router.Post("profile.Get", bff.Require(), server.API(handler.GetProfile))
 
 退出时，中央端点明确返回 401 会按本地会话失效处理，BFF 返回 `401 session_invalid`，清理被拒绝的旧本地会话；这不表示新 SSO 会话已被退出，也不会重试中央退出动作。超时、5xx、未知状态或响应关闭异常仍返回 503 并保留恢复状态；旧请求不能清除已更新的会话状态。
 
+会话获取或提交失败时，`logtobff.request.rejected` 保留 `request_id`、HTTP 状态和稳定拒绝原因，并增加 `failure_kind`。Redis 失败额外记录 `redis_operation`（`lease_acquire` / `lease_commit`）、单次命令 `elapsed_ms`、失败后的连接池快照和累计等待/超时计数；`network_operation` 区分底层 `dial` / `read` / `write`。`pool_timeout` 表示等待连接超时，`network_timeout` 表示网络操作超时，两者不能混为会话锁竞争。累计计数不是单次请求计数。清理租约失败由独立的 `logtobff.session_lease.release_failed` 记录 `lease_release`，不重复记录原命令失败。日志不包含 Redis 地址、命令参数、key、会话值或上游错误文本，也不继承任意请求日志字段。现有超时、重试和鉴权行为不变。
+
+在线组织目录暂时不可用时，当前请求仍返回 503，不执行受保护操作；BFF 保留已有会话的组织与修订号，不把依赖故障写成组织切换，也不延长会话期限。并发中的其他请求继续各自在线复核，避免一次临时失败让它们误报身份冲突。确定性的 401／403、登出、过期和真实组织修订号变化仍按原有撤销与并发隔离规则处理。
+
 ### `apis/runtime/auth`
 
 认证包提供业务服务共享的 `PermissionCode`、稳定认证错误和严格 EdDSA/JWK 验签原语。它不再提供 Account numeric Session Resolver、UIN/CompanyID 授权上下文或旧 HS256 Bearer API。

@@ -38,6 +38,18 @@ func (a *Runtime) prepareIdentity(ctx context.Context, value *session) error {
 	return nil
 }
 
+// applyIdentityPreparationFailure 只让确定性认证拒绝改写持久化组织。
+func applyIdentityPreparationFailure(value *session, err error) bool {
+	if err == nil {
+		return false
+	}
+	remove := classify(err).status == http.StatusUnauthorized
+	if identityErrorRevokesOrganization(err) {
+		value.Organization = ""
+	}
+	return remove
+}
+
 // beginIdentity 在短租约内持久化凭据轮换，随后释放租约供普通请求并行在线复核。
 func (a *Runtime) beginIdentity(ctx context.Context, id string) (*session, error) {
 	started := time.Now()
@@ -55,14 +67,7 @@ func (a *Runtime) beginIdentity(ctx context.Context, id string) (*session, error
 	started = time.Now()
 	prepareErr := a.prepareIdentity(ctx, value)
 	recordIdentityPhase(ctx, "bff.begin.prepare", started)
-	remove := false
-	if prepareErr != nil {
-		outcome := classify(prepareErr)
-		remove = outcome.status == 401
-		if outcome.status == 503 {
-			value.Organization = ""
-		}
-	}
+	remove := applyIdentityPreparationFailure(value, prepareErr)
 	// Even when the later online authority check fails, persist a rotated refresh
 	// token so a provider response cannot strand a still-valid browser session.
 	save, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
@@ -176,7 +181,7 @@ func (a *Runtime) withIdentitySession(next sessionHandler, authorized ...http.Ha
 		value, err := a.beginIdentity(ctx, cookie.Value)
 		if err != nil {
 			outcome := classify(err)
-			fail(w, r, outcome.status, "session_unavailable")
+			fail(w, r, outcome.status, "session_unavailable", err)
 			return
 		}
 		var (
@@ -200,7 +205,7 @@ func (a *Runtime) withIdentitySession(next sessionHandler, authorized ...http.Ha
 		}
 		if err := a.finishIdentity(ctx, cookie.Value, nextID, &before, value, outcome.remove); err != nil {
 			failed := classify(err)
-			fail(w, r, failed.status, "session_changed_or_unavailable")
+			fail(w, r, failed.status, "session_changed_or_unavailable", err)
 			return
 		}
 		if !outcome.remove {
@@ -261,8 +266,6 @@ func (a *Runtime) revalidateIdentity(ctx context.Context, id string, expected Pr
 	if err == nil {
 		// 敏感结果路径无法发送新 Cookie，留给下一次 session 请求采纳中央新身份。
 		value.Organization, value.Revision = before.Organization, before.Revision
-	} else if outcome.status == 503 {
-		value.Organization = ""
 	}
 	if commitErr := a.finishIdentity(ctx, id, id, &before, value, err != nil && outcome.status == 401); commitErr != nil {
 		status := classify(commitErr).status

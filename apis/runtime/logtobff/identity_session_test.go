@@ -6,7 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -155,6 +157,228 @@ func TestIdentityOnlyParallelRefreshOccursOnce(t *testing.T) {
 	}
 	if f.userInfoCalls.Load() != 0 {
 		t.Fatal("parallel online profile reads issued UserInfo")
+	}
+}
+
+func identityAuthorityFixture() *session {
+	now := time.Now()
+	return &session{
+		Subject:         "user-one",
+		Organization:    "org-one",
+		Revision:        "1",
+		CSRF:            "csrf-one",
+		Until:           now.Add(sessionIdleLifetime),
+		PolicyVersion:   sessionPolicyVersion,
+		AuthenticatedAt: now,
+		IdleUntil:       now.Add(sessionIdleLifetime),
+		AbsoluteUntil:   now.Add(sessionAbsoluteLifetime),
+		SDK: map[string]string{
+			client.StorageKeyIdToken:        "id-token",
+			client.StorageKeyRefreshToken:   "refresh-token",
+			client.StorageKeyAccessTokenMap: `{"@":{"token":"opaque-account-access","scope":"profile","expiresAt":4102444800}}`,
+		},
+	}
+}
+
+func identityAuthorityRuntime(endpoint string) *Runtime {
+	return &Runtime{
+		config: Config{Endpoint: endpoint, Origin: "http://localhost:5180", ClientID: "client-one"},
+		http:   &http.Client{},
+	}
+}
+
+func modelIdentityCommit(t *testing.T, stored, before, value *session, now time.Time) error {
+	t.Helper()
+	if err := mergeIdentityUpdate(stored, before, value, now); err != nil {
+		return err
+	}
+	stored.Organization, stored.Revision, stored.CSRF = value.Organization, value.Revision, value.CSRF
+	return nil
+}
+
+func TestSessionRenewalFailurePreservesOnlyOnTemporaryAuthorityOutage(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*fakeAuthority)
+		status  int
+		org     string
+	}{
+		{name: "temporary", prepare: func(f *fakeAuthority) { f.unavailable = true }, status: http.StatusServiceUnavailable, org: "org-one"},
+		{name: "unauthorized", prepare: func(f *fakeAuthority) { f.identityInvalid = true }, status: http.StatusUnauthorized},
+		{name: "forbidden", prepare: func(f *fakeAuthority) { f.denied = true }, status: http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, endpoint := fixtureAuthority(t)
+			tt.prepare(f)
+			a := identityAuthorityRuntime(endpoint)
+			value := identityAuthorityFixture()
+			request := httptest.NewRequest(http.MethodPost, "http://localhost:5180/auth/session", strings.NewReader("{}"))
+			request.Header.Set("Origin", "http://localhost:5180")
+			request.Header.Set("X-CSRF-Token", value.CSRF)
+			request.Header.Set("X-Organization-ID", value.Organization)
+			request.Header.Set("X-Organization-Revision", value.Revision)
+			result := a.renewSession(request, value)
+			if result.status != tt.status {
+				t.Fatalf("renewal status = %d, want %d", result.status, tt.status)
+			}
+			if value.Organization != tt.org {
+				t.Fatalf("organization = %q, want %q", value.Organization, tt.org)
+			}
+		})
+	}
+}
+
+func TestIdentityPreparationFailureHasDeterministicAuthorityAction(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    error
+		org    string
+		remove bool
+	}{
+		{name: "temporary", err: errors.New("identity provider unavailable"), org: "org-one"},
+		{name: "unauthorized", err: &accessError{status: http.StatusUnauthorized, code: "session_invalid"}, remove: true},
+		{name: "forbidden", err: &accessError{status: http.StatusForbidden, code: "organization_access_denied"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			value := identityAuthorityFixture()
+			if remove := applyIdentityPreparationFailure(value, tt.err); remove != tt.remove {
+				t.Fatalf("remove = %t, want %t", remove, tt.remove)
+			}
+			if value.Organization != tt.org {
+				t.Fatalf("organization = %q, want %q", value.Organization, tt.org)
+			}
+		})
+	}
+}
+
+func TestCurrentRequestOnlyClearsAuthorityForRealRevocation(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*fakeAuthority)
+		status  int
+		org     string
+	}{
+		{name: "temporary", prepare: func(f *fakeAuthority) { f.unavailable = true }, status: http.StatusServiceUnavailable, org: "org-one"},
+		{name: "unauthorized", prepare: func(f *fakeAuthority) { f.identityInvalid = true }, status: http.StatusUnauthorized},
+		{name: "forbidden", prepare: func(f *fakeAuthority) { f.denied = true }, status: http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, endpoint := fixtureAuthority(t)
+			tt.prepare(f)
+			a := identityAuthorityRuntime(endpoint)
+			value := identityAuthorityFixture()
+			_, _, err := a.currentRequest(context.Background(), value)
+			if err == nil || classify(err).status != tt.status {
+				t.Fatalf("current request error = %v", err)
+			}
+			if value.Organization != tt.org {
+				t.Fatalf("organization = %q, want %q", value.Organization, tt.org)
+			}
+			if tt.org == "" && value.Revision != "1" {
+				t.Fatalf("revision changed with organization revocation: %q", value.Revision)
+			}
+		})
+	}
+}
+
+func TestTemporaryOrganizationReadDoesNotTurnSiblingIntoIdentityChange(t *testing.T) {
+	_, endpoint := fixtureAuthority(t)
+	a := identityAuthorityRuntime(endpoint)
+	base := a.http.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	var calls atomic.Int64
+	entered := make(chan int64, 2)
+	failRelease, successRelease := make(chan struct{}), make(chan struct{})
+	var failOnce, successOnce sync.Once
+	releaseFail := func() { failOnce.Do(func() { close(failRelease) }) }
+	releaseSuccess := func() { successOnce.Do(func() { close(successRelease) }) }
+	t.Cleanup(releaseFail)
+	t.Cleanup(releaseSuccess)
+	a.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/api/my-account/organization-identity" {
+			return base.RoundTrip(request)
+		}
+		call := calls.Add(1)
+		select {
+		case entered <- call:
+		case <-request.Context().Done():
+			return nil, request.Context().Err()
+		}
+		release := successRelease
+		if call == 1 {
+			release = failRelease
+		}
+		select {
+		case <-release:
+		case <-request.Context().Done():
+			return nil, request.Context().Err()
+		}
+		if call == 1 {
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Status:     "503 Service Unavailable",
+				Header:     make(http.Header),
+				Body:       http.NoBody,
+				Request:    request,
+			}, nil
+		}
+		return base.RoundTrip(request)
+	})
+
+	type readResult struct {
+		value *session
+		err   error
+	}
+	failedRead, successfulRead := make(chan readResult, 1), make(chan readResult, 1)
+	before := identityAuthorityFixture()
+	stored := renewalClone(t, before)
+	failedValue, successfulValue := renewalClone(t, before), renewalClone(t, before)
+	go func() {
+		_, _, err := a.currentRequest(context.Background(), failedValue)
+		failedRead <- readResult{value: failedValue, err: err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("temporary identity read did not reach the authority")
+	}
+	go func() {
+		_, _, err := a.currentRequest(context.Background(), successfulValue)
+		successfulRead <- readResult{value: successfulValue, err: err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("sibling identity read did not reach the authority")
+	}
+
+	releaseFail()
+	failed := <-failedRead
+	if failed.err == nil || classify(failed.err).status != http.StatusServiceUnavailable {
+		t.Fatalf("temporary read error = %v", failed.err)
+	}
+	if failed.value.Organization != "org-one" || failed.value.Revision != "1" {
+		t.Fatalf("temporary read changed authority to organization=%q revision=%q", failed.value.Organization, failed.value.Revision)
+	}
+	if err := modelIdentityCommit(t, stored, before, failed.value, time.Now()); err != nil {
+		t.Fatalf("temporary read failed its own commit fence: %v", err)
+	}
+
+	releaseSuccess()
+	successful := <-successfulRead
+	if successful.err != nil {
+		t.Fatalf("sibling authority read failed: %v", successful.err)
+	}
+	if err := modelIdentityCommit(t, stored, before, successful.value, time.Now()); err != nil {
+		t.Fatalf("temporary sibling commit failed: %v", err)
+	}
+	if stored.Organization != "org-one" || stored.Revision != "1" {
+		t.Fatalf("sibling persisted organization=%q revision=%q", stored.Organization, stored.Revision)
 	}
 }
 

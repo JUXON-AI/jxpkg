@@ -23,7 +23,11 @@ func (a *Runtime) renewSession(r *http.Request, value *session) result {
 	organization, revision := value.Organization, value.Revision
 	user, rows, err := a.currentRequest(r.Context(), value)
 	if err != nil {
-		value.Organization, value.Revision = organization, revision
+		if identityErrorRevokesOrganization(err) {
+			value.Organization = ""
+		} else {
+			value.Organization, value.Revision = organization, revision
+		}
 		return classify(err)
 	}
 	if value.Organization != organization || value.Revision != revision {
