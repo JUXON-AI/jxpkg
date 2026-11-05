@@ -53,6 +53,7 @@ make clean       # 清理 Go test cache
 | [`config`](#config) | YAML 和环境变量配置加载 | `LoadCoreConfigFromEnv` |
 | [`dbtools`](#dbtools) | GORM 多数据库连接和显式迁移 | `InitDBConn`、`DoInitModels` |
 | [`dbtools/redispool`](#dbtoolsredispool) | Redis 连接及常用数据结构操作 | `InitRedisWithConfig`、`Redis` |
+| [`fileupload`](#fileupload) | Core 上传会话、分片协议、完整性校验和统一文件登记 | `New`、`Start`、`Complete`、`UseVerifiedObject` |
 | [`lifecycle`](#lifecycle) | 服务启动、停止及清理回调协调 | `New`、`Std` |
 | [`llm`](#llm) | OpenAI-compatible 客户端构造 | `NewOpenAIClient` |
 | [`logs`](#logs) | Zap 结构化日志和 GORM logger | `ReloadConfig`、`Get`、`GetGorm` |
@@ -287,6 +288,12 @@ logs.Infow("request complete", "request_id", requestID)
 ### `mail`
 
 `NewSMTPSender` 校验 SMTP host、端口、认证与加密方式并返回 `Sender`。支持明文（仅可信测试网络）、STARTTLS 和 TLS；生产环境应要求加密连接。`Message` 描述收件人、主题和正文。调用方负责限流、重试策略及避免在日志中泄露正文/验证码。
+
+### `fileupload`
+
+提供独立 Core 上传会话、单文件和 multipart 预签名协议、短租约 fencing、流式大小/SHA256 校验以及 `core_upload_files` 幂等登记。成功文件与 session 完成状态在同一 Core 事务提交；S3 合并、读取和临时对象删除不进入数据库事务。`Request.SHA256` 可空，默认 verifier 始终流式计算，非空时再比对。业务 verifier 可保留图片读取变换或 MIME 规范化规则；可信 Attestation 必须返回合法小写摘要，并允许相同 purpose 内的跨 owner、跨扩展物理复用。CoreFileInfo 仍绑定当前 owner，客户端不得直接传入 StoragePath。业务 Blob 去重确认 canonical 后使用 `UseVerifiedObject`，在 Core 事务内以文件路径 CAS 重指向，SDK 不改 session 路径也不触碰对象。既有 globalhash 秒传策略暂时保留，其风险另行讨论。
+
+本 SDK 只承接新上传；历史完成附件不回填，旧 pending 草稿重新上传，不保留旧 multipart 状态回退。迁移必须通过 `fileupload.InitDB()` 或审查后的 `fileupload/migration.sql` 显式执行，普通启动不会自动迁移。会话表只保留 `(state, expires_at)` 清理索引和 UUID 主键，清理 SQL 只选取实际可抢占的未完成会话；真实 Core 库 `EXPLAIN` 尚未执行，状态为 UNVERIFIED。
 
 ### `mutex`
 
