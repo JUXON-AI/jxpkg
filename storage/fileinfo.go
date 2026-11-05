@@ -35,9 +35,9 @@ type CoreFileInfo struct {
 	// Purpose 用途分类
 	Purpose string `gorm:"column:purpose;type:varchar(32);comment:用途分类" json:"purpose"`
 	// Filename 原始文件名
-	Filename string `gorm:"column:filename;type:varchar(128);comment:原始文件名" json:"filename"`
+	Filename string `gorm:"column:filename;type:varchar(255);comment:原始文件名" json:"filename"`
 	// FileExt 文件扩展名
-	FileExt string `gorm:"column:file_ext;type:varchar(8);comment:文件扩展名" json:"file_ext"`
+	FileExt string `gorm:"column:file_ext;type:varchar(16);comment:文件扩展名" json:"file_ext"`
 	// MIMEType MIME类型
 	MIMEType string `gorm:"column:mime_type;type:varchar(128);comment:MIME类型" json:"mime_type"`
 	// Size 文件大小
@@ -45,7 +45,7 @@ type CoreFileInfo struct {
 	// Hash 文件hash hashMethod:hashValue
 	Hash string `gorm:"column:hash;type:varchar(256);comment:文件hash ;index" json:"hash"`
 	// StoragePath 存储的相对路径
-	StoragePath string `gorm:"column:storage_path;type:varchar(255)" json:"storage_path"`
+	StoragePath string `gorm:"column:storage_path;type:varchar(512)" json:"storage_path"`
 	// PublicURL 公网访问地址，如果为空，则表示只能通过预签名URL访问
 	PublicURL string `gorm:"column:public_url;type:varchar(256);index" json:"public_url"`
 }
