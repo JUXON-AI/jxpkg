@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JUXON-AI/jxpkg/identity"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/redis/go-redis/v9"
@@ -68,6 +69,9 @@ type fakeAuthority struct {
 	profileSubjectMismatch         bool
 	profileOversize                bool
 	profileSubOnly                 bool
+	profileNoUsername              bool
+	profileUsername                *string
+	userInfoUsername               *string
 	identityOrganizations          []organization
 	organization, revision         string
 }
@@ -148,7 +152,11 @@ func (f *fakeAuthority) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(401)
 			return
 		}
-		if _, err := fmt.Fprint(w, `{"sub":"user-one","name":"Synthetic member","organizations":["org-one","org-forbidden"]}`); err != nil {
+		if f.userInfoUsername == nil {
+			if _, err := fmt.Fprint(w, `{"sub":"user-one","name":"Synthetic member","organizations":["org-one","org-forbidden"]}`); err != nil {
+				return
+			}
+		} else if err := json.NewEncoder(w).Encode(map[string]any{"sub": "user-one", "username": *f.userInfoUsername, "name": "Synthetic member", "organizations": []string{"org-one", "org-forbidden"}}); err != nil {
 			return
 		}
 	case "/api/my-account/organization-identity":
@@ -200,6 +208,11 @@ func (f *fakeAuthority) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				user["sub"] = "user-two"
 			} else if f.profileOversize {
 				user["name"] = strings.Repeat("n", 513)
+			} else if f.profileNoUsername {
+				delete(user, "username")
+			}
+			if f.profileUsername != nil {
+				user["username"] = *f.profileUsername
 			}
 			response["user"] = user
 		}
@@ -300,6 +313,10 @@ func loadFixtureRedisConfig(t *testing.T) fixtureRedis {
 	t.Helper()
 	file := os.Getenv("LOGTO_BFF_TEST_CONFIG_FILE")
 	if file == "" {
+		// CI 已为整个共享库提供隔离 Redis；本地同样必须显式指定测试地址。
+		if address := os.Getenv("JXPKG_TEST_REDIS_ADDR"); address != "" {
+			return fixtureRedis{Address: address}
+		}
 		t.Skip("requires explicit local disposable Redis configuration")
 	}
 	data, err := os.ReadFile(file)
@@ -425,8 +442,12 @@ func TestSDKLoginSelectionRevocationAndLogout(t *testing.T) {
 	hits := 0
 	router.POST("/protected", a.Require("manage:credits"), func(c *gin.Context) {
 		p, ok := FromContext(c.Request.Context())
-		if !ok || p.UserID != "user-one" || p.OrganizationID != "org-one" {
-			t.Error("wrong principal")
+		if !ok || p.UserID != "user-one" || p.OrganizationID != "org-one" || p.Username != "Synthetic member" || p.OrganizationName != "Company One" {
+			t.Errorf("wrong principal: %#v, %v", p, ok)
+		}
+		names, ok := identity.DisplayNamesFromContext(c.Request.Context(), identity.Member{OrganizationID: "org-one", UserID: "user-one"})
+		if !ok || names.Username != "Synthetic member" || names.OrganizationName != "Company One" {
+			t.Errorf("wrong display names: %#v, %v", names, ok)
 		}
 		hits++
 		c.Status(204)

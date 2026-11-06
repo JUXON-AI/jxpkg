@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/JUXON-AI/jxpkg/identity"
 	"github.com/JUXON-AI/jxpkg/logs"
 	"github.com/JUXON-AI/jxpkg/requestid"
 	"net"
@@ -64,6 +65,10 @@ type Principal struct {
 	UserID string `json:"user_id"`
 	// OrganizationID 是已确认有效且获准进入此 App 的组织身份。
 	OrganizationID string `json:"organization_id"`
+	// Username 是已验证在线资料中的用户名；缺失时使用资料姓名。
+	Username string `json:"username,omitempty"`
+	// OrganizationName 是当前已验证组织行中的公司名。
+	OrganizationName string `json:"organization_name,omitempty"`
 	// OrganizationRevision binds operations to the identity snapshot rendered by the caller.
 	OrganizationRevision string `json:"organization_revision"`
 	// DepartmentIDs 是组织资源 Token 发布的部门范围；纯会话准入模式不提供此字段。
@@ -271,7 +276,8 @@ func (a *Runtime) Require(scopes ...string) gin.HandlerFunc {
 			if s.Organization == "" {
 				return problem(403, "organization_selection_required")
 			}
-			if _, _, err := a.currentRequest(r.Context(), s); err != nil {
+			user, rows, err := a.currentRequest(r.Context(), s)
+			if err != nil {
 				return classify(err)
 			}
 			if len(r.Header.Values("X-Organization-ID")) != 1 || len(r.Header.Values("X-Organization-Revision")) != 1 ||
@@ -286,7 +292,8 @@ func (a *Runtime) Require(scopes ...string) gin.HandlerFunc {
 				if err != nil {
 					return classify(err)
 				}
-				p := Principal{Issuer: a.config.Endpoint + "/oidc", UserID: s.Subject, OrganizationID: s.Organization, OrganizationRevision: s.Revision, ExpiresAt: deadline.Unix()}
+				username, organizationName := principalDisplayNames(user, rows, s.Organization)
+				p := Principal{Issuer: a.config.Endpoint + "/oidc", UserID: s.Subject, OrganizationID: s.Organization, Username: username, OrganizationName: organizationName, OrganizationRevision: s.Revision, ExpiresAt: deadline.Unix()}
 				return result{status: 200, principal: &p}
 			}
 			claims, err := a.organizationClaims(r.Context(), s, s.Organization)
@@ -306,7 +313,8 @@ func (a *Runtime) Require(scopes ...string) gin.HandlerFunc {
 			if deadline.Unix() < expiresAt {
 				expiresAt = deadline.Unix()
 			}
-			p := Principal{Issuer: a.config.Endpoint + "/oidc", UserID: claims.Subject, OrganizationID: claims.OrganizationID, OrganizationRevision: s.Revision, DepartmentIDs: claims.DepartmentIDs, PrimaryDepartmentID: claims.PrimaryDepartmentID, Permissions: strings.Fields(claims.Scope), ExpiresAt: expiresAt}
+			username, organizationName := principalDisplayNames(user, rows, claims.OrganizationID)
+			p := Principal{Issuer: a.config.Endpoint + "/oidc", UserID: claims.Subject, OrganizationID: claims.OrganizationID, Username: username, OrganizationName: organizationName, OrganizationRevision: s.Revision, DepartmentIDs: claims.DepartmentIDs, PrimaryDepartmentID: claims.PrimaryDepartmentID, Permissions: strings.Fields(claims.Scope), ExpiresAt: expiresAt}
 			return result{status: 200, principal: &p}
 		}, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { called = true; c.Request = r; c.Next() }))(c.Writer, c.Request)
 		if !called {
@@ -417,6 +425,13 @@ func (a *Runtime) withSession(next sessionHandler, authorized ...http.Handler) h
 
 // jxlog:nonbusiness 只装配已验证主体和请求绑定能力，不执行外部副作用。
 func (a *Runtime) authorizedContext(ctx context.Context, id string, principal Principal) context.Context {
+	member := identity.Member{OrganizationID: principal.OrganizationID, UserID: principal.UserID}
+	if displayContext, err := identity.WithDisplayNames(ctx, member, identity.DisplayNames{
+		Username:         principal.Username,
+		OrganizationName: principal.OrganizationName,
+	}); err == nil {
+		ctx = displayContext
+	}
 	ctx = context.WithValue(ctx, principalKey{}, principal)
 	ctx = context.WithValue(ctx, revalidationKey{}, func(ctx context.Context) error {
 		return a.revalidate(ctx, id, principal, principal.Permissions)
@@ -424,4 +439,25 @@ func (a *Runtime) authorizedContext(ctx context.Context, id string, principal Pr
 	return context.WithValue(ctx, resourceGrantRevokeKey{}, &resourceGrantRevokeCapability{
 		runtime: a, id: id, principal: principal,
 	})
+}
+
+func principalDisplayNames(user profile, rows []organization, organizationID string) (string, string) {
+	username := user.Username
+	if username == "" {
+		username = user.Name
+	}
+	organizationName := ""
+	for _, row := range rows {
+		if row.ID == organizationID {
+			organizationName = row.Name
+			break
+		}
+	}
+	names := identity.DisplayNames{Username: username, OrganizationName: organizationName}
+	if names.Validate() != nil {
+		return "", ""
+	}
+	names.Username = strings.TrimSpace(names.Username)
+	names.OrganizationName = strings.TrimSpace(names.OrganizationName)
+	return names.Username, names.OrganizationName
 }

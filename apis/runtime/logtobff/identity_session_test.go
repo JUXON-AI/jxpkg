@@ -74,8 +74,8 @@ func TestIdentityOnlyWarmSessionUsesOneOnlineRequestAndRejectsScopes(t *testing.
 	hits := 0
 	router.POST("/protected", a.Require(), func(c *gin.Context) {
 		p, ok := FromContext(c.Request.Context())
-		if !ok || p.OrganizationID != "org-one" || len(p.DepartmentIDs) != 0 || p.PrimaryDepartmentID != nil || len(p.Permissions) != 0 {
-			t.Error("pure identity invented authorization claims")
+		if !ok || p.OrganizationID != "org-one" || p.Username != "user-one" || p.OrganizationName != "Company One" || len(p.DepartmentIDs) != 0 || p.PrimaryDepartmentID != nil || len(p.Permissions) != 0 {
+			t.Errorf("pure identity principal = %#v, %v", p, ok)
 		}
 		hits++
 		c.Status(204)
