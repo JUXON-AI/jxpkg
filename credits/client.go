@@ -139,7 +139,14 @@ func (c *Client) call(ctx context.Context, subject Subject, path string, result 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	body, err := json.Marshal(subject)
+	var payload any = subject
+	if names, ok := identity.DisplayNamesFromContext(ctx, subject); ok {
+		payload = struct {
+			Subject
+			DisplayNames identity.DisplayNames `json:"display_names"`
+		}{Subject: subject, DisplayNames: names}
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return unavailableCause(err)
 	}
