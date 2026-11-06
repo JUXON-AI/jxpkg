@@ -313,6 +313,10 @@ func loadFixtureRedisConfig(t *testing.T) fixtureRedis {
 	t.Helper()
 	file := os.Getenv("LOGTO_BFF_TEST_CONFIG_FILE")
 	if file == "" {
+		// CI 已为整个共享库提供隔离 Redis；本地同样必须显式指定测试地址。
+		if address := os.Getenv("JXPKG_TEST_REDIS_ADDR"); address != "" {
+			return fixtureRedis{Address: address}
+		}
 		t.Skip("requires explicit local disposable Redis configuration")
 	}
 	data, err := os.ReadFile(file)
