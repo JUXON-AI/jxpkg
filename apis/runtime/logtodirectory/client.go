@@ -56,6 +56,7 @@ type snapshotRequest struct {
 	UserIDs                []string `json:"user_ids"`
 	IncludeDepartments     bool     `json:"include_departments"`
 	IncludeMembershipEpoch bool     `json:"include_membership_epoch,omitempty"`
+	IncludeWorkspaceKind   bool     `json:"include_workspace_kind,omitempty"`
 }
 
 type listPageRequest struct {
@@ -66,6 +67,7 @@ type listPageRequest struct {
 	Limit                  int      `json:"limit"`
 	IncludeDepartments     bool     `json:"include_departments"`
 	IncludeMembershipEpoch bool     `json:"include_membership_epoch,omitempty"`
+	IncludeWorkspaceKind   bool     `json:"include_workspace_kind,omitempty"`
 }
 
 type organizationSearchRequest struct {
@@ -167,6 +169,7 @@ func (client *Client) Snapshot(ctx context.Context, organizationID string, userI
 		UserIDs:                append([]string{}, userIDs...),
 		IncludeDepartments:     options.IncludeDepartments,
 		IncludeMembershipEpoch: options.IncludeMembershipEpoch,
+		IncludeWorkspaceKind:   options.IncludeWorkspaceKind,
 	})
 	if err != nil {
 		return Snapshot{}, ErrUnavailable
@@ -224,6 +227,7 @@ func (client *Client) ListPage(ctx context.Context, organizationID, cursor strin
 		Limit:                  limit,
 		IncludeDepartments:     options.IncludeDepartments,
 		IncludeMembershipEpoch: options.IncludeMembershipEpoch,
+		IncludeWorkspaceKind:   options.IncludeWorkspaceKind,
 	})
 	if err != nil {
 		return Snapshot{}, nil, ErrUnavailable

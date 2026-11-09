@@ -123,7 +123,7 @@ snapshot, err := client.Snapshot(ctx, organizationID, userIDs, logtodirectory.Op
 })
 ```
 
-`Snapshot` 不缓存成员、角色、资料或部门，只缓存有界 M2M access token；默认超时 10 秒，显式范围 1..30 秒。同一 client 的冷 token 刷新会合并等待者，目录数据请求仍可并行；现有 request ID 会透传到 token 和每个目录请求。`Options.IncludeMembershipEpoch` 要求每个成员返回 canonical 正整数 decimal string，SDK 不把 epoch 解码为浮点数。错误通过 `ErrDenied`、`ErrUnavailable`、`ErrProtocol` 分类；固定目录 403 仅在严格精确的 `organization_access_denied` JSON 下返回包装 `ErrDenied` 的 `ErrOrganizationDenied`。调用方仍可用 `errors.Is` 检查 context cancellation。响应正文、token、Client Secret 和配置不会被写入错误。
+`Snapshot` 不缓存成员、角色、资料或部门，只缓存有界 M2M access token；默认超时 10 秒，显式范围 1..30 秒。同一 client 的冷 token 刷新会合并等待者，目录数据请求仍可并行；现有 request ID 会透传到 token 和每个目录请求。`Options.IncludeMembershipEpoch` 要求每个成员返回 canonical 正整数 decimal string，SDK 不把 epoch 解码为浮点数。`Options.IncludeWorkspaceKind` 采用显式 opt-in：默认请求不发送 `include_workspace_kind`，默认响应保持旧组织字段形状并返回 `WorkspaceKindUnknown`；启用后 provider 必须返回 `company` 或 `personal`，缺字段、其他值或在未启用时返回该字段均为 `ErrProtocol`。`Snapshot` 与 `ListPage` 共用该协议，`SearchOrganizations` 不新增 opt-in。错误通过 `ErrDenied`、`ErrUnavailable`、`ErrProtocol` 分类；固定目录 403 仅在严格精确的 `organization_access_denied` JSON 下返回包装 `ErrDenied` 的 `ErrOrganizationDenied`。调用方仍可用 `errors.Is` 检查 context cancellation。响应正文、token、Client Secret 和配置不会被写入错误。
 
 `ListPage` 使用同一 snapshot path 的单页列出契约；SDK 与配套 Logto handler 已通过本地 HTTPS、数据库联合测试及独立复审。使用前仍须部署配套 provider，并在 provider registry 为该 workload 显式启用 `allowMemberListing`；省略时禁止列出。SDK 不提供 capability 覆盖或跨页聚合，调用方须自行设置完整性、人数、页数和总时限。
 
@@ -422,3 +422,8 @@ JXPKG_TEST_S3_REGION
 若请求 context 中存在与目标 `Subject` 完全匹配的 `identity.DisplayNames`，credits 请求会在原主体字段旁追加顶层 `display_names`；缺失或不匹配时保持原 JSON 字节形状。该 metadata 不设置 `Authorization`，也不改变主体校验或访问决策。
 
 业务浏览器接口使用 `apis/credits.RegisterBrowserBalance(router, "jxagent", client, bff)` 注册 `jxagent.GetMyModelBalance`。它复用已校验的 Logto Browser Session、当前组织与 CSRF，员工身份只来自当前验证结果；DTO/handler/安全错误映射由 SDK 提供，业务无需转发包装。响应保留原始单位并回传 `organization_id/user_id`，浏览器须核对主体，避免其他标签页切换身份后的迟到响应污染旧缓存。调用方后端显式传 Client 与 BFF，SDK 不读取环境或 coresetting，也不增加 Bearer fallback。
+
+## 管理员额度调整 SDK
+
+`credits.Client.AdminAdjust(ctx, request)` 通过 mTLS-only `POST /internal/credits/admin-adjust` 执行一次有符号原始 quota 调整，`GetAdminAdjustment` 通过 `/internal/credits/admin-adjust/result` 读取持久回执。wire 为扁平 JSON，不使用 RPC `request` 包装；成功回执只包含 `state/operation_id/organization_id/user_id/delta/actor_id/reason`，不提供 before/after 或当前余额。写入被接受后即使响应未知也不会自动重放，调用方必须按同一 operation ID 查询回执并通过 `GetBalance` 单独刷新余额。管理写权限由服务端独立能力验证，SDK 不决定 JX 业务资格。
+写接口只接受 HTTP 200 + `applied` 或 HTTP 202 + `dispatching|unknown`；其它 status/state 组合均按协议错误拒绝。只读 result 接口在 HTTP 200 下保留 `dispatching|applied|rejected|unknown` 四种状态。调用一旦离开可确认边界，SDK 不自动重发；`dispatching`/`unknown` 必须通过同 operation ID 查询。响应体关闭失败只记录安全清理告警，不反转已确认结果。
