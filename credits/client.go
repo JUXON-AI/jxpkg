@@ -30,6 +30,12 @@ var ErrUnavailable = errors.New("credits unavailable")
 // ErrDenied 表示员工尚未开通或不允许使用模型凭证。
 var ErrDenied = errors.New("credits access denied")
 
+// ErrNotFound 表示查询的持久回执不存在。
+var ErrNotFound = errors.New("credits result not found")
+
+// ErrConflict 表示同一操作号被用于不同请求。
+var ErrConflict = errors.New("credits operation conflict")
+
 func unavailableCause(cause error) error {
 	if cause == nil {
 		return ErrUnavailable
@@ -136,15 +142,29 @@ func (c *Client) call(ctx context.Context, subject Subject, path string, result 
 	if err := subject.Validate(); err != nil {
 		return ErrDenied
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
 	var payload any = subject
 	if names, ok := identity.DisplayNamesFromContext(ctx, subject); ok {
 		payload = struct {
 			Subject
 			DisplayNames identity.DisplayNames `json:"display_names"`
 		}{Subject: subject, DisplayNames: names}
+	}
+	err := c.callPayload(ctx, path, payload, result, http.StatusOK)
+	if errors.Is(err, ErrConflict) {
+		return ErrDenied
+	}
+	if errors.Is(err, ErrNotFound) {
+		return ErrUnavailable
+	}
+	return err
+}
+
+func (c *Client) callPayload(ctx context.Context, path string, payload, result any, successStatuses ...int) error {
+	if c == nil || ctx == nil {
+		return ErrDenied
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -166,10 +186,23 @@ func (c *Client) call(ctx context.Context, subject Subject, path string, result 
 		return unavailableCause(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusConflict {
+	if resp.StatusCode == http.StatusForbidden {
 		return ErrDenied
 	}
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode == http.StatusConflict {
+		return ErrConflict
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrNotFound
+	}
+	success := false
+	for _, status := range successStatuses {
+		if resp.StatusCode == status {
+			success = true
+			break
+		}
+	}
+	if !success {
 		return ErrUnavailable
 	}
 	media, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
