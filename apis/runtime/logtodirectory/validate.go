@@ -28,8 +28,9 @@ type wireOrganizationSearch struct {
 }
 
 type wireOrganization struct {
-	ID   *string `json:"id"`
-	Name *string `json:"name"`
+	ID            *string         `json:"id"`
+	Name          *string         `json:"name"`
+	WorkspaceKind json.RawMessage `json:"workspace_kind"`
 }
 
 type wireMember struct {
@@ -142,6 +143,10 @@ func validateSnapshot(response wireSnapshot, validation snapshotValidation) (Sna
 		*response.Organization.ID != validation.organizationID || !displayValue(*response.Organization.Name, 128, false) ||
 		response.Members == nil || response.Departments == nil || len(response.Members) > maxMembers ||
 		(validation.listMode && len(response.Members) > validation.limit) {
+		return Snapshot{}, ErrProtocol
+	}
+	workspaceKind, err := parseWorkspaceKind(response.Organization.WorkspaceKind, validation.options.IncludeWorkspaceKind)
+	if err != nil {
 		return Snapshot{}, ErrProtocol
 	}
 
@@ -271,7 +276,9 @@ func validateSnapshot(response wireSnapshot, validation snapshotValidation) (Sna
 			current = *department.ParentID
 		}
 	}
-	return Snapshot{Organization: Organization{ID: *response.Organization.ID, Name: *response.Organization.Name}, Members: members, Departments: departments}, nil
+	return Snapshot{Organization: Organization{
+		ID: *response.Organization.ID, Name: *response.Organization.Name, WorkspaceKind: workspaceKind,
+	}, Members: members, Departments: departments}, nil
 }
 
 func cloneStringPointer(value *string) *string {
@@ -298,6 +305,30 @@ func parseMembershipEpoch(raw json.RawMessage, requested bool) (string, error) {
 		return "", ErrProtocol
 	}
 	return value, nil
+}
+
+func parseWorkspaceKind(raw json.RawMessage, requested bool) (WorkspaceKind, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		if requested {
+			return WorkspaceKindUnknown, ErrProtocol
+		}
+		return WorkspaceKindUnknown, nil
+	}
+	if !requested || trimmed[0] != '"' {
+		return WorkspaceKindUnknown, ErrProtocol
+	}
+	var value string
+	if err := json.Unmarshal(trimmed, &value); err != nil {
+		return WorkspaceKindUnknown, ErrProtocol
+	}
+	kind := WorkspaceKind(value)
+	switch kind {
+	case WorkspaceKindCompany, WorkspaceKindPersonal:
+		return kind, nil
+	default:
+		return WorkspaceKindUnknown, ErrProtocol
+	}
 }
 
 func canonicalPositiveInt64(value string) bool {
@@ -369,6 +400,9 @@ func validateOrganizationSearch(organizations []wireOrganization, cursor string,
 	seen := make(map[string]struct{}, len(organizations))
 	previousID := ""
 	for _, organization := range organizations {
+		if len(organization.WorkspaceKind) > 0 {
+			return nil, ErrProtocol
+		}
 		if organization.ID == nil || organization.Name == nil || !validOrganizationID(*organization.ID) ||
 			!validOrganizationName(*organization.Name) {
 			return nil, ErrProtocol

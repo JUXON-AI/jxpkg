@@ -13,4 +13,8 @@
 // its workload registry. SearchOrganizations reads the provider's bounded
 // organization page. Source-level provider compatibility does not imply either
 // capability is enabled in a particular deployment.
+//
+// Snapshot and ListPage preserve the legacy response shape by default. Setting
+// Options.IncludeWorkspaceKind adds the omitempty request flag and requires the
+// provider to return a company or personal organization workspace kind.
 package logtodirectory
