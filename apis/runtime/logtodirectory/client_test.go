@@ -67,6 +67,90 @@ func TestSnapshotContractAndBoundedTokenCache(t *testing.T) {
 	}
 }
 
+func TestSnapshotWorkspaceKindOptInContract(t *testing.T) {
+	tests := []struct {
+		name         string
+		options      Options
+		organization string
+		wantKind     WorkspaceKind
+		wantInclude  bool
+		wantErr      bool
+	}{
+		{
+			name:         "default legacy response",
+			organization: `{"id":"org-1","name":"Company"}`,
+			wantKind:     WorkspaceKindUnknown,
+		},
+		{
+			name:         "company",
+			options:      Options{IncludeWorkspaceKind: true},
+			organization: `{"id":"org-1","name":"Company","workspace_kind":"company"}`,
+			wantKind:     WorkspaceKindCompany,
+			wantInclude:  true,
+		},
+		{
+			name:         "personal",
+			options:      Options{IncludeWorkspaceKind: true},
+			organization: `{"id":"org-1","name":"Personal","workspace_kind":"personal"}`,
+			wantKind:     WorkspaceKindPersonal,
+			wantInclude:  true,
+		},
+		{
+			name:         "requested but missing",
+			options:      Options{IncludeWorkspaceKind: true},
+			organization: `{"id":"org-1","name":"Company"}`,
+			wantInclude:  true,
+			wantErr:      true,
+		},
+		{
+			name:         "requested invalid value",
+			options:      Options{IncludeWorkspaceKind: true},
+			organization: `{"id":"org-1","name":"Company","workspace_kind":"team"}`,
+			wantInclude:  true,
+			wantErr:      true,
+		},
+		{
+			name:         "unrequested value rejected",
+			organization: `{"id":"org-1","name":"Company","workspace_kind":"company"}`,
+			wantErr:      true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, _ := newPlainTestClient(t, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.URL.Path == tokenPath {
+					writeToken(response)
+					return
+				}
+				fields := decodeRawObject(t, request)
+				raw, exists := fields["include_workspace_kind"]
+				if test.wantInclude {
+					if !exists {
+						t.Fatal("include_workspace_kind missing")
+					}
+					assertRawJSON(t, fields, "include_workspace_kind", `true`)
+				} else if exists {
+					t.Fatalf("include_workspace_kind unexpectedly present: %s", raw)
+				}
+				writeJSON(response, http.StatusOK, `{"organization":`+test.organization+`,"members":[],"departments":[]}`)
+			}))
+			snapshot, err := client.Snapshot(context.Background(), "org-1", nil, test.options)
+			if test.wantErr {
+				if !errors.Is(err, ErrProtocol) {
+					t.Fatalf("Snapshot() error = %v, want ErrProtocol", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Snapshot() error = %v", err)
+			}
+			if snapshot.Organization.WorkspaceKind != test.wantKind {
+				t.Fatalf("WorkspaceKind = %q, want %q", snapshot.Organization.WorkspaceKind, test.wantKind)
+			}
+		})
+	}
+}
+
 func TestSnapshotEncodesNilAndEmptyUserIDsAsArrays(t *testing.T) {
 	for _, test := range []struct {
 		name    string
