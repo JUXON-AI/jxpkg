@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
 	"regexp"
 	"strings"
 	"unicode"
@@ -20,16 +21,19 @@ const (
 
 const (
 	// AdminAdjustmentDispatching means one upstream write may have started; it must never be automatically replayed.
-	AdminAdjustmentDispatching = "dispatching"
+	AdminAdjustmentDispatching AdminAdjustmentState = "dispatching"
 	// AdminAdjustmentApplied means New API accepted the write.
-	AdminAdjustmentApplied = "applied"
+	AdminAdjustmentApplied AdminAdjustmentState = "applied"
 	// AdminAdjustmentRejected means New API definitely rejected the write.
-	AdminAdjustmentRejected = "rejected"
+	AdminAdjustmentRejected AdminAdjustmentState = "rejected"
 	// AdminAdjustmentUnknown means the committed result could not be proven.
-	AdminAdjustmentUnknown = "unknown"
+	AdminAdjustmentUnknown AdminAdjustmentState = "unknown"
 )
 
-var adminOperationIDPattern = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
+// AdminAdjustmentState is the fixed protocol state for one adjustment receipt.
+type AdminAdjustmentState string
+
+var _adminOperationIDPattern = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
 
 // AdminAdjustRequest is the raw workload request for one signed quota adjustment.
 type AdminAdjustRequest struct {
@@ -60,7 +64,7 @@ type AdminAdjustLookup struct {
 // AdminAdjustment is the immutable outcome known for one adjustment operation.
 type AdminAdjustment struct {
 	// State is dispatching, applied, rejected, or unknown.
-	State string `json:"state"`
+	State AdminAdjustmentState `json:"state"`
 	// OperationID is the durable operation identity.
 	OperationID string `json:"operation_id"`
 	// OrganizationID is the native organization subject bound to the receipt.
@@ -78,7 +82,7 @@ type AdminAdjustment struct {
 // Validate verifies one adjustment request at its transport entry point.
 func (r AdminAdjustRequest) Validate() error {
 	subject := Subject{OrganizationID: r.OrganizationID, UserID: r.UserID}
-	if subject.Validate() != nil || !adminOperationIDPattern.MatchString(r.OperationID) || r.Delta == 0 || r.Delta < -maxAdminExactInteger || r.Delta > maxAdminExactInteger || !validAdminAttribution(r.ActorID, 128) || !validReason(r.Reason) {
+	if subject.Validate() != nil || !_adminOperationIDPattern.MatchString(r.OperationID) || r.Delta == 0 || r.Delta < -_maxAdminExactInteger || r.Delta > _maxAdminExactInteger || !validAdminAttribution(r.ActorID, 128) || !validReason(r.Reason) {
 		return ErrDenied
 	}
 	return nil
@@ -87,7 +91,7 @@ func (r AdminAdjustRequest) Validate() error {
 // Validate verifies one durable receipt lookup.
 func (l AdminAdjustLookup) Validate() error {
 	subject := Subject{OrganizationID: l.OrganizationID, UserID: l.UserID}
-	if subject.Validate() != nil || !adminOperationIDPattern.MatchString(l.OperationID) {
+	if subject.Validate() != nil || !_adminOperationIDPattern.MatchString(l.OperationID) {
 		return ErrDenied
 	}
 	return nil
@@ -105,7 +109,7 @@ func (a AdminAdjustment) Validate() error {
 	return nil
 }
 
-const maxAdminExactInteger = int64(1<<53 - 1)
+const _maxAdminExactInteger = int64(1<<53 - 1)
 
 func validAdminAttribution(value string, maxBytes int) bool {
 	return value != "" && len(value) <= maxBytes && utf8.ValidString(value) && strings.TrimSpace(value) == value && !strings.ContainsFunc(value, unicode.IsControl)
@@ -116,15 +120,17 @@ func validReason(value string) bool {
 }
 
 // AdminAdjust persists one adjustment intent and performs at most one upstream raw-quota write.
+// AdminAdjust persists one adjustment intent and performs at most one upstream raw-quota write.
 func (c *Client) AdminAdjust(ctx context.Context, request AdminAdjustRequest) (AdminAdjustment, error) {
 	if request.Validate() != nil {
 		return AdminAdjustment{}, ErrDenied
 	}
 	var result AdminAdjustment
-	if err := c.callPayload(ctx, AdminAdjustPath, request, &result, 200, 202); err != nil {
+	status, err := c.callPayloadStatus(ctx, AdminAdjustPath, request, &result, http.StatusOK, http.StatusAccepted)
+	if err != nil {
 		return AdminAdjustment{}, err
 	}
-	if err := result.Validate(); err != nil || result.OperationID != request.OperationID || result.OrganizationID != request.OrganizationID || result.UserID != request.UserID || result.Delta != request.Delta || result.ActorID != request.ActorID || result.Reason != request.Reason {
+	if !_validAdminAdjustResponse(status, result.State) || result.OperationID != request.OperationID || result.OrganizationID != request.OrganizationID || result.UserID != request.UserID || result.Delta != request.Delta || result.ActorID != request.ActorID || result.Reason != request.Reason {
 		return AdminAdjustment{}, ErrUnavailable
 	}
 	return result, nil
@@ -136,13 +142,24 @@ func (c *Client) GetAdminAdjustment(ctx context.Context, lookup AdminAdjustLooku
 		return AdminAdjustment{}, ErrDenied
 	}
 	var result AdminAdjustment
-	if err := c.callPayload(ctx, AdminAdjustResultPath, lookup, &result, 200); err != nil {
+	_, err := c.callPayloadStatus(ctx, AdminAdjustResultPath, lookup, &result, http.StatusOK)
+	if err != nil {
 		return AdminAdjustment{}, err
 	}
-	if err := result.Validate(); err != nil || result.OperationID != lookup.OperationID || result.OrganizationID != lookup.OrganizationID || result.UserID != lookup.UserID {
+	if result.OperationID != lookup.OperationID || result.OrganizationID != lookup.OrganizationID || result.UserID != lookup.UserID {
 		return AdminAdjustment{}, ErrUnavailable
 	}
 	return result, nil
+}
+
+func _validAdminAdjustResponse(status int, state AdminAdjustmentState) bool {
+	if status == http.StatusOK {
+		return state == AdminAdjustmentApplied
+	}
+	if status == http.StatusAccepted {
+		return state == AdminAdjustmentDispatching || state == AdminAdjustmentUnknown
+	}
+	return false
 }
 
 // UnmarshalJSON rejects duplicate, missing, unknown, or malformed adjustment request fields.

@@ -117,6 +117,99 @@ func TestAdminAdjustmentRejectsUnknownResultField(t *testing.T) {
 	}
 }
 
+func TestAdminAdjustEnforcesHTTPStatusStateMatrix(t *testing.T) {
+	requestValue := AdminAdjustRequest{OrganizationID: "org-2", UserID: "user-3", OperationID: "op-matrix", Delta: 10, ActorID: "admin-4", Reason: "matrix"}
+	for _, tc := range []struct {
+		name    string
+		status  int
+		state   AdminAdjustmentState
+		success bool
+	}{
+		{"200 applied", http.StatusOK, AdminAdjustmentApplied, true},
+		{"200 dispatching", http.StatusOK, AdminAdjustmentDispatching, false},
+		{"200 unknown", http.StatusOK, AdminAdjustmentUnknown, false},
+		{"200 rejected", http.StatusOK, AdminAdjustmentRejected, false},
+		{"202 dispatching", http.StatusAccepted, AdminAdjustmentDispatching, true},
+		{"202 unknown", http.StatusAccepted, AdminAdjustmentUnknown, true},
+		{"202 applied", http.StatusAccepted, AdminAdjustmentApplied, false},
+		{"202 rejected", http.StatusAccepted, AdminAdjustmentRejected, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			responseValue := AdminAdjustment{State: tc.state, OperationID: requestValue.OperationID, OrganizationID: requestValue.OrganizationID, UserID: requestValue.UserID, Delta: requestValue.Delta, ActorID: requestValue.ActorID, Reason: requestValue.Reason}
+			body, err := json.Marshal(responseValue)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client, err := NewClientWithTransport(Config{Endpoint: "https://credits.example"}, adjustRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: tc.status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.AdminAdjust(context.Background(), requestValue)
+			if tc.success && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !tc.success && !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestGetAdminAdjustmentAcceptsFourStatesOnlyOnOK(t *testing.T) {
+	lookup := AdminAdjustLookup{OrganizationID: "org-2", UserID: "user-3", OperationID: "op-result"}
+	for _, state := range []AdminAdjustmentState{AdminAdjustmentDispatching, AdminAdjustmentApplied, AdminAdjustmentRejected, AdminAdjustmentUnknown} {
+		t.Run(string(state), func(t *testing.T) {
+			responseValue := AdminAdjustment{State: state, OperationID: lookup.OperationID, OrganizationID: lookup.OrganizationID, UserID: lookup.UserID, Delta: 1, ActorID: "admin-4", Reason: "read result"}
+			body, err := json.Marshal(responseValue)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, status := range []int{http.StatusOK, http.StatusAccepted} {
+				client, err := NewClientWithTransport(Config{Endpoint: "https://credits.example"}, adjustRoundTripFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				result, callErr := client.GetAdminAdjustment(context.Background(), lookup)
+				if status == http.StatusOK && (callErr != nil || result.State != state) {
+					t.Fatalf("state=%s status=%d result=%+v err=%v", state, status, result, callErr)
+				}
+				if status != http.StatusOK && !errors.Is(callErr, ErrUnavailable) {
+					t.Fatalf("state=%s status=%d err=%v", state, status, callErr)
+				}
+			}
+		})
+	}
+}
+
+type closeErrorBody struct{ io.Reader }
+
+func (closeErrorBody) Close() error { return errors.New("synthetic close failure") }
+
+func TestAdminAdjustAppliedSurvivesBodyCloseFailureWithoutRetry(t *testing.T) {
+	requestValue := AdminAdjustRequest{OrganizationID: "org-2", UserID: "user-3", OperationID: "op-close", Delta: 10, ActorID: "admin-4", Reason: "close cleanup"}
+	responseValue := AdminAdjustment{State: AdminAdjustmentApplied, OperationID: requestValue.OperationID, OrganizationID: requestValue.OrganizationID, UserID: requestValue.UserID, Delta: requestValue.Delta, ActorID: requestValue.ActorID, Reason: requestValue.Reason}
+	body, err := json.Marshal(responseValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	client, err := NewClientWithTransport(Config{Endpoint: "https://credits.example"}, adjustRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: closeErrorBody{Reader: strings.NewReader(string(body))}}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.AdminAdjust(context.Background(), requestValue)
+	if err != nil || result.State != AdminAdjustmentApplied || calls != 1 {
+		t.Fatalf("result=%+v err=%v calls=%d", result, err, calls)
+	}
+}
+
 func TestLegacyCreditsClientErrorContractIsPreserved(t *testing.T) {
 	subject := Subject{OrganizationID: "org-2", UserID: "user-3"}
 	for _, tc := range []struct {

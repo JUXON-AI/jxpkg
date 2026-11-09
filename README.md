@@ -426,3 +426,4 @@ JXPKG_TEST_S3_REGION
 ## 管理员额度调整 SDK
 
 `credits.Client.AdminAdjust(ctx, request)` 通过 mTLS-only `POST /internal/credits/admin-adjust` 执行一次有符号原始 quota 调整，`GetAdminAdjustment` 通过 `/internal/credits/admin-adjust/result` 读取持久回执。wire 为扁平 JSON，不使用 RPC `request` 包装；成功回执只包含 `state/operation_id/organization_id/user_id/delta/actor_id/reason`，不提供 before/after 或当前余额。写入被接受后即使响应未知也不会自动重放，调用方必须按同一 operation ID 查询回执并通过 `GetBalance` 单独刷新余额。管理写权限由服务端独立能力验证，SDK 不决定 JX 业务资格。
+写接口只接受 HTTP 200 + `applied` 或 HTTP 202 + `dispatching|unknown`；其它 status/state 组合均按协议错误拒绝。只读 result 接口在 HTTP 200 下保留 `dispatching|applied|rejected|unknown` 四种状态。调用一旦离开可确认边界，SDK 不自动重发；`dispatching`/`unknown` 必须通过同 operation ID 查询。响应体关闭失败只记录安全清理告警，不反转已确认结果。

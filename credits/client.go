@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/JUXON-AI/jxpkg/identity"
+	"github.com/JUXON-AI/jxpkg/logs"
 	"github.com/JUXON-AI/jxpkg/requestid"
 	"github.com/JUXON-AI/jxpkg/safeerror"
 )
@@ -149,7 +150,7 @@ func (c *Client) call(ctx context.Context, subject Subject, path string, result 
 			DisplayNames identity.DisplayNames `json:"display_names"`
 		}{Subject: subject, DisplayNames: names}
 	}
-	err := c.callPayload(ctx, path, payload, result, http.StatusOK)
+	_, err := c.callPayloadStatus(ctx, path, payload, result, http.StatusOK)
 	if errors.Is(err, ErrConflict) {
 		return ErrDenied
 	}
@@ -159,20 +160,20 @@ func (c *Client) call(ctx context.Context, subject Subject, path string, result 
 	return err
 }
 
-func (c *Client) callPayload(ctx context.Context, path string, payload, result any, successStatuses ...int) error {
+func (c *Client) callPayloadStatus(ctx context.Context, path string, payload, result any, successStatuses ...int) (status int, resultErr error) {
 	if c == nil || ctx == nil {
-		return ErrDenied
+		return 0, ErrDenied
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return 0, err
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return unavailableCause(err)
+		return 0, unavailableCause(err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+path, bytes.NewReader(body))
 	if err != nil {
-		return unavailableCause(err)
+		return 0, unavailableCause(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if id := requestid.FromContext(ctx); id != "" {
@@ -181,47 +182,51 @@ func (c *Client) callPayload(ctx context.Context, path string, payload, result a
 	resp, err := c.http.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return safeerror.Wrap(ctx.Err().Error(), errors.Join(ctx.Err(), err))
+			return 0, safeerror.Wrap(ctx.Err().Error(), errors.Join(ctx.Err(), err))
 		}
-		return unavailableCause(err)
+		return 0, unavailableCause(err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			logs.WarnContextw(ctx, "credits.Client response body close failed", "reqid", requestid.FromContext(ctx), "stage", "response_body_close")
+		}
+	}()
 	if resp.StatusCode == http.StatusForbidden {
-		return ErrDenied
+		return resp.StatusCode, ErrDenied
 	}
 	if resp.StatusCode == http.StatusConflict {
-		return ErrConflict
+		return resp.StatusCode, ErrConflict
 	}
 	if resp.StatusCode == http.StatusNotFound {
-		return ErrNotFound
+		return resp.StatusCode, ErrNotFound
 	}
 	success := false
-	for _, status := range successStatuses {
-		if resp.StatusCode == status {
+	for _, candidate := range successStatuses {
+		if resp.StatusCode == candidate {
 			success = true
 			break
 		}
 	}
 	if !success {
-		return ErrUnavailable
+		return resp.StatusCode, ErrUnavailable
 	}
 	media, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil || media != "application/json" {
-		return unavailableCause(err)
+		return resp.StatusCode, unavailableCause(err)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024+1))
 	if err != nil || len(raw) > 16*1024 {
-		return unavailableCause(err)
+		return resp.StatusCode, unavailableCause(err)
 	}
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
 	if err := d.Decode(result); err != nil {
-		return unavailableCause(err)
+		return resp.StatusCode, unavailableCause(err)
 	}
 	if err := d.Decode(new(any)); err != io.EOF {
-		return unavailableCause(err)
+		return resp.StatusCode, unavailableCause(err)
 	}
-	return nil
+	return resp.StatusCode, nil
 }
 
 // ValidateConnection 拒绝凭证 URL、非 HTTPS 地址和畸形 Key。
