@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/JUXON-AI/jxpkg/logs"
 	"github.com/JUXON-AI/jxpkg/settings"
 )
 
@@ -56,6 +55,19 @@ type Storager interface {
 	DeleteFile(ctx context.Context, storagePath string) error
 }
 
+// OriginalFileStorager is an optional storage capability for providers that
+// can return an object before provider-side media transformation. It is kept
+// separate from Storager so existing implementations remain source compatible.
+//
+// The provider operation may be billable. Callers must check
+// OriginalFileSupported and must not fall back to the ordinary read path when
+// the original byte contract is required.
+type OriginalFileStorager interface {
+	OriginalFileSupported() bool
+	ReadOriginalFile(ctx context.Context, storagePath string) (io.ReadCloser, error)
+	GetPresignedOriginalURL(ctx context.Context, method, storagePath string) (string, error)
+}
+
 // MultipartUploadPart 表示一个已上传或待合并的对象分片。
 type MultipartUploadPart struct {
 	// PartNumber 是从 1 开始的分片序号，最大为 10000。
@@ -88,7 +100,8 @@ func LoadStorager(ctx context.Context, purpose string) (Storager, error) {
 	return s, nil
 }
 
-// NewStorage .
+// NewStorage 创建存储器。
+// 配置和构造错误直接返回，由调用方统一记录，避免重复日志。
 func NewStorage(ctx context.Context, purpose string) (Storager, error) {
 	var (
 		cfg StorageConfig
@@ -98,7 +111,6 @@ func NewStorage(ctx context.Context, purpose string) (Storager, error) {
 	)
 	err = settings.GetYaml(SettingGroupCore, key, &cfg)
 	if err != nil {
-		logs.Errorf("get storage config error: %v", err)
 		return nil, err
 	}
 
@@ -108,7 +120,6 @@ func NewStorage(ctx context.Context, purpose string) (Storager, error) {
 		return nil, fmt.Errorf("not found useful remote storage config")
 	}
 	if err != nil {
-		logs.Errorf("new storage error: %v", err)
 		return nil, err
 	}
 	return s, nil
