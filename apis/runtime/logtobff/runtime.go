@@ -59,7 +59,6 @@ type Config struct {
 
 // Principal 是本次请求在线确认的身份快照；资源模式另行验证组织 API Token。
 type Principal struct {
-	credentialExpiresAt int64
 	// Issuer 来自经过验证的固定发行者。
 	Issuer string `json:"issuer"`
 	// UserID 是签名 Token 中的全局用户标识。

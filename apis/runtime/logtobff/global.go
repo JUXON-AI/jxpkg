@@ -172,7 +172,13 @@ func globalEpoch(subject, scope string) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func (a *Runtime) globalSnapshot(ctx context.Context, value *session) (map[string]any, *Principal, error) {
+// globalSessionPrincipal keeps the token deadline out of the public employee principal.
+type globalSessionPrincipal struct {
+	Principal
+	credentialExpiresAt time.Time
+}
+
+func (a *Runtime) globalSnapshot(ctx context.Context, value *session) (map[string]any, *globalSessionPrincipal, error) {
 	user, claims, err := a.globalCurrent(ctx, value)
 	if err != nil {
 		return nil, nil, err
@@ -190,7 +196,10 @@ func (a *Runtime) globalSnapshot(ctx context.Context, value *session) (map[strin
 		username = strings.TrimSpace(user.Name)
 	}
 	permissions := strings.Fields(claims.Scope)
-	p := &Principal{Issuer: a.config.Endpoint + "/oidc", UserID: value.Subject, Username: username, OrganizationRevision: epoch, Permissions: permissions, ExpiresAt: deadline.Unix(), credentialExpiresAt: claims.ExpiresAt.Unix()}
+	p := &globalSessionPrincipal{
+		Principal:           Principal{Issuer: a.config.Endpoint + "/oidc", UserID: value.Subject, Username: username, OrganizationRevision: epoch, Permissions: permissions, ExpiresAt: deadline.Unix()},
+		credentialExpiresAt: claims.ExpiresAt.Time,
+	}
 	data := map[string]any{"authenticated": true, "user": user, "permissions": permissions, "authority_epoch": epoch, "csrf_token": value.CSRF, "expires_at": deadline.Unix()}
 	return data, p, nil
 }
@@ -219,7 +228,7 @@ func (a *Runtime) requireGlobal(scopes ...string) gin.HandlerFunc {
 					return problem(403, "insufficient_scope")
 				}
 			}
-			return result{status: 200, principal: principal}
+			return result{status: 200, principal: &principal.Principal}
 		}, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { called = true; c.Request = r; c.Next() }))(c.Writer, c.Request)
 		if !called {
 			c.Abort()
@@ -278,8 +287,8 @@ func (a *Runtime) renewGlobalSession(r *http.Request, value *session) result {
 	if err != nil {
 		return classify(err)
 	}
-	if principal.credentialExpiresAt < deadline.Unix() {
-		deadline = time.Unix(principal.credentialExpiresAt, 0)
+	if principal.credentialExpiresAt.Before(deadline) {
+		deadline = principal.credentialExpiresAt
 	}
 	data["expires_at"] = deadline.Unix()
 	return result{status: 200, data: data}
