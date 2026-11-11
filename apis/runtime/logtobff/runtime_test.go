@@ -48,7 +48,7 @@ type fakeAuthority struct {
 	nativeSessionConsumed          bool
 	logoutCommitLost, logoutBlock  bool
 	logoutStatus                   int
-	logoutCalls                    int
+	logoutCalls                    atomic.Int64
 	logoutMethod, logoutPath       string
 	logoutAuthorization            string
 	logoutBody, logoutResponseBody string
@@ -220,7 +220,7 @@ func (f *fakeAuthority) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "/api/my-account/browser-session/logout":
-		f.logoutCalls++
+		f.logoutCalls.Add(1)
 		f.logoutMethod = r.Method
 		f.logoutPath = r.URL.Path
 		f.logoutAuthorization = r.Header.Get("Authorization")

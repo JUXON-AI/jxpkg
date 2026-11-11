@@ -3,8 +3,10 @@ package logtobff
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -44,13 +46,13 @@ func (h *lateAcquireWriteHook) ProcessHook(next redis.ProcessHook) redis.Process
 		if !armed || cmd.Name() != "eval" {
 			return next(ctx, cmd)
 		}
-		// Execute the script without the caller's cancellation, then report the
-		// canceled response. This models Redis committing a late Eval write.
+		// Model Redis committing a late Eval write and the transport reporting a
+		// socket timeout instead of the caller's cancellation.
 		if err := next(context.WithoutCancel(ctx), cmd); err != nil {
 			return err
 		}
 		cancel()
-		return context.Canceled
+		return &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
 	}
 }
 
