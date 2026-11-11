@@ -96,7 +96,7 @@ func TestLogoutConcurrentUnavailableKeepsBothFailures(t *testing.T) {
 	if out := callAuth(a, "GET", "/auth/session", "", cookie, ""); out.Code != http.StatusOK {
 		t.Errorf("center failures removed local session: %d", out.Code)
 	}
-	if f.logoutCalls != 0 || f.revokeCalls != 0 || f.endSessionCalls != 0 {
+	if f.logoutCalls.Load() != 0 || f.revokeCalls != 0 || f.endSessionCalls != 0 {
 		t.Fatal("center failure repeated mutation or revoked a grant")
 	}
 }
@@ -123,7 +123,7 @@ func TestLogoutUnknownStatusesKeepLocal(t *testing.T) {
 			if out := callAuth(a, "GET", "/auth/session", "", cookie, ""); out.Code != http.StatusOK {
 				t.Fatalf("status=%d lost local capability: %d", status, out.Code)
 			}
-			if f.logoutCalls != 1 || f.revokeCalls != 0 || f.endSessionCalls != 0 {
+			if f.logoutCalls.Load() != 1 || f.revokeCalls != 0 || f.endSessionCalls != 0 {
 				t.Fatal("unknown response repeated mutation or revoked a grant")
 			}
 		})
@@ -182,8 +182,8 @@ func TestLogoutUsesNarrowBrowserSessionEndpoint(t *testing.T) {
 			if redirect := sessionBody(t, out)["redirect_uri"]; redirect != a.config.Origin+"/" {
 				t.Fatalf("logout redirect %q", redirect)
 			}
-			if f.logoutCalls != 1 || f.logoutMethod != http.MethodPost || f.logoutPath != "/api/my-account/browser-session/logout" {
-				t.Fatalf("center call method=%q path=%q calls=%d", f.logoutMethod, f.logoutPath, f.logoutCalls)
+			if f.logoutCalls.Load() != 1 || f.logoutMethod != http.MethodPost || f.logoutPath != "/api/my-account/browser-session/logout" {
+				t.Fatalf("center call method=%q path=%q calls=%d", f.logoutMethod, f.logoutPath, f.logoutCalls.Load())
 			}
 			if f.logoutAuthorization != "Bearer opaque-account-access" || f.logoutBody != "" {
 				t.Fatalf("center authorization/body invalid")
@@ -221,7 +221,7 @@ func TestLogoutRejectsUnboundOriginAndCSRF(t *testing.T) {
 			}
 		})
 	}
-	if f.logoutCalls != 0 || f.revokeCalls != 0 || f.endSessionCalls != 0 {
+	if f.logoutCalls.Load() != 0 || f.revokeCalls != 0 || f.endSessionCalls != 0 {
 		t.Fatal("rejected logout reached center or revocation")
 	}
 }
@@ -254,7 +254,7 @@ func TestLogoutServerFailureKeepsLocalSession(t *testing.T) {
 			if sessionBody(t, callAuth(a, "GET", "/auth/session", "", cookie, ""))["authenticated"] != true {
 				t.Fatal("center failure removed local session")
 			}
-			if f.logoutCalls != 1 || f.revokeCalls != 0 || f.endSessionCalls != 0 {
+			if f.logoutCalls.Load() != 1 || f.revokeCalls != 0 || f.endSessionCalls != 0 {
 				t.Fatal("center failure repeated mutation or revoked a grant")
 			}
 		})
@@ -287,7 +287,7 @@ func TestLogoutTimeoutKeepsLocalSession(t *testing.T) {
 			if sessionBody(t, callAuth(a, "GET", "/auth/session", "", cookie, ""))["authenticated"] != true {
 				t.Fatal("center timeout removed local session")
 			}
-			if f.logoutCalls != 1 {
+			if f.logoutCalls.Load() != 1 {
 				t.Fatal("center timeout was automatically replayed")
 			}
 		})
@@ -317,7 +317,7 @@ func TestLogoutResponseLossReconcilesOnNextSession(t *testing.T) {
 			if callAuth(a, "GET", "/auth/session", "", cookie, "").Code != http.StatusUnauthorized {
 				t.Fatal("reconciled local session revived")
 			}
-			if f.logoutCalls != 1 {
+			if f.logoutCalls.Load() != 1 {
 				t.Fatal("reconcile automatically repeated the center mutation")
 			}
 		})
@@ -353,7 +353,7 @@ func TestLogoutConsumesSharedNativeSessionAcrossBFFs(t *testing.T) {
 			if requireStatus(t, c, cCookie, cCSRF) != http.StatusUnauthorized {
 				t.Fatal("Require survived shared native-session consumption")
 			}
-			if f.logoutCalls != 1 || f.revokeCalls != 0 || f.endSessionCalls != 0 {
+			if f.logoutCalls.Load() != 1 || f.revokeCalls != 0 || f.endSessionCalls != 0 {
 				t.Fatal("BFF session checks repeated mutation or revoked a grant")
 			}
 		})

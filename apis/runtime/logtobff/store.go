@@ -254,6 +254,11 @@ func (s *store) acquire(ctx context.Context, id string) (*session, string, error
 			// or this call's late lease is present.
 			failure := s.redisFailure("lease_acquire", commandStarted, err)
 			s.release(ctx, id, owner)
+			// Redis may surface a socket timeout when the request deadline expires.
+			// Preserve the caller's cancellation after the fenced cleanup completes.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, "", ctxErr
+			}
 			return nil, "", failure
 		}
 		if len(result) == 0 {
