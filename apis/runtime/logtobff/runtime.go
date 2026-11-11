@@ -59,6 +59,7 @@ type Config struct {
 
 // Principal 是本次请求在线确认的身份快照；资源模式另行验证组织 API Token。
 type Principal struct {
+	credentialExpiresAt int64
 	// Issuer 来自经过验证的固定发行者。
 	Issuer string `json:"issuer"`
 	// UserID 是签名 Token 中的全局用户标识。
@@ -102,11 +103,12 @@ type signatureVerifier interface {
 
 // Runtime 拥有一个产品的独立 Redis 会话命名空间及 OIDC 客户端。
 type Runtime struct {
-	config   Config
-	verifier *oidc.IDTokenVerifier
-	keys     signatureVerifier
-	http     *http.Client
-	store    *store
+	globalAuthority GlobalAuthority
+	config          Config
+	verifier        *oidc.IDTokenVerifier
+	keys            signatureVerifier
+	http            *http.Client
+	store           *store
 }
 
 type boundedTransport struct {
@@ -185,9 +187,13 @@ func (a *Runtime) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/callback", a.callback)
 	mux.HandleFunc("GET /auth/session", a.withSession(a.sessionView))
 	mux.HandleFunc("POST /auth/session", a.withSession(a.renewSession))
-	mux.HandleFunc("GET /auth/switch-organization", a.login)
+	if a.globalAuthority == nil {
+		mux.HandleFunc("GET /auth/switch-organization", a.login)
+	}
 	mux.HandleFunc("POST /auth/logout", a.withSession(a.logout))
-	mux.HandleFunc("GET /auth/account-center", a.withSession(a.accountCenter))
+	if a.globalAuthority == nil {
+		mux.HandleFunc("GET /auth/account-center", a.withSession(a.accountCenter))
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -267,6 +273,9 @@ func (a *Runtime) accountCenter(r *http.Request, s *session) result {
 
 // Require 是直接 Logto 浏览器会话路由模式，不接受 Bearer 或旧 Account 身份。
 func (a *Runtime) Require(scopes ...string) gin.HandlerFunc {
+	if a.globalAuthority != nil {
+		return a.requireGlobal(scopes...)
+	}
 	return func(c *gin.Context) {
 		called := false
 		a.withSession(func(r *http.Request, s *session) result {
@@ -425,6 +434,9 @@ func (a *Runtime) withSession(next sessionHandler, authorized ...http.Handler) h
 
 // jxlog:nonbusiness 只装配已验证主体和请求绑定能力，不执行外部副作用。
 func (a *Runtime) authorizedContext(ctx context.Context, id string, principal Principal) context.Context {
+	if a.globalAuthority != nil {
+		return context.WithValue(ctx, globalPrincipalKey{}, GlobalPrincipal{Issuer: principal.Issuer, UserID: principal.UserID, Username: principal.Username, Permissions: slices.Clone(principal.Permissions), Epoch: principal.OrganizationRevision, ExpiresAt: principal.ExpiresAt})
+	}
 	member := identity.Member{OrganizationID: principal.OrganizationID, UserID: principal.UserID}
 	if displayContext, err := identity.WithDisplayNames(ctx, member, identity.DisplayNames{
 		Username:         principal.Username,

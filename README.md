@@ -422,3 +422,5 @@ JXPKG_TEST_S3_REGION
 若请求 context 中存在与目标 `Subject` 完全匹配的 `identity.DisplayNames`，credits 请求会在原主体字段旁追加顶层 `display_names`；缺失或不匹配时保持原 JSON 字节形状。该 metadata 不设置 `Authorization`，也不改变主体校验或访问决策。
 
 业务浏览器接口使用 `apis/credits.RegisterBrowserBalance(router, "jxagent", client, bff)` 注册 `jxagent.GetMyModelBalance`。它复用已校验的 Logto Browser Session、当前组织与 CSRF，员工身份只来自当前验证结果；DTO/handler/安全错误映射由 SDK 提供，业务无需转发包装。响应保留原始单位并回传 `organization_id/user_id`，浏览器须核对主体，避免其他标签页切换身份后的迟到响应污染旧缓存。调用方后端显式传 Client 与 BFF，SDK 不读取环境或 coresetting，也不增加 Bearer fallback。
+
+独立全局管理应用可使用 `logtobff.NewGlobal`，入口白名单与业务 scope 分离；完整 Session、epoch 和权限契约见 [全局 BFF 说明](apis/runtime/logtobff/README.md)。

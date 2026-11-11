@@ -9,6 +9,9 @@ import (
 // The fixed authenticated-at absolute deadline is never replaced, and missing or
 // changed authority fails closed before Redis can persist a later idle value.
 func (a *Runtime) renewSession(r *http.Request, value *session) result {
+	if a.globalAuthority != nil {
+		return a.renewGlobalSession(r, value)
+	}
 	if !a.csrfValid(r, value) {
 		return problem(http.StatusForbidden, "csrf_rejected")
 	}
