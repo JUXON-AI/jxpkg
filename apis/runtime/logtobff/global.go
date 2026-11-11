@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -30,6 +31,8 @@ type GlobalAccess struct {
 	// Username 和 Name 来自本次在线核实的同一用户，只用于显示。
 	Username string
 	Name     string
+	// Avatar 是同一已核实用户的可选 HTTPS 头像，只用于会话显示。
+	Avatar string
 }
 
 // ErrGlobalAccessDenied 表示权威服务明确拒绝用户或应用准入。
@@ -134,7 +137,18 @@ func (a *Runtime) globalCurrent(ctx context.Context, value *session) (profile, *
 	}
 	slices.Sort(effective)
 	claims.Scope = strings.Join(effective, " ")
-	return profile{Subject: value.Subject, Username: globalDisplayName(decision.Username), Name: globalDisplayName(decision.Name)}, claims, nil
+	return profile{Subject: value.Subject, Username: globalDisplayName(decision.Username), Name: globalDisplayName(decision.Name), Avatar: globalAvatar(decision.Avatar)}, claims, nil
+}
+
+func globalAvatar(value string) string {
+	if len(value) > 4096 || !utf8.ValidString(value) || strings.ContainsFunc(value, unicode.IsControl) {
+		return ""
+	}
+	u, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Opaque != "" {
+		return ""
+	}
+	return u.String()
 }
 
 // globalDisplayName 的异常显示值只被省略，不改变已核实的准入和权限。

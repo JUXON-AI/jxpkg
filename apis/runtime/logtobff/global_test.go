@@ -64,7 +64,7 @@ func globalFixture(t *testing.T) (*Runtime, *session, *globalAuthorityFixture, *
 			t.Error("close fixture store")
 		}
 	})
-	authority := &globalAuthorityFixture{decision: GlobalAccess{Allowed: true, Permissions: []string{"credits:read", "identity:read"}, Username: "admin-one", Name: "Synthetic admin"}}
+	authority := &globalAuthorityFixture{decision: GlobalAccess{Allowed: true, Permissions: []string{"credits:read", "identity:read"}, Username: "admin-one", Name: "Synthetic admin", Avatar: "https://avatar.invalid/one.png"}}
 	runtime := &Runtime{config: Config{Endpoint: upstream.URL, Origin: "http://localhost:5190", ClientID: "client-one", ClientSecret: "fixture-secret", APIResource: "https://admin.invalid/api", Scopes: []string{"openid", "profile", "offline_access", "credits:read", "mcphub:read"}}, http: upstream.Client(), keys: oidc.NewRemoteKeySet(context.Background(), upstream.URL+"/oidc/jwks"), store: store, globalAuthority: authority}
 	now := time.Now()
 	value := &session{Subject: "user-one", SDK: map[string]string{client.StorageKeyRefreshToken: "refresh-fixture", client.StorageKeyIdToken: f.signed(jwt.MapClaims{"sub": "user-one", "aud": "client-one", "iss": upstream.URL + "/oidc", "exp": now.Add(time.Hour).Unix()})}, CSRF: "synthetic-csrf", PolicyVersion: sessionPolicyVersion, AuthenticatedAt: now, IdleUntil: now.Add(time.Minute), AbsoluteUntil: now.Add(sessionAbsoluteLifetime), Until: now.Add(time.Minute)}
@@ -79,7 +79,7 @@ func TestGlobalDecisionSeparatesAllowlistAndPermissions(t *testing.T) {
 	if strings.Join(p.Permissions, " ") != "credits:read" || data["authenticated"] != true {
 		t.Fatal("permission intersection incorrect")
 	}
-	if user := data["user"].(profile); user.Name != "Synthetic admin" || user.Username != "admin-one" || user.Subject != "user-one" {
+	if user := data["user"].(profile); user.Name != "Synthetic admin" || user.Username != "admin-one" || user.Subject != "user-one" || user.Avatar != "https://avatar.invalid/one.png" {
 		t.Fatal("display metadata source changed")
 	}
 	authority.decision = GlobalAccess{Allowed: true}
@@ -97,6 +97,14 @@ func TestGlobalDecisionSeparatesAllowlistAndPermissions(t *testing.T) {
 	authority.err = ErrGlobalAccessDenied
 	if _, _, e = a.globalSnapshot(context.Background(), s); classify(e).status != 403 {
 		t.Fatal("explicit deny ignored")
+	}
+}
+
+func TestGlobalAvatarOmitsInvalidDisplayURLs(t *testing.T) {
+	for _, value := range []string{"", "/one.png", "http://avatar.invalid/one.png", "data:image/png;base64,x", "https://user@avatar.invalid/a", "https:///one.png", "https://avatar.invalid/\n", "https://avatar.invalid/" + strings.Repeat("a", 4096)} {
+		if globalAvatar(value) != "" {
+			t.Fatal("invalid avatar accepted")
+		}
 	}
 }
 
