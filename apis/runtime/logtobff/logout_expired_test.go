@@ -39,7 +39,7 @@ func TestLogoutUnauthorizedClearsOnlyRejectedSession(t *testing.T) {
 			if callAuth(a, "GET", "/auth/session", "", newCookie, "").Code != http.StatusOK {
 				t.Fatal("independent session was removed")
 			}
-			if f.logoutCalls != 1 || f.revokeCalls != 0 || f.endSessionCalls != 0 {
+			if f.logoutCalls.Load() != 1 || f.revokeCalls != 0 || f.endSessionCalls != 0 {
 				t.Fatal("rejected logout retried or mutated a newer SSO session")
 			}
 		})
