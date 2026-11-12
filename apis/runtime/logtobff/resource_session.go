@@ -55,3 +55,18 @@ func (r *resourceReadClaims) issue(ctx context.Context, org string) (string, err
 	r.before.SDK = maps.Clone(current.SDK)
 	return raw, tokenErr
 }
+
+// provisionalSessionDeadline bounds an unpublished resource-read result by the
+// immutable absolute deadline. Its final idle limit comes from finishIdentity's
+// latest fenced record, so a stale read cannot invalidate a concurrent renewal.
+// Other owners continue checking their acquired snapshot directly.
+func (a *Runtime) provisionalSessionDeadline(ctx context.Context, value *session) (time.Time, error) {
+	issuer, ok := ctx.Value(resourceReadClaimsKey{}).(*resourceReadClaims)
+	if ok && issuer.runtime == a && issuer.value == value {
+		if err := validateSessionSchema(value, a.store.nowTime()); err != nil {
+			return time.Time{}, err
+		}
+		return value.AbsoluteUntil, nil
+	}
+	return sessionDeadline(value, a.store.nowTime())
+}

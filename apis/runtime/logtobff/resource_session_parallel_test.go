@@ -7,11 +7,24 @@ import (
 	"net/http/httptest"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
+
+// pendingResourceRead owns one blocked synthetic request and its joined cleanup.
+type pendingResourceRead struct {
+	runtime       *Runtime
+	authority     *fakeAuthority
+	cookie        *http.Cookie
+	original      *session
+	release       chan struct{}
+	result        chan int
+	businessCalls atomic.Int64
+	releaseOnce   sync.Once
+}
 
 // TestResourceSessionParallelOnlineChecks verifies a slow authority read does
 // not serialize other reads. Authority and Redis contain only synthetic data.
@@ -125,81 +138,115 @@ func TestResourcePrincipalRespectsEarlierSessionDeadline(t *testing.T) {
 	}
 }
 
-// TestResourceReadRejectsChangesDuringOnlineCheck keeps pending reads subject to
-// current logout, identity, permission and SDK state.
-func TestResourceReadRejectsChangesDuringOnlineCheck(t *testing.T) {
-	for _, change := range []string{"logout", "revision", "scope", "sdk_then_invalid"} {
-		t.Run(change, func(t *testing.T) {
-			var (
-				a, authority = fixtureRuntime(t)
-				cookie       = loginFixture(t, a, authority)
-				original     = renewalReadSession(t, a, cookie)
-				router       = gin.New()
-				hits         = 0
-			)
-			router.POST("/protected", a.Require("manage:credits"), func(c *gin.Context) { hits++; c.Status(http.StatusNoContent) })
-			var (
-				observer = observeIdentity(t, a, true /* block */)
-				done     = make(chan int, 1)
-			)
-			go func() {
-				defer close(done)
-				request := httptest.NewRequest("POST", a.config.Origin+"/protected", nil)
-				request.AddCookie(cookie)
-				request.Header.Set("Origin", a.config.Origin)
-				request.Header.Set("X-CSRF-Token", original.CSRF)
-				request.Header.Set("X-Organization-ID", "org-one")
-				request.Header.Set("X-Organization-Revision", "1")
-				response := httptest.NewRecorder()
-				router.ServeHTTP(response, request)
-				done <- response.Code
-			}()
-			defer func() {
-				close(observer.release)
-				for range done {
-				}
-			}()
-			waitForAuthority(t, observer.entered)
-			var (
-				want    = http.StatusConflict
-				rotated *session
-			)
-			switch change {
-			case "scope":
-				authority.readOnly = true
-				want = http.StatusForbidden
-			case "sdk_then_invalid":
-				rotated = rotateStoredSDK(t, a, cookie, "synthetic-concurrent-resource-refresh")
-				authority.identityInvalid = true
-			default:
-				current, owner, err := a.store.acquire(context.Background(), cookie.Value)
-				if err != nil {
-					t.Fatal(err)
-				}
-				current.Revision = "2"
-				if err := a.store.commit(context.Background(), cookie.Value, owner, cookie.Value, current, change == "logout"); err != nil {
-					t.Fatal(err)
-				}
-				if change == "logout" {
-					want = http.StatusUnauthorized
-				}
-			}
-			observer.release <- struct{}{}
-			if got := <-done; got != want || hits != 0 {
-				t.Fatalf("pending %s read HTTP %d, want %d, business calls %d", change, got, want, hits)
-			}
-			switch change {
-			case "logout":
-				if _, _, err := a.store.acquire(context.Background(), cookie.Value); !errors.Is(err, _errMissing) {
-					t.Fatal("pending read recreated a logged-out session")
-				}
-			case "revision":
-				if current := renewalReadSession(t, a, cookie); current.Revision != "2" {
-					t.Fatal("pending read rewound the selected identity")
-				}
-			case "sdk_then_invalid":
-				assertConcurrentSDKPreserved(t, a, cookie, original.CSRF, rotated)
-			}
-		})
+// TestResourceReadRejectsLogoutDuringOnlineCheck prevents a pending read from reviving logout.
+func TestResourceReadRejectsLogoutDuringOnlineCheck(t *testing.T) {
+	var (
+		pending             = startPendingResourceRead(t)
+		current, owner, err = pending.runtime.store.acquire(context.Background(), pending.cookie.Value)
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
+	current.Revision = "2"
+	if err := pending.runtime.store.commit(context.Background(), pending.cookie.Value, owner, pending.cookie.Value, current, true /* remove */); err != nil {
+		t.Fatal(err)
+	}
+	pending.finish(t, http.StatusUnauthorized)
+	_, owner, err = pending.runtime.store.acquire(context.Background(), pending.cookie.Value)
+	if err == nil {
+		pending.runtime.store.release(context.Background(), pending.cookie.Value, owner)
+	}
+	if !errors.Is(err, _errMissing) {
+		t.Fatal("pending read recreated a logged-out session")
+	}
+}
+
+// TestResourceReadRejectsRevisionDuringOnlineCheck prevents an old read from rewinding identity.
+func TestResourceReadRejectsRevisionDuringOnlineCheck(t *testing.T) {
+	var (
+		pending             = startPendingResourceRead(t)
+		current, owner, err = pending.runtime.store.acquire(context.Background(), pending.cookie.Value)
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current.Revision = "2"
+	if err := pending.runtime.store.commit(context.Background(), pending.cookie.Value, owner, pending.cookie.Value, current, false /* remove */); err != nil {
+		t.Fatal(err)
+	}
+	pending.finish(t, http.StatusConflict)
+	if current := renewalReadSession(t, pending.runtime, pending.cookie); current.Revision != "2" {
+		t.Fatal("pending read rewound the selected identity")
+	}
+}
+
+// TestResourceReadRejectsScopeRevocationDuringOnlineCheck requires current resource permissions.
+func TestResourceReadRejectsScopeRevocationDuringOnlineCheck(t *testing.T) {
+	pending := startPendingResourceRead(t)
+	pending.authority.readOnly = true
+	pending.finish(t, http.StatusForbidden)
+}
+
+// TestResourceReadRejectsStaleFailureAfterSDKRefresh preserves a newer SDK after a late identity failure.
+func TestResourceReadRejectsStaleFailureAfterSDKRefresh(t *testing.T) {
+	var (
+		pending = startPendingResourceRead(t)
+		rotated = rotateStoredSDK(t, pending.runtime, pending.cookie, "synthetic-concurrent-resource-refresh")
+	)
+	pending.authority.identityInvalid = true
+	pending.finish(t, http.StatusConflict)
+	assertConcurrentSDKPreserved(t, pending.runtime, pending.cookie, pending.original.CSRF, rotated)
+}
+
+// startPendingResourceRead starts one real protected route and blocks its online identity read.
+func startPendingResourceRead(t *testing.T) *pendingResourceRead {
+	t.Helper()
+	var (
+		a, authority = fixtureRuntime(t)
+		cookie       = loginFixture(t, a, authority)
+		original     = renewalReadSession(t, a, cookie)
+		router       = gin.New()
+		pending      = &pendingResourceRead{runtime: a, authority: authority, cookie: cookie, original: original}
+	)
+	router.POST("/protected", a.Require("manage:credits"), func(c *gin.Context) {
+		pending.businessCalls.Add(1)
+		c.Status(http.StatusNoContent)
+	})
+	observer := observeIdentity(t, a, true /* block */)
+	pending.release = observer.release
+	pending.result = make(chan int, 1)
+	// This cleanup runs before fixtureRuntime closes the BFF and its Redis client.
+	t.Cleanup(func() {
+		pending.unblock()
+		for range pending.result {
+		}
+	})
+	go func() {
+		defer close(pending.result)
+		request := httptest.NewRequest(http.MethodPost, a.config.Origin+"/protected", nil)
+		request.AddCookie(cookie)
+		request.Header.Set("Origin", a.config.Origin)
+		request.Header.Set("X-CSRF-Token", original.CSRF)
+		request.Header.Set("X-Organization-ID", "org-one")
+		request.Header.Set("X-Organization-Revision", "1")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		pending.result <- response.Code
+	}()
+	waitForAuthority(t, observer.entered)
+	return pending
+}
+
+// finish releases the authority gate and verifies rejection before business dispatch.
+func (p *pendingResourceRead) finish(t *testing.T, status int) {
+	t.Helper()
+	p.unblock()
+	if got := <-p.result; got != status || p.businessCalls.Load() != 0 {
+		t.Fatalf("pending resource read HTTP %d, want %d, business calls %d", got, status, p.businessCalls.Load())
+	}
+}
+
+// unblock releases the request once, whether assertions or test cleanup finish first.
+func (p *pendingResourceRead) unblock() {
+	p.releaseOnce.Do(func() { close(p.release) })
 }

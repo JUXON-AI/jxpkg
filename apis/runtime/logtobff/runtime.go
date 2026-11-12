@@ -312,7 +312,7 @@ func (a *Runtime) Require(scopes ...string) gin.HandlerFunc {
 					return problem(403, "insufficient_scope")
 				}
 			}
-			deadline, err := sessionDeadline(s, a.store.nowTime())
+			deadline, err := a.provisionalSessionDeadline(r.Context(), s)
 			if err != nil {
 				return classify(err)
 			}

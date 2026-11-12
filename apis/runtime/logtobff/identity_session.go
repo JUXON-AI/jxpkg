@@ -257,13 +257,17 @@ func (a *Runtime) withReadSession(next sessionHandler, authorized ...http.Handle
 			return
 		}
 		if !outcome.remove {
-			if deadline, deadlineErr := sessionDeadline(value, a.store.nowTime()); deadlineErr == nil {
-				if data, ok := outcome.data.(map[string]any); ok {
-					data["expires_at"] = deadline.Unix()
-				}
-				if outcome.principal != nil && outcome.principal.ExpiresAt > deadline.Unix() {
-					outcome.principal.ExpiresAt = deadline.Unix()
-				}
+			deadline, deadlineErr := sessionDeadline(value, a.store.nowTime())
+			if deadlineErr != nil {
+				failed := classify(deadlineErr)
+				fail(w, r, failed.status, "session_changed_or_unavailable", deadlineErr)
+				return
+			}
+			if data, ok := outcome.data.(map[string]any); ok {
+				data["expires_at"] = deadline.Unix()
+			}
+			if outcome.principal != nil && outcome.principal.ExpiresAt > deadline.Unix() {
+				outcome.principal.ExpiresAt = deadline.Unix()
 			}
 		}
 		if outcome.remove {
@@ -285,22 +289,6 @@ func (a *Runtime) withReadSession(next sessionHandler, authorized ...http.Handle
 		}
 		replyReadSession(w, r, outcome)
 	}
-}
-
-// replyReadSession owns the final read response and its single safe rejection
-// record, including preparation errors returned after begin has committed.
-func replyReadSession(w http.ResponseWriter, r *http.Request, outcome result) {
-	if outcome.status >= http.StatusBadRequest && !outcome.failureHandled {
-		fields := []any{"status", outcome.status}
-		if detail, ok := outcome.data.(map[string]string); ok {
-			fields = append(fields, "reason", detail["error"])
-		}
-		if outcome.cause != nil {
-			fields = append(fields, sessionFailureFields(outcome.cause)...)
-		}
-		logs.WarnContextw(sessionDiagnosticContext(r.Context()), "logtobff.request.rejected", fields...)
-	}
-	reply(w, r, outcome.status, outcome.data)
 }
 
 func (a *Runtime) revalidateIdentity(ctx context.Context, id string, expected Principal, scopes []string) error {
@@ -345,4 +333,20 @@ func (a *Runtime) revalidateIdentity(ctx context.Context, id string, expected Pr
 		return ErrAuthorizationChanged
 	}
 	return nil
+}
+
+// replyReadSession owns the final read response and its single safe rejection
+// record, including preparation errors returned after begin has committed.
+func replyReadSession(w http.ResponseWriter, r *http.Request, outcome result) {
+	if outcome.status >= http.StatusBadRequest && !outcome.failureHandled {
+		fields := []any{"status", outcome.status}
+		if detail, ok := outcome.data.(map[string]string); ok {
+			fields = append(fields, "reason", detail["error"])
+		}
+		if outcome.cause != nil {
+			fields = append(fields, sessionFailureFields(outcome.cause)...)
+		}
+		logs.WarnContextw(sessionDiagnosticContext(r.Context()), "logtobff.request.rejected", fields...)
+	}
+	reply(w, r, outcome.status, outcome.data)
 }

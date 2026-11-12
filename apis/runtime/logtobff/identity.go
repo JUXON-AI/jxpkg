@@ -501,7 +501,7 @@ func (a *Runtime) sessionView(r *http.Request, value *session) result {
 }
 
 func (a *Runtime) sessionViewData(ctx context.Context, value *session, user profile, rows []organization) (map[string]any, error) {
-	deadline, err := sessionDeadline(value, a.store.nowTime())
+	deadline, err := a.provisionalSessionDeadline(ctx, value)
 	if err != nil {
 		return nil, err
 	}
