@@ -41,7 +41,10 @@ func assertSessionRedisFailureDiagnostic(t *testing.T, resource, reason string) 
 	path := captureSessionDiagnostics(t)
 	private := "private-redis-fixture"
 	cause := &net.OpError{Op: "dial", Net: "tcp", Addr: &net.TCPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 6379}, Err: fmt.Errorf("%s: %w", private, syscall.ECONNREFUSED)}
-	s, err := newStore("unused.invalid:6379", private, testOpaque(t), "private-prefix:")
+	s, err := newStore(Config{
+		RedisAddress: "unused.invalid:6379", RedisPassword: private,
+		SessionKey: testOpaque(t), Namespace: "private-prefix",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

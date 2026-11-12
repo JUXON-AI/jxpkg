@@ -12,7 +12,9 @@ import (
 
 // RedisConfig redis 连接属性
 type RedisConfig struct {
-	Addr     string `yaml:"addr" json:"addr"`
+	Addr string `yaml:"addr" json:"addr"`
+	// Username 是可选的 Redis ACL 用户名；空值使用默认用户。
+	Username string `yaml:"username,omitempty" json:"username,omitempty"`
 	Password string `yaml:"password" json:"password"`
 	DB       int    `yaml:"db" json:"db"`
 }
@@ -32,6 +34,7 @@ func loadRedis(group, key string) (*redis.Client, error) {
 
 	return connectRedis(&redis.Options{
 		Addr:     cfg.Addr,
+		Username: cfg.Username,
 		Password: cfg.Password,
 		DB:       cfg.DB,
 	})
@@ -40,6 +43,9 @@ func loadRedis(group, key string) (*redis.Client, error) {
 func connectRedis(cfg *redis.Options) (*redis.Client, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("redis config is nil")
+	}
+	if cfg.DB < 0 || (cfg.Username != "" && cfg.Password == "") {
+		return nil, fmt.Errorf("invalid Redis configuration")
 	}
 
 	rds := redis.NewClient(cfg)

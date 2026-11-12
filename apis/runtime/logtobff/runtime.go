@@ -47,8 +47,12 @@ type Config struct {
 	Namespace string `json:"namespace"`
 	// RedisAddress 来自启动配置，不接受请求覆盖。
 	RedisAddress string `json:"redisAddress"`
+	// RedisUsername 是可选的 Redis ACL 用户名；空值使用默认用户。
+	RedisUsername string `json:"redisUsername,omitempty"`
 	// RedisPassword 仅用于本运行时持有的 Redis 连接。
 	RedisPassword string `json:"redisPassword"`
+	// RedisDB 是会话数据的逻辑库编号，缺省为 0。
+	RedisDB int `json:"redisDB,omitempty"`
 	// SessionKey 是 32 字节 base64url 会话加密密钥。
 	SessionKey string `json:"sessionKey"`
 	// AllowLocalHTTP 只允许显式 local 配置中的环回地址；生产配置默认 HTTPS。
@@ -161,7 +165,7 @@ func New(ctx context.Context, cfg Config) (*Runtime, error) {
 	if provider.Claims(&metadata) != nil || !strings.HasPrefix(metadata.JWKS, cfg.Endpoint+"/") || !strings.HasPrefix(provider.Endpoint().AuthURL, cfg.Endpoint+"/") || !strings.HasPrefix(provider.Endpoint().TokenURL, cfg.Endpoint+"/") {
 		return nil, errors.New("Logto discovery invalid")
 	}
-	storage, err := newStore(cfg.RedisAddress, cfg.RedisPassword, cfg.SessionKey, cfg.Namespace+":")
+	storage, err := newStore(cfg)
 	if err != nil {
 		return nil, errors.New("session storage configuration invalid")
 	}

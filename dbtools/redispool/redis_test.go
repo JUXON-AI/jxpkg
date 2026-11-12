@@ -90,3 +90,15 @@ func TestConnectRedisRejectsNilConfig(t *testing.T) {
 		t.Fatalf("connectRedis(nil) error = %v, want redis config is nil", err)
 	}
 }
+
+func TestConnectRedisRejectsInvalidSharedConfiguration(t *testing.T) {
+	for _, options := range []redis.Options{
+		{Addr: "unused.invalid:6379", DB: -1},
+		{Addr: "unused.invalid:6379", Username: "test-app"},
+	} {
+		client, err := connectRedis(&options)
+		if client != nil || err == nil || err.Error() != "invalid Redis configuration" {
+			t.Fatal("invalid Redis settings were not rejected before connecting")
+		}
+	}
+}
