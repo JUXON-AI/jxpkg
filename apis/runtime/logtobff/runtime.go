@@ -216,7 +216,7 @@ func (a *Runtime) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/login", a.login)
 	mux.HandleFunc("GET /auth/auto-login", a.autoLogin)
 	mux.HandleFunc("GET /auth/callback", a.callback)
-	mux.HandleFunc("GET /auth/session", a.withSession(a.sessionView))
+	mux.HandleFunc("GET /auth/session", a.withReadSession(a.sessionView))
 	mux.HandleFunc("POST /auth/session", a.withSession(a.renewSession))
 	mux.HandleFunc("GET /auth/switch-organization", a.login)
 	mux.HandleFunc("POST /auth/logout", a.withSession(a.logout))
@@ -266,6 +266,8 @@ type result struct {
 	rotate, remove bool
 	redirect       string
 	principal      *Principal
+	// cause stays private and is rendered only through bounded diagnostics.
+	cause error
 	// failureHandled means the handler already recorded its final rejection reason.
 	failureHandled bool
 }
@@ -274,7 +276,8 @@ type sessionHandler func(*http.Request, *session) result
 func problem(status int, code string) result {
 	return result{status: status, data: map[string]string{"error": code}}
 }
-func classify(err error) result {
+func classify(err error) (outcome result) {
+	defer func() { outcome.cause = err }()
 	if errors.Is(err, _errMissing) {
 		return problem(401, "session_expired")
 	}
@@ -302,7 +305,7 @@ func (a *Runtime) accountCenter(r *http.Request, s *session) result {
 func (a *Runtime) Require(scopes ...string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		called := false
-		a.withSession(func(r *http.Request, s *session) result {
+		a.withReadSession(func(r *http.Request, s *session) result {
 			if !a.csrfValid(r, s) {
 				return problem(403, "csrf_rejected")
 			}
@@ -338,7 +341,7 @@ func (a *Runtime) Require(scopes ...string) gin.HandlerFunc {
 					return problem(403, "insufficient_scope")
 				}
 			}
-			deadline, err := sessionDeadline(s, a.store.nowTime())
+			deadline, err := a.provisionalSessionDeadline(r.Context(), s)
 			if err != nil {
 				return classify(err)
 			}
@@ -359,7 +362,7 @@ func (a *Runtime) Require(scopes ...string) gin.HandlerFunc {
 // withSession 在发布业务主体前保存刷新凭据并释放有界租约；业务逻辑不持有认证租约。
 func (a *Runtime) withSession(next sessionHandler, authorized ...http.Handler) http.HandlerFunc {
 	if a.config.APIResource == "" {
-		return a.withIdentitySession(next, authorized...)
+		return a.withReadSession(next, authorized...)
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
