@@ -9,7 +9,7 @@ import (
 // BalancePath 是员工 wallet 快照的独立工作负载入口。
 const BalancePath = "/internal/credits/balance"
 
-// Balance 仅包含 New API 原始 wallet 单位，不包含调用凭据。
+// Balance 包含 New API 原始 wallet 单位和可选的 Credits 积分展示值，不包含调用凭据。
 type Balance struct {
 	// State 为 ready 或 pending；pending 不表示零余额。
 	State string `json:"state"`
@@ -17,12 +17,17 @@ type Balance struct {
 	Quota int64 `json:"quota"`
 	// UsedQuota 是累计已用额度，不是本周消耗。
 	UsedQuota int64 `json:"used_quota"`
+	// Points 由 Credits 按当前配置换算；旧服务或待开通账户可不提供。
+	Points *BalancePoints `json:"points,omitempty"`
 }
 
 // ValidateBalance 验证状态及浏览器可精确表示的原始整数。
 func ValidateBalance(b Balance) error {
 	const maxExactInteger = int64(1<<53 - 1)
 	if (b.State != "ready" && b.State != "pending") || b.Quota < -maxExactInteger || b.Quota > maxExactInteger || b.UsedQuota < 0 || b.UsedQuota > maxExactInteger {
+		return ErrUnavailable
+	}
+	if b.Points != nil && (b.State != "ready" || !b.Points.valid()) {
 		return ErrUnavailable
 	}
 	return nil
@@ -37,7 +42,7 @@ func (c *Client) GetBalance(ctx context.Context, subject Subject) (Balance, erro
 	if wire.State == nil || wire.Quota == nil || wire.UsedQuota == nil {
 		return Balance{}, ErrUnavailable
 	}
-	b := Balance{State: *wire.State, Quota: *wire.Quota, UsedQuota: *wire.UsedQuota}
+	b := Balance{State: *wire.State, Quota: *wire.Quota, UsedQuota: *wire.UsedQuota, Points: wire.Points}
 	if err := ValidateBalance(b); err != nil {
 		return Balance{}, err
 	}
@@ -48,6 +53,7 @@ type balanceWire struct {
 	State     *string
 	Quota     *int64
 	UsedQuota *int64
+	Points    *BalancePoints
 }
 
 // UnmarshalJSON 拒绝重复、大小写歧义和未知余额字段，不将缺失字段解释为零。
@@ -57,7 +63,7 @@ func (b *balanceWire) UnmarshalJSON(raw []byte) error {
 	if err != nil || opening != json.Delim('{') {
 		return ErrUnavailable
 	}
-	seen := make(map[string]bool, 3)
+	seen := make(map[string]bool, 4)
 	for d.More() {
 		token, err := d.Token()
 		name, ok := token.(string)
@@ -72,6 +78,10 @@ func (b *balanceWire) UnmarshalJSON(raw []byte) error {
 			err = d.Decode(&b.Quota)
 		case "used_quota":
 			err = d.Decode(&b.UsedQuota)
+		case "points":
+			var points BalancePoints
+			err = d.Decode(&points)
+			b.Points = &points
 		default:
 			return ErrUnavailable
 		}

@@ -155,6 +155,9 @@ func (c *Client) call(ctx context.Context, subject Subject, path string, result 
 		return unavailableCause(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if path == BalancePath {
+		req.Header.Set("X-JX-Credits-Points", "1")
+	}
 	if id := requestid.FromContext(ctx); id != "" {
 		req.Header.Set("X-Request-Id", id)
 	}

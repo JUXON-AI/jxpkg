@@ -417,7 +417,7 @@ JXPKG_TEST_S3_REGION
 
 ## 员工余额查询
 
-`credits.Client.GetBalance(ctx, credits.Subject{OrganizationID: organizationID, UserID: userID})` 复用当前 mTLS 客户端，通过 `/internal/credits/balance` 查询原始 wallet。`credits.Subject` 不接受旧数字公司/UIN 回退，必须同时提供已验证的 Logto 组织与用户主体。`credits.Balance` 包含 state、quota、used_quota，不领取 default Key、不保存额度或扣费；缺失、重复或畸形响应失败关闭，pending 不代表零余额。本分支已定义新的字符串主体协议；额度服务的工作负载入口和 JXX 调用方仍须随迁移升级，旧数字接口不能直接互通。
+`credits.Client.GetBalance(ctx, credits.Subject{OrganizationID: organizationID, UserID: userID})` 复用当前 mTLS 客户端，通过 `/internal/credits/balance` 查询 wallet。`credits.Subject` 不接受旧数字公司/UIN 回退，必须同时提供已验证的 Logto 组织与用户主体。`credits.Balance` 保留 `state`、`quota`、`used_quota`，不领取 default Key、不保存额度或扣费；缺失必要字段、重复或畸形响应失败关闭，pending 不代表零余额。新版客户端随余额请求发送 `X-JX-Credits-Points: 1`，可接收 Credits 计算的 `points`（`balance`、`used`、`quota_per_point`、`unit`）；旧服务未提供时 `Points` 为 nil。浏览器共享余额接口也透传此可选字段，调用方无需自行换算。
 
 若请求 context 中存在与目标 `Subject` 完全匹配的 `identity.DisplayNames`，credits 请求会在原主体字段旁追加顶层 `display_names`；缺失或不匹配时保持原 JSON 字节形状。该 metadata 不设置 `Authorization`，也不改变主体校验或访问决策。
 

@@ -28,13 +28,13 @@ type GetMyModelBalanceRequest struct {
 type GetMyModelBalanceResponse struct {
 	// BaseResponse 提供错误码与关联 ID。
 	apiobj.BaseResponse
-	// Response 保留远端原始单位。
+	// Response 保留原始额度及 Credits 提供的可选积分展示值。
 	Response BrowserBalance `json:"response"`
 }
 
 // BrowserBalance 回传已验证的主体，使客户端能够拒绝身份切换时的迟到响应。
 type BrowserBalance struct {
-	// Balance 是原始 wallet 快照。
+	// Balance 是 wallet 快照及可选积分展示值。
 	clientcredits.Balance
 	// OrganizationID 来自当前已验证 Session，不来自请求。
 	OrganizationID string `json:"organization_id"`
