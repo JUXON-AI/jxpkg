@@ -156,7 +156,10 @@ func mergeIdentityUpdate(current, before, value *session, now time.Time) error {
 	return nil
 }
 
-func (a *Runtime) withIdentitySession(next sessionHandler, authorized ...http.Handler) http.HandlerFunc {
+// withReadSession keeps mandatory online authority reads outside the lease.
+// Resource credentials are minted at their original point in the check under
+// their own fenced lease, before the final identity merge publishes a result.
+func (a *Runtime) withReadSession(next sessionHandler, authorized ...http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		if !a.validHost(r) {
@@ -184,10 +187,12 @@ func (a *Runtime) withIdentitySession(next sessionHandler, authorized ...http.Ha
 			fail(w, r, outcome.status, "session_unavailable", err)
 			return
 		}
-		var (
-			before  = *value
-			outcome = next(r.WithContext(ctx), value)
-		)
+		before := *value
+		before.SDK = maps.Clone(value.SDK)
+		if a.config.APIResource != "" {
+			ctx = context.WithValue(ctx, resourceReadClaimsKey{}, &resourceReadClaims{runtime: a, id: cookie.Value, before: &before, value: value})
+		}
+		outcome := next(r.WithContext(ctx), value)
 		if value.Organization != "" && (value.Organization != before.Organization || value.Revision != before.Revision) {
 			outcome.rotate = true
 		}
@@ -213,7 +218,7 @@ func (a *Runtime) withIdentitySession(next sessionHandler, authorized ...http.Ha
 				if data, ok := outcome.data.(map[string]any); ok {
 					data["expires_at"] = deadline.Unix()
 				}
-				if outcome.principal != nil {
+				if outcome.principal != nil && outcome.principal.ExpiresAt > deadline.Unix() {
 					outcome.principal.ExpiresAt = deadline.Unix()
 				}
 			}
@@ -236,7 +241,14 @@ func (a *Runtime) withIdentitySession(next sessionHandler, authorized ...http.Ha
 			return
 		}
 		if outcome.status >= 400 && !outcome.failureHandled {
-			logs.WarnContextw(r.Context(), "logtobff.request.rejected", "status", outcome.status)
+			fields := []any{"status", outcome.status}
+			if detail, ok := outcome.data.(map[string]string); ok {
+				fields = append(fields, "reason", detail["error"])
+			}
+			if outcome.cause != nil {
+				fields = append(fields, sessionFailureFields(outcome.cause)...)
+			}
+			logs.WarnContextw(sessionDiagnosticContext(r.Context()), "logtobff.request.rejected", fields...)
 		}
 		reply(w, r, outcome.status, outcome.data)
 	}
