@@ -8,10 +8,12 @@ import (
 // TestResourceReadIssuerFailureHasOneSafeDiagnostic checks the final response
 // boundary retains dependency metadata without exposing private state.
 func TestResourceReadIssuerFailureHasOneSafeDiagnostic(t *testing.T) {
-	a, authority := fixtureRuntime(t)
-	cookie := loginFixture(t, a, authority)
-	path := captureSessionDiagnostics(t)
-	fault := &rotationCommitFailureHook{}
+	var (
+		a, authority = fixtureRuntime(t)
+		cookie       = loginFixture(t, a, authority)
+		path         = captureSessionDiagnostics(t)
+		fault        = &rotationCommitFailureHook{}
+	)
 	a.store.db.AddHook(fault)
 	base := a.http.Transport
 	a.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -25,8 +27,10 @@ func TestResourceReadIssuerFailureHasOneSafeDiagnostic(t *testing.T) {
 	if response.Code != http.StatusServiceUnavailable || !fault.failed.Load() {
 		t.Fatalf("issuer dependency failure HTTP %d, injected=%t", response.Code, fault.failed.Load())
 	}
-	entries := readSessionDiagnostics(t, path, cookie.Value, a.store.prefix, "synthetic rotation fixture commit failure")
-	rejected := 0
+	var (
+		entries  = readSessionDiagnostics(t, path, cookie.Value, a.store.prefix, "synthetic rotation fixture commit failure")
+		rejected = 0
+	)
 	for _, entry := range entries {
 		if entry["msg"] != "logtobff.request.rejected" {
 			continue

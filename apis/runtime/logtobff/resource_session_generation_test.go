@@ -56,33 +56,37 @@ func TestResourceVerification401UsesIssuedSDKGeneration(t *testing.T) {
 					name = "new_generation"
 				}
 				t.Run(name, func(t *testing.T) {
-					a, authority := fixtureRuntime(t)
-					cookie := loginFixture(t, a, authority)
-					original := renewalReadSession(t, a, cookie)
-					var businessCalls atomic.Int64
-					router := gin.New()
+					var (
+						a, authority  = fixtureRuntime(t)
+						cookie        = loginFixture(t, a, authority)
+						original      = renewalReadSession(t, a, cookie)
+						businessCalls atomic.Int64
+						router        = gin.New()
+					)
 					router.POST("/protected", a.Require("manage:credits"), func(c *gin.Context) {
 						businessCalls.Add(1)
 						c.Status(http.StatusNoContent)
 					})
-					request := func() *httptest.ResponseRecorder {
-						if route == "session" {
-							return callAuth(a, http.MethodGet, "/auth/session", "", cookie, "")
+					var (
+						request = func() *httptest.ResponseRecorder {
+							if route == "session" {
+								return callAuth(a, http.MethodGet, "/auth/session", "", cookie, "")
+							}
+							r := httptest.NewRequest(http.MethodPost, a.config.Origin+"/protected", nil)
+							r.AddCookie(cookie)
+							r.Header.Set("Origin", a.config.Origin)
+							r.Header.Set("X-CSRF-Token", original.CSRF)
+							r.Header.Set("X-Organization-ID", "org-one")
+							r.Header.Set("X-Organization-Revision", "1")
+							response := httptest.NewRecorder()
+							router.ServeHTTP(response, r)
+							return response
 						}
-						r := httptest.NewRequest(http.MethodPost, a.config.Origin+"/protected", nil)
-						r.AddCookie(cookie)
-						r.Header.Set("Origin", a.config.Origin)
-						r.Header.Set("X-CSRF-Token", original.CSRF)
-						r.Header.Set("X-Organization-ID", "org-one")
-						r.Header.Set("X-Organization-Revision", "1")
-						response := httptest.NewRecorder()
-						router.ServeHTTP(response, r)
-						return response
-					}
-					release := make(chan struct{})
-					var releaseOnce sync.Once
-					unblock := func() { releaseOnce.Do(func() { close(release) }) }
-					gate := &resourceGenerationSignatureGate{base: a.keys, entered: make(chan string, 1), release: release}
+						release     = make(chan struct{})
+						releaseOnce sync.Once
+						unblock     = func() { releaseOnce.Do(func() { close(release) }) }
+						gate        = &resourceGenerationSignatureGate{base: a.keys, entered: make(chan string, 1), release: release}
+					)
 					a.keys = gate
 					pending := make(chan *httptest.ResponseRecorder, 1)
 					go func() {

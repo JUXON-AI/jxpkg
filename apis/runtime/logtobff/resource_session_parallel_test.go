@@ -18,10 +18,12 @@ import (
 func TestResourceSessionParallelOnlineChecks(t *testing.T) {
 	for _, route := range []string{"session", "protected"} {
 		t.Run(route, func(t *testing.T) {
-			a, authority := fixtureRuntime(t)
-			cookie := loginFixture(t, a, authority)
-			body := sessionBody(t, callAuth(a, "GET", "/auth/session", "", cookie, ""))
-			csrf, ok := body["csrf_token"].(string)
+			var (
+				a, authority = fixtureRuntime(t)
+				cookie       = loginFixture(t, a, authority)
+				body         = sessionBody(t, callAuth(a, "GET", "/auth/session", "", cookie, ""))
+				csrf, ok     = body["csrf_token"].(string)
+			)
 			if !ok || csrf == "" {
 				t.Fatal("resource fixture session is missing its CSRF token")
 			}
@@ -36,9 +38,11 @@ func TestResourceSessionParallelOnlineChecks(t *testing.T) {
 				}
 				c.Status(http.StatusNoContent)
 			})
-			observer := observeIdentity(t, a, true)
-			var pending sync.WaitGroup
-			responses := make(chan int, 2)
+			var (
+				observer  = observeIdentity(t, a, true /* block */)
+				pending   sync.WaitGroup
+				responses = make(chan int, 2)
+			)
 			defer func() { close(observer.release); pending.Wait() }()
 			for range 2 {
 				pending.Go(func() {
@@ -83,19 +87,23 @@ func TestResourceSessionParallelOnlineChecks(t *testing.T) {
 // TestResourcePrincipalRespectsEarlierSessionDeadline covers the session side
 // of the credential/session expiry minimum.
 func TestResourcePrincipalRespectsEarlierSessionDeadline(t *testing.T) {
-	a, authority := fixtureRuntime(t)
-	cookie := loginFixture(t, a, authority)
-	value, owner, err := a.store.acquire(context.Background(), cookie.Value)
+	var (
+		a, authority      = fixtureRuntime(t)
+		cookie            = loginFixture(t, a, authority)
+		value, owner, err = a.store.acquire(context.Background(), cookie.Value)
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(time.Minute)
 	value.IdleUntil, value.Until = deadline, deadline
-	if err := a.store.commit(context.Background(), cookie.Value, owner, cookie.Value, value, false); err != nil {
+	if err := a.store.commit(context.Background(), cookie.Value, owner, cookie.Value, value, false /* remove */); err != nil {
 		t.Fatal(err)
 	}
-	router := gin.New()
-	hits := 0
+	var (
+		router = gin.New()
+		hits   = 0
+	)
 	router.POST("/protected", a.Require("read:credits"), func(c *gin.Context) {
 		principal, ok := FromContext(c.Request.Context())
 		if !ok || principal.ExpiresAt != deadline.Unix() {
@@ -122,14 +130,18 @@ func TestResourcePrincipalRespectsEarlierSessionDeadline(t *testing.T) {
 func TestResourceReadRejectsChangesDuringOnlineCheck(t *testing.T) {
 	for _, change := range []string{"logout", "revision", "scope", "sdk_then_invalid"} {
 		t.Run(change, func(t *testing.T) {
-			a, authority := fixtureRuntime(t)
-			cookie := loginFixture(t, a, authority)
-			original := renewalReadSession(t, a, cookie)
-			router := gin.New()
-			hits := 0
+			var (
+				a, authority = fixtureRuntime(t)
+				cookie       = loginFixture(t, a, authority)
+				original     = renewalReadSession(t, a, cookie)
+				router       = gin.New()
+				hits         = 0
+			)
 			router.POST("/protected", a.Require("manage:credits"), func(c *gin.Context) { hits++; c.Status(http.StatusNoContent) })
-			observer := observeIdentity(t, a, true)
-			done := make(chan int, 1)
+			var (
+				observer = observeIdentity(t, a, true /* block */)
+				done     = make(chan int, 1)
+			)
 			go func() {
 				defer close(done)
 				request := httptest.NewRequest("POST", a.config.Origin+"/protected", nil)
@@ -148,8 +160,10 @@ func TestResourceReadRejectsChangesDuringOnlineCheck(t *testing.T) {
 				}
 			}()
 			waitForAuthority(t, observer.entered)
-			want := http.StatusConflict
-			var rotated *session
+			var (
+				want    = http.StatusConflict
+				rotated *session
+			)
 			switch change {
 			case "scope":
 				authority.readOnly = true

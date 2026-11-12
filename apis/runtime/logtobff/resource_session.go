@@ -20,8 +20,10 @@ type resourceReadClaims struct {
 // remains authoritative; a parallel logout or identity switch cannot be
 // overwritten by the older online-read snapshot.
 func (r *resourceReadClaims) issue(ctx context.Context, org string) (string, error) {
-	started := time.Now()
-	current, owner, err := r.runtime.store.acquire(ctx, r.id)
+	var (
+		started             = time.Now()
+		current, owner, err = r.runtime.store.acquire(ctx, r.id)
+	)
 	recordIdentityPhase(ctx, "bff.resource.acquire", started)
 	if err != nil {
 		return "", err
@@ -43,7 +45,7 @@ func (r *resourceReadClaims) issue(ctx context.Context, org string) (string, err
 	save, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 	defer cancel()
 	started = time.Now()
-	if err := r.runtime.store.commit(save, r.id, owner, r.id, current, false); err != nil {
+	if err := r.runtime.store.commit(save, r.id, owner, r.id, current, false /* remove */); err != nil {
 		recordIdentityPhase(ctx, "bff.resource.commit", started)
 		return "", err
 	}

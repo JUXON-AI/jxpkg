@@ -50,13 +50,36 @@ func applyIdentityPreparationFailure(value *session, err error) bool {
 	return remove
 }
 
+type beginIdentityPhase uint8
+
+const (
+	_beginIdentityAcquire beginIdentityPhase = iota + 1
+	_beginIdentityPrepare
+	_beginIdentityCommit
+)
+
+// beginIdentityError identifies the completed begin stage without losing the
+// underlying matchable cause or exposing provider and storage details.
+type beginIdentityError struct {
+	phase beginIdentityPhase
+	cause error
+}
+
+// Error returns a fixed description that cannot expose the wrapped cause.
+func (*beginIdentityError) Error() string { return "authentication session beginning failed" }
+
+// Unwrap preserves the caller's errors.Is and errors.As contracts.
+func (e *beginIdentityError) Unwrap() error { return e.cause }
+
 // beginIdentity 在短租约内持久化凭据轮换，随后释放租约供普通请求并行在线复核。
 func (a *Runtime) beginIdentity(ctx context.Context, id string) (*session, error) {
-	started := time.Now()
-	value, owner, err := a.store.acquire(ctx, id)
+	var (
+		started           = time.Now()
+		value, owner, err = a.store.acquire(ctx, id)
+	)
 	recordIdentityPhase(ctx, "bff.begin.acquire", started)
 	if err != nil {
-		return nil, err
+		return nil, &beginIdentityError{phase: _beginIdentityAcquire, cause: err}
 	}
 	committed := false
 	defer func() {
@@ -76,10 +99,13 @@ func (a *Runtime) beginIdentity(ctx context.Context, id string) (*session, error
 	commitErr := a.store.commit(save, id, owner, id, value, remove)
 	recordIdentityPhase(ctx, "bff.begin.commit", started)
 	if commitErr != nil {
-		return nil, commitErr
+		return nil, &beginIdentityError{phase: _beginIdentityCommit, cause: commitErr}
 	}
 	committed = true
-	return value, prepareErr
+	if prepareErr != nil {
+		return value, &beginIdentityError{phase: _beginIdentityPrepare, cause: prepareErr}
+	}
+	return value, nil
 }
 
 // finishIdentity 重新读取最新会话，只合并安全快照仍匹配的身份结果，不写回旧 SDK。
@@ -184,7 +210,24 @@ func (a *Runtime) withReadSession(next sessionHandler, authorized ...http.Handle
 		value, err := a.beginIdentity(ctx, cookie.Value)
 		if err != nil {
 			outcome := classify(err)
-			fail(w, r, outcome.status, "session_unavailable", err)
+			if a.config.APIResource == "" {
+				fail(w, r, outcome.status, "session_unavailable", err)
+				return
+			}
+			var beginning *beginIdentityError
+			if errors.As(err, &beginning) && beginning.phase == _beginIdentityCommit {
+				outcome = problem(http.StatusServiceUnavailable, "session_commit_failed")
+			} else if beginning != nil && beginning.phase == _beginIdentityPrepare {
+				// The preparation's removal has already committed. Acquisition
+				// and failed commits do not own browser-cookie revocation.
+				if outcome.status == http.StatusUnauthorized {
+					a.setCookie(w, a.config.CookieName, "", -1)
+				}
+			} else if outcome.status == http.StatusServiceUnavailable {
+				outcome = problem(http.StatusServiceUnavailable, "session_store_unavailable")
+			}
+			outcome.cause = err
+			replyReadSession(w, r, outcome)
 			return
 		}
 		before := *value
@@ -240,18 +283,24 @@ func (a *Runtime) withReadSession(next sessionHandler, authorized ...http.Handle
 			http.Redirect(w, r, outcome.redirect, 302)
 			return
 		}
-		if outcome.status >= 400 && !outcome.failureHandled {
-			fields := []any{"status", outcome.status}
-			if detail, ok := outcome.data.(map[string]string); ok {
-				fields = append(fields, "reason", detail["error"])
-			}
-			if outcome.cause != nil {
-				fields = append(fields, sessionFailureFields(outcome.cause)...)
-			}
-			logs.WarnContextw(sessionDiagnosticContext(r.Context()), "logtobff.request.rejected", fields...)
-		}
-		reply(w, r, outcome.status, outcome.data)
+		replyReadSession(w, r, outcome)
 	}
+}
+
+// replyReadSession owns the final read response and its single safe rejection
+// record, including preparation errors returned after begin has committed.
+func replyReadSession(w http.ResponseWriter, r *http.Request, outcome result) {
+	if outcome.status >= http.StatusBadRequest && !outcome.failureHandled {
+		fields := []any{"status", outcome.status}
+		if detail, ok := outcome.data.(map[string]string); ok {
+			fields = append(fields, "reason", detail["error"])
+		}
+		if outcome.cause != nil {
+			fields = append(fields, sessionFailureFields(outcome.cause)...)
+		}
+		logs.WarnContextw(sessionDiagnosticContext(r.Context()), "logtobff.request.rejected", fields...)
+	}
+	reply(w, r, outcome.status, outcome.data)
 }
 
 func (a *Runtime) revalidateIdentity(ctx context.Context, id string, expected Principal, scopes []string) error {
