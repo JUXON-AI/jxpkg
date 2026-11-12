@@ -5,6 +5,8 @@ import (
 	"testing"
 )
 
+// TestResourceReadIssuerFailureHasOneSafeDiagnostic checks the final response
+// boundary retains dependency metadata without exposing private state.
 func TestResourceReadIssuerFailureHasOneSafeDiagnostic(t *testing.T) {
 	a, authority := fixtureRuntime(t)
 	cookie := loginFixture(t, a, authority)

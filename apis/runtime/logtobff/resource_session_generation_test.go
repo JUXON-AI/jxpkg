@@ -25,6 +25,8 @@ type resourceGenerationSignatureGate struct {
 	release <-chan struct{}
 }
 
+// VerifySignature delays the first synthetic signature check and delegates all
+// later checks to the fixture's real verifier.
 func (g *resourceGenerationSignatureGate) VerifySignature(ctx context.Context, raw string) ([]byte, error) {
 	if !g.blocked.CompareAndSwap(false, true) {
 		return g.base.VerifySignature(ctx, raw)
@@ -42,6 +44,7 @@ func (g *resourceGenerationSignatureGate) VerifySignature(ctx context.Context, r
 	}
 }
 
+// TestResourceVerification401UsesIssuedSDKGeneration checks destructive fencing.
 // Losing the issued-generation snapshot would turn the first case into 409.
 // Ignoring a later committed SDK generation would delete the second case.
 func TestResourceVerification401UsesIssuedSDKGeneration(t *testing.T) {

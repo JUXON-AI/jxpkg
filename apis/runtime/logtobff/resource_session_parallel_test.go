@@ -13,15 +13,18 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// A slow mandatory authority read must not serialize unrelated reads from the
-// same browser. The fake authority and Redis fixture contain synthetic data.
+// TestResourceSessionParallelOnlineChecks verifies a slow authority read does
+// not serialize other reads. Authority and Redis contain only synthetic data.
 func TestResourceSessionParallelOnlineChecks(t *testing.T) {
 	for _, route := range []string{"session", "protected"} {
 		t.Run(route, func(t *testing.T) {
 			a, authority := fixtureRuntime(t)
 			cookie := loginFixture(t, a, authority)
 			body := sessionBody(t, callAuth(a, "GET", "/auth/session", "", cookie, ""))
-			csrf := body["csrf_token"].(string)
+			csrf, ok := body["csrf_token"].(string)
+			if !ok || csrf == "" {
+				t.Fatal("resource fixture session is missing its CSRF token")
+			}
 			router := gin.New()
 			router.POST("/protected", a.Require("read:credits"), func(c *gin.Context) {
 				principal, ok := FromContext(c.Request.Context())
@@ -77,6 +80,8 @@ func TestResourceSessionParallelOnlineChecks(t *testing.T) {
 	}
 }
 
+// TestResourcePrincipalRespectsEarlierSessionDeadline covers the session side
+// of the credential/session expiry minimum.
 func TestResourcePrincipalRespectsEarlierSessionDeadline(t *testing.T) {
 	a, authority := fixtureRuntime(t)
 	cookie := loginFixture(t, a, authority)
@@ -112,6 +117,8 @@ func TestResourcePrincipalRespectsEarlierSessionDeadline(t *testing.T) {
 	}
 }
 
+// TestResourceReadRejectsChangesDuringOnlineCheck keeps pending reads subject to
+// current logout, identity, permission and SDK state.
 func TestResourceReadRejectsChangesDuringOnlineCheck(t *testing.T) {
 	for _, change := range []string{"logout", "revision", "scope", "sdk_then_invalid"} {
 		t.Run(change, func(t *testing.T) {

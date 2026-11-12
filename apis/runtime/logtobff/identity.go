@@ -542,8 +542,10 @@ func (a *Runtime) verify(ctx context.Context, raw, org, clientID string) (*signe
 	return &claims, nil
 }
 func (a *Runtime) organizationClaims(ctx context.Context, value *session, org string) (*signedClaims, error) {
-	var raw string
-	var err error
+	var (
+		raw string
+		err error
+	)
 	if issuer, ok := ctx.Value(resourceReadClaimsKey{}).(*resourceReadClaims); ok && issuer.runtime == a && issuer.value == value {
 		raw, err = issuer.issue(ctx, org)
 	} else {
