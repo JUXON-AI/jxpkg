@@ -155,8 +155,7 @@ func New(ctx context.Context, cfg Config) (*Runtime, error) {
 	}
 	runtime, err := NewWithRedis(ctx, cfg, redisClient)
 	if err != nil {
-		_ = redisClient.Close()
-		return nil, err
+		return nil, errors.Join(err, redisClient.Close())
 	}
 	runtime.ownsRedis = true
 	return runtime, nil
