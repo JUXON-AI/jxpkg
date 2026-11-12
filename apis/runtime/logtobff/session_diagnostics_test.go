@@ -41,22 +41,19 @@ func assertSessionRedisFailureDiagnostic(t *testing.T, resource, reason string) 
 	path := captureSessionDiagnostics(t)
 	private := "private-redis-fixture"
 	cause := &net.OpError{Op: "dial", Net: "tcp", Addr: &net.TCPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 6379}, Err: fmt.Errorf("%s: %w", private, syscall.ECONNREFUSED)}
-	s, err := newStore("unused.invalid:6379", private, testOpaque(t), "private-prefix:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	s.db = redis.NewClient(&redis.Options{
+	client := redis.NewClient(&redis.Options{
 		Addr: "unused.invalid:6379", MaxRetries: -1,
 		Dialer: func(context.Context, string, string) (net.Conn, error) { return nil, cause },
 	})
 	t.Cleanup(func() {
-		if err := s.db.Close(); err != nil {
+		if err := client.Close(); err != nil {
 			t.Error(err)
 		}
 	})
+	s, err := newStore(Config{SessionKey: testOpaque(t), Namespace: "private-prefix"}, client)
+	if err != nil {
+		t.Fatal(err)
+	}
 	a := &Runtime{store: s, config: Config{Origin: "http://localhost:5180", CookieName: "session", APIResource: resource}}
 	r := httptest.NewRequest(http.MethodGet, "http://localhost:5180/auth/session", nil)
 	sessionID := testOpaque(t)

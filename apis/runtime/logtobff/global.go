@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/logto-io/go/v2/client"
+	"github.com/redis/go-redis/v9"
 )
 
 // GlobalAuthority 在线确认用户、应用准入和当前全局权限；失败必须关闭访问。
@@ -63,22 +64,46 @@ func GlobalFromContext(ctx context.Context) (GlobalPrincipal, bool) {
 // NewGlobal 复用 OIDC、加密 Redis Session、CSRF 与生命周期，启用独立全局准入模式。
 // 该模式不请求组织身份，不向员工上下文发布主体；旧 New 的组织行为不变。
 func NewGlobal(ctx context.Context, cfg Config, authority GlobalAuthority) (*Runtime, error) {
-	if authority == nil || cfg.APIResource == "" {
-		return nil, errors.New("global BFF requires authority and API resource")
-	}
-	for _, scope := range cfg.Scopes {
-		if strings.HasPrefix(scope, "urn:logto:scope:organization") {
-			return nil, errors.New("global BFF rejects organization scopes")
-		}
+	if err := validateGlobalConfig(cfg, authority); err != nil {
+		return nil, err
 	}
 	runtime, err := New(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	runtime.globalAuthority = authority
-	// GCM 的 AAD 和 Redis key 都绑定模式，即使误复用配置也不能跨模式消费。
-	runtime.store.prefix += "global:"
+	runtime.configureGlobal(authority)
 	return runtime, nil
+}
+
+// NewGlobalWithRedis 使用应用初始化的会话 Redis 客户端；应用负责关闭客户端。
+func NewGlobalWithRedis(ctx context.Context, cfg Config, authority GlobalAuthority, redisClient *redis.Client) (*Runtime, error) {
+	if err := validateGlobalConfig(cfg, authority); err != nil {
+		return nil, err
+	}
+	runtime, err := NewWithRedis(ctx, cfg, redisClient)
+	if err != nil {
+		return nil, err
+	}
+	runtime.configureGlobal(authority)
+	return runtime, nil
+}
+
+func validateGlobalConfig(cfg Config, authority GlobalAuthority) error {
+	if authority == nil || cfg.APIResource == "" {
+		return errors.New("global BFF requires authority and API resource")
+	}
+	for _, scope := range cfg.Scopes {
+		if strings.HasPrefix(scope, "urn:logto:scope:organization") {
+			return errors.New("global BFF rejects organization scopes")
+		}
+	}
+	return nil
+}
+
+func (a *Runtime) configureGlobal(authority GlobalAuthority) {
+	a.globalAuthority = authority
+	// GCM 的 AAD 和 Redis key 都绑定模式，即使误复用配置也不能跨模式消费。
+	a.store.prefix += "global:"
 }
 
 // globalCurrent 取 Token 权限与在线权限交集，每个授权判断最多执行一次。

@@ -18,6 +18,7 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 )
 
 var _opaquePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
@@ -47,8 +48,12 @@ type Config struct {
 	Namespace string `json:"namespace"`
 	// RedisAddress 来自启动配置，不接受请求覆盖。
 	RedisAddress string `json:"redisAddress"`
-	// RedisPassword 仅用于本运行时持有的 Redis 连接。
+	// RedisPassword 仅用于会话 Redis 连接，不得写入日志。
 	RedisPassword string `json:"redisPassword"`
+	// RedisUsername 是可选的 Redis ACL 用户名。
+	RedisUsername string `json:"redisUsername,omitempty"`
+	// RedisDB 是会话数据的逻辑库编号，缺省为 0。
+	RedisDB int `json:"redisDB,omitempty"`
 	// SessionKey 是 32 字节 base64url 会话加密密钥。
 	SessionKey string `json:"sessionKey"`
 	// AllowLocalHTTP 只允许显式 local 配置中的环回地址；生产配置默认 HTTPS。
@@ -100,7 +105,7 @@ type signatureVerifier interface {
 	VerifySignature(context.Context, string) ([]byte, error)
 }
 
-// Runtime 拥有一个产品的独立 Redis 会话命名空间及 OIDC 客户端。
+// Runtime 管理产品的会话命名空间和 OIDC 客户端。只有 New 创建的 Redis 连接由它关闭。
 type Runtime struct {
 	globalAuthority GlobalAuthority
 	config          Config
@@ -108,6 +113,7 @@ type Runtime struct {
 	keys            signatureVerifier
 	http            *http.Client
 	store           *store
+	ownsRedis       bool
 }
 
 type boundedTransport struct {
@@ -144,6 +150,29 @@ func validOrigin(raw string, local bool) bool {
 
 // New 验证固定配置并连接身份服务和 Redis；调用者负责 Close，无导入期副作用。
 func New(ctx context.Context, cfg Config) (*Runtime, error) {
+	redisClient, err := NewRedisClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	runtime, err := NewWithRedis(ctx, cfg, redisClient)
+	if err != nil {
+		_ = redisClient.Close()
+		return nil, err
+	}
+	runtime.ownsRedis = true
+	return runtime, nil
+}
+
+// NewWithRedis 使用应用初始化的会话 Redis 客户端；应用负责关闭该客户端。
+func NewWithRedis(ctx context.Context, cfg Config, redisClient *redis.Client) (*Runtime, error) {
+	if redisClient == nil {
+		return nil, errors.New("session Redis client is required")
+	}
+	opts := redisClient.Options()
+	if opts == nil || opts.Addr != cfg.RedisAddress || opts.Username != cfg.RedisUsername || opts.Password != cfg.RedisPassword || opts.DB != cfg.RedisDB ||
+		cfg.RedisDB < 0 || (cfg.RedisUsername != "" && cfg.RedisPassword == "") {
+		return nil, errors.New("session Redis client does not match configuration")
+	}
 	cfg.Scopes = slices.Clone(cfg.Scopes)
 	local := cfg.Environment == "local" && cfg.AllowLocalHTTP
 	if (cfg.AllowLocalHTTP && !local) || !validOrigin(cfg.Endpoint, local) || !validOrigin(cfg.Origin, local) || cfg.ClientID == "" || cfg.ClientSecret == "" || len(cfg.Scopes) == 0 || !_orgPattern.MatchString(cfg.Namespace) || !_orgPattern.MatchString(cfg.CookieName) || (strings.HasPrefix(cfg.CookieName, "__Host-") || strings.HasPrefix(cfg.CookieName, "__Secure-")) && !strings.HasPrefix(cfg.Origin, "https:") || cfg.RedisAddress == "" {
@@ -162,20 +191,24 @@ func New(ctx context.Context, cfg Config) (*Runtime, error) {
 	if provider.Claims(&metadata) != nil || !strings.HasPrefix(metadata.JWKS, cfg.Endpoint+"/") || !strings.HasPrefix(provider.Endpoint().AuthURL, cfg.Endpoint+"/") || !strings.HasPrefix(provider.Endpoint().TokenURL, cfg.Endpoint+"/") {
 		return nil, errors.New("Logto discovery invalid")
 	}
-	storage, err := newStore(cfg.RedisAddress, cfg.RedisPassword, cfg.SessionKey, cfg.Namespace+":")
+	storage, err := newStore(cfg, redisClient)
 	if err != nil {
 		return nil, errors.New("session storage configuration invalid")
 	}
 	if storage.db.Ping(discovery).Err() != nil {
-		_ = storage.db.Close()
 		return nil, errors.New("session store unavailable")
 	}
 
 	return &Runtime{config: cfg, http: client, verifier: provider.Verifier(&oidc.Config{ClientID: cfg.ClientID}), keys: oidc.NewRemoteKeySet(oidc.ClientContext(context.Background(), client), metadata.JWKS), store: storage}, nil
 }
 
-// Close 释放本运行时持有的 Redis 连接。
-func (a *Runtime) Close() error { return a.store.db.Close() }
+// Close 释放 New 创建的 Redis 客户端；注入的客户端仍由应用负责关闭。
+func (a *Runtime) Close() error {
+	if !a.ownsRedis {
+		return nil
+	}
+	return a.store.db.Close()
+}
 
 // Handler 提供固定 /auth 路由；GET session 只报告当前状态，可信的 POST
 // session 才滑动 idle，登录后仅返回经过校验的本站路径。

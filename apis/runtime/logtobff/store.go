@@ -83,8 +83,21 @@ func (s *store) opaque() (string, error) {
 	}
 	return base64.RawURLEncoding.EncodeToString(data), nil
 }
-func newStore(address, password, key, prefix string) (*store, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(key)
+
+// NewRedisClient 创建独立的会话连接池，不发起网络请求；调用方负责关闭。
+func NewRedisClient(cfg Config) (*redis.Client, error) {
+	if cfg.RedisAddress == "" || cfg.RedisDB < 0 || (cfg.RedisUsername != "" && cfg.RedisPassword == "") {
+		return nil, errors.New("invalid session Redis configuration")
+	}
+	return redis.NewClient(&redis.Options{
+		Addr: cfg.RedisAddress, Username: cfg.RedisUsername, Password: cfg.RedisPassword, DB: cfg.RedisDB,
+		DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second,
+		MaxRetries: -1, PoolSize: 8, MaxActiveConns: 8, ContextTimeoutEnabled: true, PoolTimeout: time.Second,
+	}), nil
+}
+
+func newStore(cfg Config, client *redis.Client) (*store, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(cfg.SessionKey)
 	if err != nil || len(raw) != 32 {
 		return nil, errors.New("invalid session encryption key")
 	}
@@ -96,7 +109,7 @@ func newStore(address, password, key, prefix string) (*store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &store{db: redis.NewClient(&redis.Options{Addr: address, Password: password, DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second, MaxRetries: -1, PoolSize: 8, MaxActiveConns: 8, ContextTimeoutEnabled: true, PoolTimeout: time.Second}), box: box, prefix: prefix, entropy: rand.Reader, now: time.Now}, nil
+	return &store{db: client, box: box, prefix: cfg.Namespace + ":", entropy: rand.Reader, now: time.Now}, nil
 }
 
 func (s *store) nowTime() time.Time {

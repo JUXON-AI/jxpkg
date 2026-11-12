@@ -16,6 +16,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/logto-io/go/v2/client"
+	"github.com/redis/go-redis/v9"
 )
 
 type globalAuthorityFixture struct {
@@ -26,6 +27,39 @@ type globalAuthorityFixture struct {
 func (f *globalAuthorityFixture) Permissions(context.Context, string) (GlobalAccess, error) {
 	return f.decision, f.err
 }
+
+func TestGlobalWithRedisKeepsSessionNamespaceAndOwnership(t *testing.T) {
+	backend := loadFixtureRedisConfig(t)
+	_, endpoint := fixtureAuthority(t)
+	ctx := context.Background()
+	cfg := Config{
+		Endpoint: endpoint, Origin: "http://localhost:5190", ClientID: "client-one",
+		ClientSecret: "fixture-secret", APIResource: "https://admin.invalid/api",
+		Scopes: []string{"profile"}, CookieName: "session", Namespace: "test-admin",
+		RedisAddress: backend.Address, RedisPassword: backend.Password, SessionKey: testOpaque(t),
+		Environment: "local", AllowLocalHTTP: true,
+	}
+	client, err := NewRedisClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	authority := &globalAuthorityFixture{}
+	runtime, err := NewGlobalWithRedis(ctx, cfg, authority, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.store.prefix != "test-admin:global:" || runtime.globalAuthority != authority {
+		t.Fatal("global session namespace or authority changed")
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Ping(ctx).Err(); err != nil {
+		t.Fatal("global runtime closed caller-owned Redis", err)
+	}
+}
+
 func globalFixture(t *testing.T) (*Runtime, *session, *globalAuthorityFixture, *atomic.Value) {
 	t.Helper()
 	f, _ := fixtureAuthority(t)
@@ -55,7 +89,7 @@ func globalFixture(t *testing.T) (*Runtime, *session, *globalAuthorityFixture, *
 	}))
 	t.Cleanup(upstream.Close)
 	f.url = upstream.URL
-	store, e := newStore("127.0.0.1:1", "", base64.RawURLEncoding.EncodeToString(make([]byte, 32)), "global-test:")
+	store, e := newStore(Config{SessionKey: base64.RawURLEncoding.EncodeToString(make([]byte, 32)), Namespace: "global-test"}, redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"}))
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -184,12 +218,12 @@ func TestGlobalRenewalBindsCSRFAndEpoch(t *testing.T) {
 func TestGlobalModeCryptographicIsolationAndRoutes(t *testing.T) {
 	a, _, _, _ := globalFixture(t)
 	key := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
-	employee, e := newStore("127.0.0.1:1", "", key, "product:")
+	employee, e := newStore(Config{SessionKey: key, Namespace: "product"}, redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"}))
 	if e != nil {
 		t.Fatal(e)
 	}
 	defer employee.db.Close()
-	global, e := newStore("127.0.0.1:1", "", key, "product:global:")
+	global, e := newStore(Config{SessionKey: key, Namespace: "product:global"}, redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"}))
 	if e != nil {
 		t.Fatal(e)
 	}
