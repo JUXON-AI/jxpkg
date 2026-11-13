@@ -424,3 +424,5 @@ JXPKG_TEST_S3_REGION
 业务浏览器接口使用 `apis/credits.RegisterBrowserBalance(router, "jxagent", client, bff)` 注册 `jxagent.GetMyModelBalance`。它复用已校验的 Logto Browser Session、当前组织与 CSRF，员工身份只来自当前验证结果；DTO/handler/安全错误映射由 SDK 提供，业务无需转发包装。响应保留原始单位并回传 `organization_id/user_id`，浏览器须核对主体，避免其他标签页切换身份后的迟到响应污染旧缓存。调用方后端显式传 Client 与 BFF，SDK 不读取环境或 coresetting，也不增加 Bearer fallback。
 
 独立全局管理应用可使用 `logtobff.NewGlobal`，入口白名单与业务 scope 分离；完整 Session、epoch 和权限契约见 [全局 BFF 说明](apis/runtime/logtobff/README.md)。
+
+Admin 全局 BFF 可由应用在启动代码中显式设置 `Config.GlobalReadFastPath`（不读取 JSON 配置），将只读路由注册为 `RequireGlobalRead`。已授权会话的快照上限由 Redis 时间控制；`Require` 和续期保持在线核验。启用时需要 Redis 6.2+，允许会话命名空间的 `MGET`、`TIME`、`SET PXAT` 和现有 Lua 操作。组织会话模式不使用该路径。

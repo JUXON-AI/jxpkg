@@ -108,14 +108,22 @@ func (a *Runtime) configureGlobal(authority GlobalAuthority) {
 
 // globalCurrent 取 Token 权限与在线权限交集，每个授权判断最多执行一次。
 func (a *Runtime) globalCurrent(ctx context.Context, value *session) (profile, *signedClaims, error) {
+	raw, err := a.globalResourceToken(ctx, value)
+	if err != nil {
+		return profile{}, nil, err
+	}
+	return a.globalDecision(ctx, value.Subject, raw)
+}
+
+func (a *Runtime) globalResourceToken(ctx context.Context, value *session) (string, error) {
 	if value.SDK == nil {
-		return profile{}, nil, &accessError{401, "session_invalid"}
+		return "", &accessError{401, "session_invalid"}
 	}
 	// 不复用资源 Token，确保刷新授权本身的撤销也在本次请求生效。
 	cache := map[string]client.AccessToken{}
 	if raw := value.SDK[client.StorageKeyAccessTokenMap]; raw != "" {
 		if json.Unmarshal([]byte(raw), &cache) != nil {
-			return profile{}, nil, ErrUnavailable
+			return "", ErrUnavailable
 		}
 	}
 	for key := range cache {
@@ -125,21 +133,29 @@ func (a *Runtime) globalCurrent(ctx context.Context, value *session) (profile, *
 	}
 	encoded, err := json.Marshal(cache)
 	if err != nil {
-		return profile{}, nil, ErrUnavailable
+		return "", ErrUnavailable
 	}
 	value.SDK[client.StorageKeyAccessTokenMap] = string(encoded)
+	started := time.Now()
 	access, err := a.sdk(ctx, value.SDK).GetAccessTokenWithOptions(client.GetAccessTokenOptions{Resource: a.config.APIResource})
+	recordIdentityPhase(ctx, "bff.global.resource_token", started)
 	if err != nil {
-		return profile{}, nil, globalSDKFailure(err)
+		return "", globalSDKFailure(err)
 	}
-	claims, err := a.verifyGlobal(ctx, access.Token)
+	return access.Token, nil
+}
+
+func (a *Runtime) globalDecision(ctx context.Context, subject, raw string) (profile, *signedClaims, error) {
+	claims, err := a.verifyGlobal(ctx, raw)
 	if err != nil {
 		return profile{}, nil, err
 	}
-	if claims.Subject != value.Subject {
+	if claims.Subject != subject {
 		return profile{}, nil, &accessError{401, "global_credential_invalid"}
 	}
-	decision, err := a.globalAuthority.Permissions(ctx, value.Subject)
+	started := time.Now()
+	decision, err := a.globalAuthority.Permissions(ctx, subject)
+	recordIdentityPhase(ctx, "bff.global.permissions", started)
 	if errors.Is(err, ErrGlobalAccessDenied) {
 		return profile{}, nil, &accessError{403, "application_access_denied"}
 	}
@@ -162,7 +178,7 @@ func (a *Runtime) globalCurrent(ctx context.Context, value *session) (profile, *
 	}
 	slices.Sort(effective)
 	claims.Scope = strings.Join(effective, " ")
-	return profile{Subject: value.Subject, Username: globalDisplayName(decision.Username), Name: globalDisplayName(decision.Name), Avatar: globalAvatar(decision.Avatar)}, claims, nil
+	return profile{Subject: subject, Username: globalDisplayName(decision.Username), Name: globalDisplayName(decision.Name), Avatar: globalAvatar(decision.Avatar)}, claims, nil
 }
 
 func globalAvatar(value string) string {
@@ -222,22 +238,26 @@ func (a *Runtime) globalSnapshot(ctx context.Context, value *session) (map[strin
 	if err != nil {
 		return nil, nil, err
 	}
+	return a.globalProjection(value, user, claims.Scope, claims.ExpiresAt.Time)
+}
+
+func (a *Runtime) globalProjection(value *session, user profile, scope string, tokenUntil time.Time) (map[string]any, *globalSessionPrincipal, error) {
 	deadline, err := sessionDeadline(value, a.store.nowTime())
 	if err != nil {
 		return nil, nil, err
 	}
-	if claims.ExpiresAt.Time.Before(deadline) {
-		deadline = claims.ExpiresAt.Time
+	if tokenUntil.Before(deadline) {
+		deadline = tokenUntil
 	}
-	epoch := globalEpoch(value.Subject, claims.Scope)
+	epoch := globalEpoch(value.Subject, scope)
 	username := strings.TrimSpace(user.Username)
 	if username == "" {
 		username = strings.TrimSpace(user.Name)
 	}
-	permissions := strings.Fields(claims.Scope)
+	permissions := strings.Fields(scope)
 	p := &globalSessionPrincipal{
 		Principal:           Principal{Issuer: a.config.Endpoint + "/oidc", UserID: value.Subject, Username: username, OrganizationRevision: epoch, Permissions: permissions, ExpiresAt: deadline.Unix()},
-		credentialExpiresAt: claims.ExpiresAt.Time,
+		credentialExpiresAt: tokenUntil,
 	}
 	data := map[string]any{"authenticated": true, "user": user, "permissions": permissions, "authority_epoch": epoch, "csrf_token": value.CSRF, "expires_at": deadline.Unix()}
 	return data, p, nil
@@ -249,6 +269,9 @@ func (a *Runtime) globalViewData(ctx context.Context, value *session) (map[strin
 }
 
 func (a *Runtime) requireGlobal(scopes ...string) gin.HandlerFunc {
+	if a.config.GlobalReadFastPath {
+		return a.globalFastRequire(true, scopes...)
+	}
 	return func(c *gin.Context) {
 		called := false
 		a.withSession(func(r *http.Request, s *session) result {
@@ -283,7 +306,16 @@ func (a *Runtime) finishGlobalLogin(w http.ResponseWriter, r *http.Request, tx t
 	}
 	now := a.store.nowTime()
 	value := &session{SDK: tx.SDK, Subject: subject, CSRF: csrf, Until: now.Add(sessionIdleLifetime), PolicyVersion: sessionPolicyVersion, AuthenticatedAt: now, IdleUntil: now.Add(sessionIdleLifetime), AbsoluteUntil: now.Add(sessionAbsoluteLifetime)}
-	if _, _, err := a.globalSnapshot(r.Context(), value); err != nil {
+	var started time.Time
+	if a.config.GlobalReadFastPath {
+		started, err = a.store.db.Time(r.Context()).Result()
+		if err != nil {
+			fail(w, r, 503, "session_store_unavailable")
+			return
+		}
+	}
+	user, claims, err := a.globalCurrent(r.Context(), value)
+	if err != nil {
 		outcome := classify(err)
 		code := "global_identity_unavailable"
 		var denied *accessError
@@ -300,10 +332,22 @@ func (a *Runtime) finishGlobalLogin(w http.ResponseWriter, r *http.Request, tx t
 	} else if len(cookies) == 1 {
 		previous = cookies[0].Value
 	}
+	if a.config.GlobalReadFastPath {
+		marker, markerErr := a.store.opaque()
+		if markerErr != nil {
+			fail(w, r, 503, "session_entropy_unavailable")
+			return
+		}
+		value.GlobalRead = &globalReadSnapshot{Marker: marker, CheckedAt: now, User: user, Scope: claims.Scope, TokenUntil: claims.ExpiresAt.Time}
+	}
 	next, err := a.store.create(r.Context(), value, previous)
 	if err != nil {
 		fail(w, r, 503, "session_store_unavailable")
 		return
+	}
+	if value.GlobalRead != nil {
+		// A failed marker write leaves the first read on the fail-closed cold path.
+		_ = a.publishGlobalReadMarker(r.Context(), next, value.GlobalRead.Marker, started)
 	}
 	a.setCookie(w, a.config.CookieName, next, sessionCookieMaxAge(value, now))
 	http.Redirect(w, r, a.config.Origin+tx.ReturnTo, http.StatusFound)
@@ -313,7 +357,21 @@ func (a *Runtime) renewGlobalSession(r *http.Request, value *session) result {
 	if !a.csrfValid(r, value) {
 		return problem(403, "csrf_rejected")
 	}
-	data, principal, err := a.globalSnapshot(r.Context(), value)
+	return a.renewGlobalSessionWithProof(r, value, nil)
+}
+
+func (a *Runtime) renewGlobalSessionWithProof(r *http.Request, value *session, proof *globalReadSnapshot) result {
+	var data map[string]any
+	var principal *globalSessionPrincipal
+	var err error
+	if proof != nil {
+		if !a.store.nowTime().Before(proof.CheckedAt.Add(globalReadLifetime)) {
+			return problem(409, "authority_refresh_required")
+		}
+		data, principal, err = a.globalProjection(value, proof.User, proof.Scope, proof.TokenUntil)
+	} else {
+		data, principal, err = a.globalSnapshot(r.Context(), value)
+	}
 	if err != nil {
 		return classify(err)
 	}

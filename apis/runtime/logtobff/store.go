@@ -53,11 +53,13 @@ type store struct {
 	now     func() time.Time
 }
 type session struct {
-	SDK          map[string]string `json:"sdk"`
-	Subject      string            `json:"subject"`
-	Organization string            `json:"organization"`
-	Revision     string            `json:"revision"`
-	CSRF         string            `json:"csrf"`
+	GlobalGeneration string              `json:"global_generation,omitempty"`
+	GlobalRead       *globalReadSnapshot `json:"global_read,omitempty"`
+	SDK              map[string]string   `json:"sdk"`
+	Subject          string              `json:"subject"`
+	Organization     string              `json:"organization"`
+	Revision         string              `json:"revision"`
+	CSRF             string              `json:"csrf"`
 	// Until is the pre-policy fixed expiry and remains the idle projection for
 	// version 2 records so an earlier BFF can still read a newer record safely.
 	Until           time.Time `json:"until"`

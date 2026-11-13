@@ -30,6 +30,8 @@ type principalKey struct{}
 
 // Config 由应用启动时显式提供；密钥不得返回浏览器或写入日志。
 type Config struct {
+	// GlobalReadFastPath opts global BFF routes into bounded, read-only session snapshots.
+	GlobalReadFastPath bool `json:"-"`
 	// Endpoint 是启动登记的 Logto origin，发行者固定为其 /oidc。
 	Endpoint string `json:"endpoint"`
 	// Origin 是浏览器的固定产品 origin，用于 Host、CSRF 和回调校验。
@@ -217,8 +219,13 @@ func (a *Runtime) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/login", a.login)
 	mux.HandleFunc("GET /auth/auto-login", a.autoLogin)
 	mux.HandleFunc("GET /auth/callback", a.callback)
-	mux.HandleFunc("GET /auth/session", a.withSession(a.sessionView))
-	mux.HandleFunc("POST /auth/session", a.withSession(a.renewSession))
+	if a.globalAuthority != nil && a.config.GlobalReadFastPath {
+		mux.HandleFunc("GET /auth/session", a.globalFastSessionView)
+		mux.HandleFunc("POST /auth/session", a.globalFastRenew)
+	} else {
+		mux.HandleFunc("GET /auth/session", a.withSession(a.sessionView))
+		mux.HandleFunc("POST /auth/session", a.withSession(a.renewSession))
+	}
 	if a.globalAuthority == nil {
 		mux.HandleFunc("GET /auth/switch-organization", a.login)
 	}
