@@ -56,6 +56,19 @@ type Storager interface {
 	DeleteFile(ctx context.Context, storagePath string) error
 }
 
+// OriginalFileStorager is an optional storage capability for providers that
+// can return an object before provider-side media transformation. It is kept
+// separate from Storager so existing implementations remain source compatible.
+//
+// The provider operation may be billable. Callers must check
+// OriginalFileSupported and must not fall back to the ordinary read path when
+// the original byte contract is required.
+type OriginalFileStorager interface {
+	OriginalFileSupported() bool
+	ReadOriginalFile(ctx context.Context, storagePath string) (io.ReadCloser, error)
+	GetPresignedOriginalURL(ctx context.Context, method, storagePath string) (string, error)
+}
+
 // MultipartUploadPart 表示一个已上传或待合并的对象分片。
 type MultipartUploadPart struct {
 	// PartNumber 是从 1 开始的分片序号，最大为 10000。
