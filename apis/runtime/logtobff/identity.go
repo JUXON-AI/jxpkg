@@ -523,7 +523,7 @@ func (a *Runtime) sessionViewData(ctx context.Context, value *session, user prof
 	if a.globalAuthority != nil {
 		return a.globalViewData(ctx, value)
 	}
-	deadline, err := sessionDeadline(value, a.store.nowTime())
+	deadline, err := a.provisionalSessionDeadline(ctx, value)
 	if err != nil {
 		return nil, err
 	}
@@ -571,7 +571,15 @@ func (a *Runtime) verifyClaims(ctx context.Context, raw, org, clientID string, g
 	return &claims, nil
 }
 func (a *Runtime) organizationClaims(ctx context.Context, value *session, org string) (*signedClaims, error) {
-	raw, err := a.token(ctx, value, org)
+	var (
+		raw string
+		err error
+	)
+	if issuer, ok := ctx.Value(resourceReadClaimsKey{}).(*resourceReadClaims); ok && issuer.runtime == a && issuer.value == value {
+		raw, err = issuer.issue(ctx, org)
+	} else {
+		raw, err = a.token(ctx, value, org)
+	}
 	if err != nil {
 		return nil, err
 	}
