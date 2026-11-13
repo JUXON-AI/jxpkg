@@ -30,6 +30,8 @@ type principalKey struct{}
 
 // Config 由应用启动时显式提供；密钥不得返回浏览器或写入日志。
 type Config struct {
+	// GlobalReadFastPath opts global BFF routes into bounded, read-only session snapshots.
+	GlobalReadFastPath bool `json:"-"`
 	// Endpoint 是启动登记的 Logto origin，发行者固定为其 /oidc。
 	Endpoint string `json:"endpoint"`
 	// Origin 是浏览器的固定产品 origin，用于 Host、CSRF 和回调校验。
@@ -107,12 +109,13 @@ type signatureVerifier interface {
 
 // Runtime 管理产品的会话命名空间和 OIDC 客户端。只有 New 创建的 Redis 连接由它关闭。
 type Runtime struct {
-	config    Config
-	verifier  *oidc.IDTokenVerifier
-	keys      signatureVerifier
-	http      *http.Client
-	store     *store
-	ownsRedis bool
+	globalAuthority GlobalAuthority
+	config          Config
+	verifier        *oidc.IDTokenVerifier
+	keys            signatureVerifier
+	http            *http.Client
+	store           *store
+	ownsRedis       bool
 }
 
 type boundedTransport struct {
@@ -215,11 +218,22 @@ func (a *Runtime) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/login", a.login)
 	mux.HandleFunc("GET /auth/auto-login", a.autoLogin)
 	mux.HandleFunc("GET /auth/callback", a.callback)
-	mux.HandleFunc("GET /auth/session", a.withReadSession(a.sessionView))
-	mux.HandleFunc("POST /auth/session", a.withSession(a.renewSession))
-	mux.HandleFunc("GET /auth/switch-organization", a.login)
+	switch {
+	case a.globalAuthority == nil:
+		mux.HandleFunc("GET /auth/session", a.withReadSession(a.sessionView))
+		mux.HandleFunc("POST /auth/session", a.withSession(a.renewSession))
+		mux.HandleFunc("GET /auth/switch-organization", a.login)
+	case a.config.GlobalReadFastPath:
+		mux.HandleFunc("GET /auth/session", a.globalFastSessionView)
+		mux.HandleFunc("POST /auth/session", a.globalFastRenew)
+	default:
+		mux.HandleFunc("GET /auth/session", a.withSession(a.sessionView))
+		mux.HandleFunc("POST /auth/session", a.withSession(a.renewSession))
+	}
 	mux.HandleFunc("POST /auth/logout", a.withSession(a.logout))
-	mux.HandleFunc("GET /auth/account-center", a.withSession(a.accountCenter))
+	if a.globalAuthority == nil {
+		mux.HandleFunc("GET /auth/account-center", a.withSession(a.accountCenter))
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -302,6 +316,9 @@ func (a *Runtime) accountCenter(r *http.Request, s *session) result {
 
 // Require 是直接 Logto 浏览器会话路由模式，不接受 Bearer 或旧 Account 身份。
 func (a *Runtime) Require(scopes ...string) gin.HandlerFunc {
+	if a.globalAuthority != nil {
+		return a.requireGlobal(scopes...)
+	}
 	return func(c *gin.Context) {
 		called := false
 		a.withReadSession(func(r *http.Request, s *session) result {
@@ -460,6 +477,9 @@ func (a *Runtime) withSession(next sessionHandler, authorized ...http.Handler) h
 
 // jxlog:nonbusiness 只装配已验证主体和请求绑定能力，不执行外部副作用。
 func (a *Runtime) authorizedContext(ctx context.Context, id string, principal Principal) context.Context {
+	if a.globalAuthority != nil {
+		return context.WithValue(ctx, globalPrincipalKey{}, GlobalPrincipal{Issuer: principal.Issuer, UserID: principal.UserID, Username: principal.Username, Permissions: slices.Clone(principal.Permissions), Epoch: principal.OrganizationRevision, ExpiresAt: principal.ExpiresAt})
+	}
 	member := identity.Member{OrganizationID: principal.OrganizationID, UserID: principal.UserID}
 	if displayContext, err := identity.WithDisplayNames(ctx, member, identity.DisplayNames{
 		Username:         principal.Username,

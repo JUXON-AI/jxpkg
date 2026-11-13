@@ -75,7 +75,11 @@ func (a *Runtime) sdk(ctx context.Context, values map[string]string) *client.Log
 	if a.config.APIResource != "" {
 		resources = []string{a.config.APIResource}
 	}
-	return client.NewLogtoClient(&client.LogtoConfig{Endpoint: a.config.Endpoint, AppId: a.config.ClientID, AppSecret: a.config.ClientSecret, BaseUrl: a.config.Origin, Resources: resources, Scopes: append([]string{core.UserScopeOrganizations}, a.config.Scopes...)}, sdkStorage(values), client.WithHttpClient(a.http), client.WithContext(ctx))
+	scopes := a.config.Scopes
+	if a.globalAuthority == nil {
+		scopes = append([]string{core.UserScopeOrganizations}, scopes...)
+	}
+	return client.NewLogtoClient(&client.LogtoConfig{Endpoint: a.config.Endpoint, AppId: a.config.ClientID, AppSecret: a.config.ClientSecret, BaseUrl: a.config.Origin, Resources: resources, Scopes: scopes}, sdkStorage(values), client.WithHttpClient(a.http), client.WithContext(ctx))
 }
 
 type sdkStorage map[string]string
@@ -121,10 +125,14 @@ func (a *Runtime) startLoginTransaction(w http.ResponseWriter, r *http.Request, 
 		fail(w, r, 503, "login_entropy_unavailable")
 		return
 	}
+	extra := map[string]string{"nonce": nonce}
+	if a.globalAuthority == nil {
+		extra["organization_identity"] = "required"
+	}
 	target, err := a.sdk(r.Context(), values).SignIn(&client.SignInOptions{
 		RedirectUri: a.config.Origin + "/auth/callback",
 		Prompt:      prompt,
-		ExtraParams: map[string]string{"nonce": nonce, "organization_identity": "required"},
+		ExtraParams: extra,
 	})
 	if err != nil {
 		fail(w, r, 503, "login_provider_unavailable")
@@ -240,6 +248,10 @@ func (a *Runtime) callback(w http.ResponseWriter, r *http.Request) {
 	var identity struct {
 		OrganizationID string `json:"organization_id"`
 		Revision       string `json:"organization_identity_revision"`
+	}
+	if a.globalAuthority != nil {
+		a.finishGlobalLogin(w, r, tx, verified.Subject)
+		return
 	}
 	if verified.Claims(&identity) != nil || !_orgPattern.MatchString(identity.OrganizationID) || !validRevision(identity.Revision) {
 		fail(w, r, 401, "organization_identity_missing")
@@ -449,6 +461,10 @@ func contains(rows []organization, id string) bool {
 	return false
 }
 func (a *Runtime) currentRequest(ctx context.Context, value *session) (profile, []organization, error) {
+	if a.globalAuthority != nil {
+		user, _, err := a.globalCurrent(ctx, value)
+		return user, nil, err
+	}
 	var (
 		user profile
 		rows []organization
@@ -489,6 +505,9 @@ func view(value *session, user profile, rows []organization, deadline time.Time)
 	return result
 }
 func (a *Runtime) sessionView(r *http.Request, value *session) result {
+	if a.globalAuthority != nil {
+		return a.globalSessionView(r, value)
+	}
 	user, rows, err := a.currentRequest(r.Context(), value)
 	if err != nil {
 		return classify(err)
@@ -501,6 +520,9 @@ func (a *Runtime) sessionView(r *http.Request, value *session) result {
 }
 
 func (a *Runtime) sessionViewData(ctx context.Context, value *session, user profile, rows []organization) (map[string]any, error) {
+	if a.globalAuthority != nil {
+		return a.globalViewData(ctx, value)
+	}
 	deadline, err := a.provisionalSessionDeadline(ctx, value)
 	if err != nil {
 		return nil, err
@@ -520,7 +542,11 @@ func (a *Runtime) csrfValid(r *http.Request, value *session) bool {
 	return len(r.Header.Values("Origin")) == 1 && len(r.Header.Values("X-CSRF-Token")) == 1 && r.Header.Get("Origin") == a.config.Origin && value.CSRF != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-CSRF-Token")), []byte(value.CSRF)) == 1
 }
 func (a *Runtime) verify(ctx context.Context, raw, org, clientID string) (*signedClaims, error) {
-	if !_orgPattern.MatchString(org) || len(raw) > 32768 {
+	return a.verifyClaims(ctx, raw, org, clientID, false)
+}
+
+func (a *Runtime) verifyClaims(ctx context.Context, raw, org, clientID string, global bool) (*signedClaims, error) {
+	if (!global && !_orgPattern.MatchString(org)) || (global && org != "") || len(raw) > 32768 {
 		return nil, errors.New("invalid credential")
 	}
 	var claims signedClaims
@@ -530,6 +556,9 @@ func (a *Runtime) verify(ctx context.Context, raw, org, clientID string) (*signe
 	}
 	payload, err := a.keys.VerifySignature(ctx, raw)
 	if err != nil {
+		if global {
+			return nil, ErrUnavailable
+		}
 		return nil, err
 	}
 	if json.Unmarshal(payload, &claims) != nil {
