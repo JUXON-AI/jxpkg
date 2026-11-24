@@ -9,6 +9,7 @@ import (
 	"github.com/JUXON-AI/jxpkg/logs"
 	"github.com/JUXON-AI/jxpkg/safeerror"
 	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
@@ -18,7 +19,7 @@ var (
 	dbsLocker sync.RWMutex
 )
 
-// InitDBConn 初始化数据库连接
+// InitDBConn opens and registers a MySQL or PostgreSQL connection URL.
 func InitDBConn(name, dburl string) (*gorm.DB, error) {
 	pool, err := databasePoolOptions(name, os.Getenv)
 	if err != nil {
@@ -28,24 +29,26 @@ func InitDBConn(name, dburl string) (*gorm.DB, error) {
 	if err != nil {
 		return nil, safeerror.Wrap("parse database connection URL failed", err)
 	}
-	var db *gorm.DB
+	var dialector gorm.Dialector
 	switch dsn.Scheme {
 	case "mysql":
-		uri := ""
-		uri, err = NormalizeMySQL(dsn)
+		uri, err := NormalizeMySQL(dsn)
 		if err != nil {
 			logs.Error("[init-db] normalize mysql dsn failed")
 			return nil, safeerror.Wrap("normalize MySQL connection failed", err)
 		}
-		db, err = gorm.Open(mysql.Open(uri), &gorm.Config{
-			CreateBatchSize: 200,
-			// 初始化错误可能包含凭证或原始驱动参数，仅由本层输出固定事件。
-			Logger: logger.Default.LogMode(logger.Silent),
-		})
+		dialector = mysql.Open(uri)
+	case "postgres", "postgresql":
+		dialector = postgres.Open(dburl)
 	default:
 		logs.Error("[init-db] unsupported db scheme")
 		return nil, fmt.Errorf("unsupported database connection scheme")
 	}
+	db, err := gorm.Open(dialector, &gorm.Config{
+		CreateBatchSize: 200,
+		// 初始化错误可能包含凭证或原始驱动参数，仅由本层输出固定事件。
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
 	if err != nil {
 		logs.Error("[init-db] open db failed")
 		return nil, safeerror.Wrap("open database connection failed", err)

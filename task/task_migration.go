@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -46,8 +47,8 @@ func (*taskMemberDependencyIndexMetadata) TableName() string {
 	return TableNameCoreTask
 }
 
-// taskIndexStatistic carries the MySQL metadata that distinguishes a full
-// ordinary B-tree column from a prefix, descending, unique, or special index.
+// taskIndexStatistic carries enough metadata to distinguish a full ordinary
+// B-tree column from a prefix, descending, unique, or special index.
 type taskIndexStatistic struct {
 	IndexName  string         `gorm:"column:INDEX_NAME"`
 	ColumnName sql.NullString `gorm:"column:COLUMN_NAME"`
@@ -119,17 +120,23 @@ func taskIndexColumns(db *gorm.DB, metadata interface{}, name string) ([]string,
 }
 
 func readTaskIndexStatistics(db *gorm.DB) (map[string][]taskIndexStatistic, error) {
-	database := db.Migrator().CurrentDatabase()
-	if database == "" {
-		return nil, errors.New("read core_task index metadata: current database is unavailable")
-	}
-
 	var rows []taskIndexStatistic
-	if err := db.Table("information_schema.STATISTICS").
-		Where("TABLE_SCHEMA = ? AND TABLE_NAME = ?", database, TableNameCoreTask).
-		Order("INDEX_NAME ASC, SEQ_IN_INDEX ASC").
-		Find(&rows).Error; err != nil {
-		return nil, fmt.Errorf("read core_task index metadata: %w", err)
+	switch db.Dialector.Name() {
+	case "postgres":
+		if err := db.Raw(postgresTaskIndexStatistics, TableNameCoreTask).Scan(&rows).Error; err != nil {
+			return nil, fmt.Errorf("read core_task index metadata: %w", err)
+		}
+	default:
+		database := db.Migrator().CurrentDatabase()
+		if database == "" {
+			return nil, errors.New("read core_task index metadata: current database is unavailable")
+		}
+		if err := db.Table("information_schema.STATISTICS").
+			Where("TABLE_SCHEMA = ? AND TABLE_NAME = ?", database, TableNameCoreTask).
+			Order("INDEX_NAME ASC, SEQ_IN_INDEX ASC").
+			Find(&rows).Error; err != nil {
+			return nil, fmt.Errorf("read core_task index metadata: %w", err)
+		}
 	}
 
 	byName := make(map[string][]taskIndexStatistic, 2)
@@ -187,7 +194,23 @@ func statisticColumns(rows []taskIndexStatistic) []string {
 }
 
 func createTaskIndex(db *gorm.DB, metadata interface{}, name string) error {
-	if err := db.Migrator().CreateIndex(metadata, name); err != nil {
+	var err error
+	if db.Dialector.Name() == "postgres" {
+		fields, parseErr := taskIndexColumns(db, metadata, name)
+		if parseErr != nil {
+			return parseErr
+		}
+		columns := make([]clause.Column, len(fields))
+		for index, field := range fields {
+			columns[index] = clause.Column{Name: field}
+		}
+		// A schema-wide name collision is an error, even when the conflicting
+		// index belongs to some table other than core_task.
+		err = db.Exec("CREATE INDEX ? ON ? ?", clause.Column{Name: name}, clause.Table{Name: TableNameCoreTask}, columns).Error
+	} else {
+		err = db.Migrator().CreateIndex(metadata, name)
+	}
+	if err != nil {
 		return fmt.Errorf("create index %s: %w", name, err)
 	}
 	return nil
