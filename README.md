@@ -1,6 +1,6 @@
 # jxpkg
 
-新增 `credits` 服务端协议客户端：业务读取自己的配置并显式传给 `NewClient(Config)`，SDK 不读取 coresetting 或应用环境。`Client.AcquireDefault(ctx, Subject)` 获取员工 default Key 和 New API 地址；需要在一次执行内复用时创建 `NewExecution(subject, client.AcquireDefault)`，再调用 `execution.AcquireDefault(ctx)`，或通过 `WithExecution` / `ConnectionFromContext` 传递给下游。SDK 自建 mTLS 连接池；Client 没有全局员工 Key 缓存，Execution 只保留本次执行的结果（包括失败），不隐式重试、不跟随重定向。Subject 必须来自已验证登录或权威任务归属。HTTP 应用可在 Browser Session 校验后使用 `middleware.BindCreditsExecution(client)`，SDK 不决定业务资源权限。下游接入时需升级包含这些能力的发布版本并重新生成 vendor。
+新增 `credits` 服务端协议客户端：业务读取自己的配置并显式传给 `NewClient(Config)`，SDK 不读取 coresetting 或应用环境。`Client.AcquireDefault(ctx, Subject)` 获取员工 default Key 和 New API 地址，`Client.GetUsageSummary(ctx, Subject)` 获取不含原始 quota 的月度额度摘要；需要在一次执行内复用时创建 `NewExecution(subject, client.AcquireDefault)`，再调用 `execution.AcquireDefault(ctx)`，或通过 `WithExecution` / `ConnectionFromContext` 传递给下游。SDK 自建 mTLS 连接池；Client 没有全局员工 Key 缓存，Execution 只保留本次执行的结果（包括失败），不隐式重试、不跟随重定向。Subject 必须来自已验证登录或权威任务归属。HTTP 应用可在 Browser Session 校验后使用 `middleware.BindCreditsExecution(client)` 或 `apis/credits.RegisterBrowserBalance`，SDK 不决定业务资源权限。下游接入时需升级包含这些能力的发布版本并重新生成 vendor。
 
 `jxpkg` 是 JUXON Go 服务共用的基础库，覆盖 HTTP API、认证、配置、数据库、Redis、日志、对象存储、任务、邮件、验证码和模型客户端。它只提供可复用能力，不承载 Account、JXONE 等具体业务的数据模型或业务流程。
 
@@ -47,6 +47,7 @@ make clean       # 清理 Go test cache
 | [`apis/runtime/logtobff`](#apisruntimelogtobff) | Logto Browser BFF、主体发布和 CSRF 边界 | `New`、`Runtime.Require`、`FromContext` |
 | [`apis/runtime/logtodirectory`](#apisruntimelogtodirectory) | 固定用途 Logto workload-directory M2M 客户端 | `NewClient`、`Snapshot`、`ListPage`、`SearchOrganizations` |
 | [`apis/runtime/auth`](#apisruntimeauth) | 通用权限错误、权限编码和严格 EdDSA 验签 | `PermissionCode`、`NewTokenVerifier` |
+| [`apis/credits`](#apiscredits) | Browser Session 保护的员工额度摘要 DTO 与路由 | `RegisterBrowserBalance`、`BrowserUsageSummary` |
 | [`apis/runtime/middleware`](#apisruntimemiddleware) | Gin 日志、恢复、CORS 与 Credits 执行绑定 | `NewCORS`、`BindCreditsExecution` |
 | [`apis/runtime/server`](#apisruntimeserver) | Gin Router、DTO 适配和显式 handler 组合 | `NewRouter`、`Post`、`API` |
 | [`identity`](#identity) | 原生组织和用户身份及授权上下文 | `Member`、`Authorization`、`WithAuthorization` |
@@ -152,6 +153,8 @@ router.Post("profile.Get", bff.Require(), server.API(handler.GetProfile))
 ```
 
 `Require` 成功后，`FromContext` 返回已认证成员的原生 `Principal` 和有效标志。应用须通过在线权威目录校验该成员，自行组合 `identity.Authorization` 并通过 `identity.WithAuthorization` 写入请求上下文。副作用请求必须由 BFF 完成 CSRF 校验；调用方不得恢复 Cookie 与 Bearer 间的静默回退。
+
+受限 BFF Redis ACL 至少需要 `AUTH`、`HELLO`、`PING`、`SELECT`、`CLIENT SETINFO`、`CLIENT SETNAME`、`GET`、`SET`、`DEL`、`EVAL`、`PTTL`、`PEXPIRE` 和 `EXISTS`。一次性登录事务通过 Lua `EVAL` 原子执行 `GET+DEL`，部署 ACL 不依赖只在部分共享实例开放的 `GETDEL` 命令。
 
 `Principal.Username` 和 `Principal.OrganizationName` 来自同一次已校验 profile 与组织行，并通过 `identity.WithDisplayNames` 发布。展示名缺失不影响身份准入；请求 header 和 body 不能提供或覆盖这些值。
 
@@ -415,13 +418,13 @@ JXPKG_TEST_S3_REGION
 
 `safeerror.Wrap(message, cause)` 给内部 I/O 错误保留 errors.Is/As 分类，外层 Error() 只返回调用方提供的固定安全文本，原因为 nil 时返回 nil。credits 与 dbtools 是两个实际消费者；业务身份/启动边界也可直接复用。message 不得来自配置、凭证或上游响应，日志只输出外层错误。需要同时保留业务 sentinel 时把 errors.Join(sentinel,cause) 放在 Wrap 内，不直接返回 Join。
 
-## 员工余额查询
+### `apis/credits`
 
-`credits.Client.GetBalance(ctx, credits.Subject{OrganizationID: organizationID, UserID: userID})` 复用当前 mTLS 客户端，通过 `/internal/credits/balance` 查询 wallet。`credits.Subject` 不接受旧数字公司/UIN 回退，必须同时提供已验证的 Logto 组织与用户主体。`credits.Balance` 保留 `state`、`quota`、`used_quota`，不领取 default Key、不保存额度或扣费；缺失必要字段、重复或畸形响应失败关闭，pending 不代表零余额。新版客户端随余额请求发送 `X-JX-Credits-Points: 1`，可接收 Credits 计算的 `points`（`balance`、`used`、`quota_per_point`、`unit`）；旧服务未提供时 `Points` 为 nil。浏览器共享余额接口也透传此可选字段，调用方无需自行换算。
+`credits.Client.GetUsageSummary(ctx, credits.Subject{OrganizationID: organizationID, UserID: userID})` 复用当前 mTLS 客户端，通过 `/internal/credits/balance` 查询公开额度摘要。`credits.Subject` 不接受旧数字公司/UIN 回退，必须同时提供已验证的 Logto 组织与用户主体。`credits.UsageSummary` 只包含 `state`、`monthly_remaining_percent`、`next_reset_at`、`subscription_ends_at`、`points_balance`，不领取 default Key、不保存额度或扣费。状态为 `ready`、`pending`、`uninitialized`，未知展示字段为 `null`，时间字段为 Unix 秒。响应必须包含完整字段集；重复、大小写歧义、未知字段、旧 quota/points 响应或越界值均失败关闭。
 
 若请求 context 中存在与目标 `Subject` 完全匹配的 `identity.DisplayNames`，credits 请求会在原主体字段旁追加顶层 `display_names`；缺失或不匹配时保持原 JSON 字节形状。该 metadata 不设置 `Authorization`，也不改变主体校验或访问决策。
 
-业务浏览器接口使用 `apis/credits.RegisterBrowserBalance(router, "jxagent", client, bff)` 注册 `jxagent.GetMyModelBalance`。它复用已校验的 Logto Browser Session、当前组织与 CSRF，员工身份只来自当前验证结果；DTO/handler/安全错误映射由 SDK 提供，业务无需转发包装。响应保留原始单位并回传 `organization_id/user_id`，浏览器须核对主体，避免其他标签页切换身份后的迟到响应污染旧缓存。调用方后端显式传 Client 与 BFF，SDK 不读取环境或 coresetting，也不增加 Bearer fallback。
+业务浏览器接口使用 `apis/credits.RegisterBrowserBalance(router, "jxagent", client, bff)` 注册 `jxagent.GetMyModelBalance`。它复用已校验的 Logto Browser Session、当前组织与 CSRF，员工身份只来自当前验证结果；DTO/handler/安全错误映射由 SDK 提供，业务无需转发包装。响应通过 `BrowserUsageSummary` 平铺摘要并回传 `organization_id/user_id`，浏览器须核对主体，避免其他标签页切换身份后的迟到响应污染旧缓存。调用方后端显式传 Client 与 BFF，SDK 不读取环境或 coresetting，也不增加 Bearer fallback。
 
 独立全局管理应用可使用 `logtobff.NewGlobal`，入口白名单与业务 scope 分离；完整 Session、epoch 和权限契约见 [全局 BFF 说明](apis/runtime/logtobff/README.md)。
 

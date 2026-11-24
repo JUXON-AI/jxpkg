@@ -43,6 +43,14 @@ if not data then return {-1} end
 if not redis.call('set',KEYS[1],ARGV[1],'NX','PX',ARGV[2]) then return {0} end
 return {1,data}`
 
+// consumeScript atomically claims a one-time transaction with commands already
+// granted to the existing least-privilege BFF Redis identities.
+const consumeScript = `
+local data=redis.call('get',KEYS[1])
+if not data then return nil end
+redis.call('del',KEYS[1])
+return data`
+
 // Redis owns short-lived authentication capabilities only. Every value is encrypted;
 // the key prefix is authenticated too, preventing transaction/session substitution.
 type store struct {
@@ -211,14 +219,18 @@ func (s *store) consume(ctx context.Context, id string) (transaction, error) {
 		return tx, _errMissing
 	}
 	key := s.prefix + "tx:" + id
-	data, err := s.db.GetDel(ctx, key).Bytes()
+	result, err := s.db.Eval(ctx, consumeScript, []string{key}).Result()
 	if errors.Is(err, redis.Nil) {
 		return tx, _errMissing
 	}
 	if err != nil {
 		return tx, err
 	}
-	return tx, s.open(key, data, &tx)
+	data, ok := result.(string)
+	if !ok {
+		return tx, errors.New("invalid authentication value")
+	}
+	return tx, s.open(key, []byte(data), &tx)
 }
 func (s *store) create(ctx context.Context, value *session, previous string) (string, error) {
 	now := s.nowTime()

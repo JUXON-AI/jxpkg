@@ -24,18 +24,18 @@ type GetMyModelBalanceRequest struct {
 	Request struct{} `json:"request"`
 }
 
-// GetMyModelBalanceResponse 是不包含凭据的 JX 余额响应。
+// GetMyModelBalanceResponse 是不包含凭据的 JX 额度摘要响应。
 type GetMyModelBalanceResponse struct {
 	// BaseResponse 提供错误码与关联 ID。
 	apiobj.BaseResponse
-	// Response 保留原始额度及 Credits 提供的可选积分展示值。
-	Response BrowserBalance `json:"response"`
+	// Response 是员工额度摘要及验证过的身份回显。
+	Response BrowserUsageSummary `json:"response"`
 }
 
-// BrowserBalance 回传已验证的主体，使客户端能够拒绝身份切换时的迟到响应。
-type BrowserBalance struct {
-	// Balance 是 wallet 快照及可选积分展示值。
-	clientcredits.Balance
+// BrowserUsageSummary 回传已验证的主体，使客户端能够拒绝身份切换时的迟到响应。
+type BrowserUsageSummary struct {
+	// UsageSummary 是公开的月度额度摘要，不含原始 quota 或凭证。
+	clientcredits.UsageSummary
 	// OrganizationID 来自当前已验证 Session，不来自请求。
 	OrganizationID string `json:"organization_id"`
 	// UserID 来自当前已验证 Session，不来自请求。
@@ -62,7 +62,7 @@ func balanceHandler(client *clientcredits.Client) func(*gin.Context, *GetMyModel
 			return
 		}
 		base := requestid.WithContext(ctx.Request.Context(), runtime.RequestID(ctx))
-		balance, err := client.GetBalance(base, clientcredits.Subject{OrganizationID: principal.OrganizationID, UserID: principal.UserID})
+		summary, err := client.GetUsageSummary(base, clientcredits.Subject{OrganizationID: principal.OrganizationID, UserID: principal.UserID})
 		if err != nil {
 			resp.Code, resp.Message = errcode.ErrCode_ServiceUnavailable, "额度服务暂时不可用"
 			if errors.Is(err, clientcredits.ErrDenied) {
@@ -71,6 +71,6 @@ func balanceHandler(client *clientcredits.Client) func(*gin.Context, *GetMyModel
 			logs.WarnContextw(base, "credits.browser.balance.failed", "code", resp.Code)
 			return
 		}
-		resp.Response = BrowserBalance{Balance: balance, OrganizationID: principal.OrganizationID, UserID: principal.UserID}
+		resp.Response = BrowserUsageSummary{UsageSummary: summary, OrganizationID: principal.OrganizationID, UserID: principal.UserID}
 	}
 }

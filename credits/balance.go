@@ -4,66 +4,83 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"math"
+	"regexp"
 )
 
-// BalancePath 是员工 wallet 快照的独立工作负载入口。
+// BalancePath 是员工额度接口的稳定工作负载入口；响应类型由 UsageSummary 承载。
 const BalancePath = "/internal/credits/balance"
 
-// Balance 包含 New API 原始 wallet 单位和可选的 Credits 积分展示值，不包含调用凭据。
-type Balance struct {
-	// State 为 ready 或 pending；pending 不表示零余额。
+var usageSummaryPoints = regexp.MustCompile(`^(?:-?(?:0|[1-9][0-9]{0,18})(?:\.[0-9]{1,12})?|<0\.01|>-0\.01)$`)
+
+const maxUsageSummaryUnixSeconds = int64(1000000000000)
+
+// UsageSummary 是不包含凭证和原始 quota 的员工额度摘要。
+type UsageSummary struct {
+	// State 为 ready、pending 或 uninitialized；pending 不表示零额度。
 	State string `json:"state"`
-	// Quota 是剩余额度，可能因最终结算为负数。
-	Quota int64 `json:"quota"`
-	// UsedQuota 是累计已用额度，不是本周消耗。
-	UsedQuota int64 `json:"used_quota"`
-	// Points 由 Credits 按当前配置换算；旧服务或待开通账户可不提供。
-	Points *BalancePoints `json:"points,omitempty"`
+	// MonthlyRemainingPercent 是本月剩余百分比；未知时为 nil。
+	MonthlyRemainingPercent *float64 `json:"monthly_remaining_percent"`
+	// NextResetAt 是下次重置 UTC Unix 秒；未知时为 nil。
+	NextResetAt *int64 `json:"next_reset_at"`
+	// SubscriptionEndsAt 是订阅结束 UTC Unix 秒；未知时为 nil。
+	SubscriptionEndsAt *int64 `json:"subscription_ends_at"`
+	// PointsBalance 是服务端生成的钱包积分展示字符串，不能用于前端换算；未知时为 nil。
+	PointsBalance *string `json:"points_balance"`
 }
 
-// ValidateBalance 验证状态及浏览器可精确表示的原始整数。
-func ValidateBalance(b Balance) error {
-	const maxExactInteger = int64(1<<53 - 1)
-	if (b.State != "ready" && b.State != "pending") || b.Quota < -maxExactInteger || b.Quota > maxExactInteger || b.UsedQuota < 0 || b.UsedQuota > maxExactInteger {
+// ValidateUsageSummary 验证三态及所有可空展示字段。
+func ValidateUsageSummary(summary UsageSummary) error {
+	if summary.State != "ready" && summary.State != "pending" && summary.State != "uninitialized" {
 		return ErrUnavailable
 	}
-	if b.Points != nil && (b.State != "ready" || !b.Points.valid()) {
+	if summary.MonthlyRemainingPercent != nil && (math.IsNaN(*summary.MonthlyRemainingPercent) || math.IsInf(*summary.MonthlyRemainingPercent, 0) || *summary.MonthlyRemainingPercent < 0 || *summary.MonthlyRemainingPercent > 100) {
+		return ErrUnavailable
+	}
+	if (summary.NextResetAt != nil && (*summary.NextResetAt <= 0 || *summary.NextResetAt > maxUsageSummaryUnixSeconds)) || (summary.SubscriptionEndsAt != nil && (*summary.SubscriptionEndsAt <= 0 || *summary.SubscriptionEndsAt > maxUsageSummaryUnixSeconds)) {
+		return ErrUnavailable
+	}
+	if summary.PointsBalance != nil && (len(*summary.PointsBalance) > 32 || !usageSummaryPoints.MatchString(*summary.PointsBalance)) {
 		return ErrUnavailable
 	}
 	return nil
 }
 
-// GetBalance 查询指定员工余额，不领取 default，不缓存或重试。
-func (c *Client) GetBalance(ctx context.Context, subject Subject) (Balance, error) {
-	var wire balanceWire
+// GetUsageSummary 查询指定员工额度摘要，不领取 default、不缓存或重试。
+func (c *Client) GetUsageSummary(ctx context.Context, subject Subject) (UsageSummary, error) {
+	var wire usageSummaryWire
 	if err := c.call(ctx, subject, BalancePath, &wire); err != nil {
-		return Balance{}, err
+		return UsageSummary{}, err
 	}
-	if wire.State == nil || wire.Quota == nil || wire.UsedQuota == nil {
-		return Balance{}, ErrUnavailable
+	summary := UsageSummary{
+		State:                   *wire.State,
+		MonthlyRemainingPercent: wire.MonthlyRemainingPercent,
+		NextResetAt:             wire.NextResetAt,
+		SubscriptionEndsAt:      wire.SubscriptionEndsAt,
+		PointsBalance:           wire.PointsBalance,
 	}
-	b := Balance{State: *wire.State, Quota: *wire.Quota, UsedQuota: *wire.UsedQuota, Points: wire.Points}
-	if err := ValidateBalance(b); err != nil {
-		return Balance{}, err
+	if err := ValidateUsageSummary(summary); err != nil {
+		return UsageSummary{}, err
 	}
-	return b, nil
+	return summary, nil
 }
 
-type balanceWire struct {
-	State     *string
-	Quota     *int64
-	UsedQuota *int64
-	Points    *BalancePoints
+type usageSummaryWire struct {
+	State                   *string
+	MonthlyRemainingPercent *float64
+	NextResetAt             *int64
+	SubscriptionEndsAt      *int64
+	PointsBalance           *string
 }
 
-// UnmarshalJSON 拒绝重复、大小写歧义和未知余额字段，不将缺失字段解释为零。
-func (b *balanceWire) UnmarshalJSON(raw []byte) error {
+// UnmarshalJSON 要求完整字段集，并拒绝重复、大小写歧义和未知字段。
+func (w *usageSummaryWire) UnmarshalJSON(raw []byte) error {
 	d := json.NewDecoder(bytes.NewReader(raw))
 	opening, err := d.Token()
 	if err != nil || opening != json.Delim('{') {
 		return ErrUnavailable
 	}
-	seen := make(map[string]bool, 4)
+	seen := make(map[string]bool, 5)
 	for d.More() {
 		token, err := d.Token()
 		name, ok := token.(string)
@@ -73,15 +90,15 @@ func (b *balanceWire) UnmarshalJSON(raw []byte) error {
 		seen[name] = true
 		switch name {
 		case "state":
-			err = d.Decode(&b.State)
-		case "quota":
-			err = d.Decode(&b.Quota)
-		case "used_quota":
-			err = d.Decode(&b.UsedQuota)
-		case "points":
-			var points BalancePoints
-			err = d.Decode(&points)
-			b.Points = &points
+			err = d.Decode(&w.State)
+		case "monthly_remaining_percent":
+			err = d.Decode(&w.MonthlyRemainingPercent)
+		case "next_reset_at":
+			err = d.Decode(&w.NextResetAt)
+		case "subscription_ends_at":
+			err = d.Decode(&w.SubscriptionEndsAt)
+		case "points_balance":
+			err = d.Decode(&w.PointsBalance)
 		default:
 			return ErrUnavailable
 		}
@@ -90,7 +107,7 @@ func (b *balanceWire) UnmarshalJSON(raw []byte) error {
 		}
 	}
 	closing, err := d.Token()
-	if err != nil || closing != json.Delim('}') {
+	if err != nil || closing != json.Delim('}') || w.State == nil || len(seen) != 5 {
 		return ErrUnavailable
 	}
 	return nil

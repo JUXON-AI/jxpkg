@@ -127,6 +127,28 @@ func TestSessionAcquireUsesOneAtomicRedisCommand(t *testing.T) {
 	}
 }
 
+func TestTransactionConsumeUsesACLCompatibleAtomicRedisCommand(t *testing.T) {
+	a, _ := fixtureRuntime(t)
+	ctx := context.Background()
+	id, started, err := a.store.start(ctx, transaction{Nonce: "nonce", State: "state", ReturnTo: "/sessions"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	audit := &redisProcessAudit{}
+	a.store.db.AddHook(audit)
+	consumed, err := a.store.consume(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRedisCommands(t, audit.commands(), []string{"eval"})
+	if consumed.Nonce != started.Nonce || consumed.State != started.State || consumed.ReturnTo != started.ReturnTo {
+		t.Fatalf("consumed transaction = %+v, want %+v", consumed, started)
+	}
+	if _, err := a.store.consume(ctx, id); !errors.Is(err, _errMissing) {
+		t.Fatalf("transaction replay error = %v", err)
+	}
+}
+
 func TestSessionAcquireRetryDelayIsBoundedAndBudgetCapped(t *testing.T) {
 	for range 1000 {
 		delay := sessionAcquireRetryDelay(time.Second)
