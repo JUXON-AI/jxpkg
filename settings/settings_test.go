@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
@@ -218,7 +219,59 @@ func TestGetYamlContextFailsClosedWithoutCoreDatabase(t *testing.T) {
 	}
 }
 
+func TestSettingsUsePostgresIdentifiers(t *testing.T) {
+	capture := make(chan _settingsQueryCapture, 1)
+	sqlDB := openSettingsTestSQL(t, func(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+		capture <- _settingsQueryCapture{query: query, args: append([]driver.NamedValue(nil), args...)}
+		return settingsRows("instance_id: instance-a\n"), nil
+	})
+	db, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB}), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value struct {
+		InstanceID string `yaml:"instance_id"`
+	}
+	if err := getYamlContext(context.Background(), db, "jxcredits", "newapi", &value); err != nil {
+		t.Fatal(err)
+	}
+	if value.InstanceID != "instance-a" {
+		t.Fatalf("unexpected YAML instance_id: %q", value.InstanceID)
+	}
+	query := <-capture
+	if !strings.Contains(query.query, `FROM "core_settings"`) ||
+		!strings.Contains(query.query, `"group" = $1 AND "key" = $2`) {
+		t.Fatalf("unexpected settings query: %s", query.query)
+	}
+	if len(query.args) != 3 || query.args[0].Value != "jxcredits" || query.args[1].Value != "newapi" {
+		t.Fatalf("unexpected settings parameters: %v", query.args)
+	}
+
+	result := upsertSetting(db.Session(&gorm.Session{DryRun: true, SkipDefaultTransaction: true}), &SettingItem{
+		Group: "jxcredits", Key: "newapi", ValueType: ValueYaml, Value: "instance_id: instance-a\n",
+	})
+	if result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	sql := result.Statement.SQL.String()
+	if !strings.Contains(sql, `INSERT INTO "core_settings"`) ||
+		!strings.Contains(sql, `ON CONFLICT ("group","key") DO UPDATE SET`) ||
+		!strings.Contains(sql, `"default"="excluded"."default"`) {
+		t.Fatalf("unexpected settings upsert: %s", sql)
+	}
+}
+
 func openSettingsTestDB(t *testing.T, query func(context.Context, string, []driver.NamedValue) (driver.Rows, error)) (*gorm.DB, *sql.DB) {
+	t.Helper()
+	sqlDB := openSettingsTestSQL(t, query)
+	db, err := gorm.Open(mysql.New(mysql.Config{Conn: sqlDB, SkipInitializeWithVersion: true}), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return db, sqlDB
+}
+
+func openSettingsTestSQL(t *testing.T, query func(context.Context, string, []driver.NamedValue) (driver.Rows, error)) *sql.DB {
 	t.Helper()
 	sqlDB := sql.OpenDB(&_settingsTestConnector{query: query})
 	t.Cleanup(func() {
@@ -226,11 +279,7 @@ func openSettingsTestDB(t *testing.T, query func(context.Context, string, []driv
 			t.Errorf("close settings test database: %v", err)
 		}
 	})
-	db, err := gorm.Open(mysql.New(mysql.Config{Conn: sqlDB, SkipInitializeWithVersion: true}), &gorm.Config{Logger: logger.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return db, sqlDB
+	return sqlDB
 }
 
 func settingsRows(yamlValue string) driver.Rows {

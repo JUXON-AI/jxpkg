@@ -78,9 +78,12 @@ func (Task) TableName() string {
 // TaskList 是任务列表。
 type TaskList []Task
 
-// InitDB 初始化任务表及其显式迁移索引。
+// InitDB 显式初始化 Core 数据库中的任务表及其索引。
 func InitDB() error {
 	db := dbtools.Core()
+	if db.Dialector.Name() == "postgres" {
+		return initPostgresTaskTable(db)
+	}
 	if err := dbtools.InitModel(db, &Task{}); err != nil {
 		return err
 	}

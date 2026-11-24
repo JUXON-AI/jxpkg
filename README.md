@@ -255,6 +255,8 @@ router := server.NewRouter("/v1/",
 
 管理命名 GORM 连接。`InitDBConn` 初始化单个连接，`InitMutilDBConn` 初始化多个连接，`DB(name)` 读取命名连接，`Core`/`Account`/`Jxone` 是约定名称的快捷入口。
 
+连接 URL 支持 `mysql://`、`postgres://` 和 `postgresql://`。使用 PostgreSQL 存储 Core 配置与任务时，将 `database_conns.core` 指向目标 PostgreSQL 库，并由应用显式执行 `settings.InitDB` 和 `task.InitDB`。
+
 连接池可按数据库名通过环境变量配置。例如 `account` 使用
 `JX_DB_ACCOUNT_MAX_OPEN_CONNS=16`、`JX_DB_ACCOUNT_MAX_IDLE_CONNS=8`、
 `JX_DB_ACCOUNT_CONN_MAX_IDLE_TIME=10m`、`JX_DB_ACCOUNT_CONN_MAX_LIFETIME=30m`。
@@ -325,6 +327,8 @@ logs.Infow("request complete", "request_id", requestID)
 ### `task`
 
 提供数据库任务记录、Redis Stream/队列、worker 健康检查和 callback 注册。典型流程是应用显式 `InitDB`、注册每种 task type 的 callback，再启动任务协调逻辑。
+
+从已有 MySQL Core 迁移时，应用需要保留任务 ID、归属、状态、时间戳和请求结果，并在恢复后校准 PostgreSQL 自增序列。应用自己的原生 SQL 和历史表字段也需要在切库前核对。
 
 从 v0.0.24 开始，`RegisterWorkerRoutes` 必须显式传入 `WorkerCaller`：受信客户端证书唯一 URI SAN 与固定 taskType 一一绑定，Token 是第二层校验，拒绝 Cookie。应用使用 `NewWorkerServer(WorkerServerConfig, service, taskType, WorkerConfig, credits.AcquireFunc)` 启动独立 TLS 1.3 双向认证入口，显式调用 `Serve`，退出时 `Close`。Worker 使用 `NewWorkerHTTPClient(credits.TLSConfig, timeout)`；该客户端拒绝明文 HTTP 和重定向，调用方关闭空闲连接。SDK 不读取 settings、环境或 Account。旧的 v0.0.23 调用须补齐证书与 caller 配置后升级，否则注册失败关闭访问；原有其他手工注册路由不受影响。
 

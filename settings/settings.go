@@ -44,7 +44,7 @@ func (*SettingItem) TableName() string {
 	return TableNameSettings
 }
 
-// InitDB .
+// InitDB explicitly provisions the settings table and its group/key index.
 func InitDB() error {
 	return dbtools.InitModel(
 		dbtools.Core(),
@@ -94,14 +94,19 @@ func SetYaml(group, key string, value interface{}) error {
 	return UpsertSetting(si)
 }
 
-// UpsertSetting or update the trade calendar of a stock.
+// UpsertSetting inserts a setting or updates the value and metadata for its group/key.
+// jxlog:nonbusiness configuration persistence; the caller owns error handling.
 func UpsertSetting(v *SettingItem) error {
-	// rdsKey := redisCacheKey(v.Group, v.Key)
-	// cache.Std().Delete(rdsKey)
-	return dbtools.Core().Table(TableNameSettings).
+	return upsertSetting(dbtools.Core(), v).Error
+}
+
+// jxlog:nonbusiness database operation; UpsertSetting returns the error to its caller.
+func upsertSetting(db *gorm.DB, v *SettingItem) *gorm.DB {
+	return db.Table(TableNameSettings).
 		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "group"}, {Name: "key"}},
 			DoUpdates: clause.AssignmentColumns([]string{"name", "describe", "value", "value_type", "default"}),
-		}).Create(v).Error
+		}).Create(v)
 }
 
 // Get 获取数据库或者缓存配置项
@@ -168,7 +173,10 @@ func getContext(ctx context.Context, db *gorm.DB, group, key string) (*SettingIt
 	var (
 		ret = &SettingItem{}
 		err = db.WithContext(ctx).Table(TableNameSettings).
-			Where("`group` = ? AND `key` = ?", group, key).
+			Where(
+				clause.Eq{Column: clause.Column{Name: "group"}, Value: group},
+				clause.Eq{Column: clause.Column{Name: "key"}, Value: key},
+			).
 			First(ret).Error
 	)
 	if err != nil {

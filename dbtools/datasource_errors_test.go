@@ -41,6 +41,8 @@ func TestDatabaseInitializationErrorsDoNotExposeCredentials(t *testing.T) {
 			"mysql://PRIVATE_USER_CANARY:PRIVATE_PASSWORD_CANARY%zz@localhost/db",
 			"mysql://PRIVATE_USER_CANARY:PRIVATE_PASSWORD_CANARY@localhost/db?timeout=PRIVATE_OPTION_CANARY",
 			"mysql://PRIVATE_USER_CANARY:PRIVATE_PASSWORD_CANARY@127.0.0.1:bad/db",
+			"postgres://PRIVATE_USER_CANARY:PRIVATE_PASSWORD_CANARY@127.0.0.1/db?sslmode=PRIVATE_OPTION_CANARY",
+			"postgresql://PRIVATE_USER_CANARY:PRIVATE_PASSWORD_CANARY@127.0.0.1:bad/db",
 			"private_scheme_canary://PRIVATE_USER_CANARY:PRIVATE_PASSWORD_CANARY@localhost/db",
 			"mysql://127.0.0.1:bad/db",
 		} {

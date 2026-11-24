@@ -21,10 +21,21 @@ func TestCallbackLookupHonorsDeadlineWhileDatabaseReadIsBlocked(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Close()
-	if _, err := lock.ExecContext(context.Background(), "LOCK TABLES core_task WRITE"); err != nil {
-		t.Fatal(err)
+	if db.Dialector.Name() == "postgres" {
+		tx, err := lock.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		if _, err := tx.ExecContext(context.Background(), "LOCK TABLE core_task IN ACCESS EXCLUSIVE MODE"); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		if _, err := lock.ExecContext(context.Background(), "LOCK TABLES core_task WRITE"); err != nil {
+			t.Fatal(err)
+		}
+		defer lock.ExecContext(context.Background(), "UNLOCK TABLES")
 	}
-	defer lock.ExecContext(context.Background(), "UNLOCK TABLES")
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	started := time.Now()

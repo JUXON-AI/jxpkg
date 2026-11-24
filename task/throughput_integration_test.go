@@ -21,8 +21,9 @@ func throughputDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	raw := os.Getenv("JX_TASK_TEST_DATABASE_URL")
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "mysql" || !strings.HasSuffix(u.Path, "_test") {
-		t.Fatal("dedicated *_test MySQL database URL required")
+	if err != nil || !strings.HasSuffix(u.Path, "_test") ||
+		(u.Scheme != "mysql" && u.Scheme != "postgres" && u.Scheme != "postgresql") {
+		t.Fatal("dedicated *_test MySQL or PostgreSQL database URL required")
 	}
 	db, err := dbtools.InitDBConn("core", raw)
 	if err != nil {
