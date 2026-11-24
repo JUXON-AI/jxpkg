@@ -154,6 +154,8 @@ router.Post("profile.Get", bff.Require(), server.API(handler.GetProfile))
 
 `Require` 成功后，`FromContext` 返回已认证成员的原生 `Principal` 和有效标志。应用须通过在线权威目录校验该成员，自行组合 `identity.Authorization` 并通过 `identity.WithAuthorization` 写入请求上下文。副作用请求必须由 BFF 完成 CSRF 校验；调用方不得恢复 Cookie 与 Bearer 间的静默回退。
 
+受限 BFF Redis ACL 至少需要 `AUTH`、`HELLO`、`PING`、`SELECT`、`CLIENT SETINFO`、`CLIENT SETNAME`、`GET`、`SET`、`DEL`、`EVAL`、`PTTL`、`PEXPIRE` 和 `EXISTS`。一次性登录事务通过 Lua `EVAL` 原子执行 `GET+DEL`，部署 ACL 不依赖只在部分共享实例开放的 `GETDEL` 命令。
+
 `Principal.Username` 和 `Principal.OrganizationName` 来自同一次已校验 profile 与组织行，并通过 `identity.WithDisplayNames` 发布。展示名缺失不影响身份准入；请求 header 和 body 不能提供或覆盖这些值。
 
 纯身份模式（`APIResource` 为空）把资料展示绑定到每次必做的在线组织身份检查：BFF 仅在该检查中请求受限的 `user` 投影，并在发布前校验其 subject 与已验证 Token 一致且资料字段有界。该模式不读取分钟级 UserInfo 资料缓存，也不会在投影缺失或畸形时回退到 UserInfo；资源 Token 模式继续使用既有 UserInfo 与组织权限流程。
