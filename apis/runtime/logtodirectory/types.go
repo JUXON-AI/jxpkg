@@ -54,7 +54,23 @@ type Options struct {
 	// IncludeMembershipEpoch requires every returned member to carry a
 	// canonical positive decimal membership epoch restricted to int64.
 	IncludeMembershipEpoch bool
+	// IncludeWorkspaceKind requests and requires organization.workspace_kind.
+	IncludeWorkspaceKind bool
 }
+
+// WorkspaceKind identifies the trust category of a workload-directory
+// organization. The zero value means the caller did not opt in or no kind was
+// available; consumers must not infer it from an organization name or ID.
+type WorkspaceKind string
+
+const (
+	// WorkspaceKindUnknown is returned when workspace kind was not requested.
+	WorkspaceKindUnknown WorkspaceKind = ""
+	// WorkspaceKindCompany identifies an organization-backed company workspace.
+	WorkspaceKindCompany WorkspaceKind = "company"
+	// WorkspaceKindPersonal identifies a personal workspace.
+	WorkspaceKindPersonal WorkspaceKind = "personal"
+)
 
 // Organization is an organization identity returned by a snapshot or bounded
 // search page.
@@ -63,6 +79,8 @@ type Organization struct {
 	ID string `json:"id"`
 	// Name is the current organization display name.
 	Name string `json:"name"`
+	// WorkspaceKind is present only when requested through Options.
+	WorkspaceKind WorkspaceKind `json:"workspace_kind,omitempty"`
 }
 
 // Member is one active workload-directory member.

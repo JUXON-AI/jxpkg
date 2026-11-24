@@ -47,6 +47,47 @@ func TestListPageMockProviderContractPendingInterop(t *testing.T) {
 	}
 }
 
+func TestListPageWorkspaceKindOptInContract(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		options     Options
+		wantInclude bool
+		wantKind    WorkspaceKind
+	}{
+		{name: "default legacy response", wantKind: WorkspaceKindUnknown},
+		{
+			name: "company", options: Options{IncludeWorkspaceKind: true},
+			wantInclude: true, wantKind: WorkspaceKindCompany,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, _ := newPlainTestClient(t, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.URL.Path == tokenPath {
+					writeToken(response)
+					return
+				}
+				fields := decodeRawObject(t, request)
+				_, exists := fields["include_workspace_kind"]
+				if exists != test.wantInclude {
+					t.Fatalf("include_workspace_kind presence = %t, want %t", exists, test.wantInclude)
+				}
+				kind := ""
+				if test.wantInclude {
+					kind = `,"workspace_kind":"company"`
+				}
+				writeJSON(response, http.StatusOK, `{"organization":{"id":"org-1","name":"Company"`+kind+`},"members":[],"departments":[],"next_cursor":null}`)
+			}))
+			snapshot, next, err := client.ListPage(context.Background(), "org-1", "", 1, test.options)
+			if err != nil {
+				t.Fatalf("ListPage() error = %v", err)
+			}
+			if next != nil || snapshot.Organization.WorkspaceKind != test.wantKind {
+				t.Fatalf("next = %v, snapshot = %#v", next, snapshot)
+			}
+		})
+	}
+}
+
 func TestListPageExplicitBoundsAndOptionalFields(t *testing.T) {
 	client, _ := newPlainTestClient(t, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == tokenPath {

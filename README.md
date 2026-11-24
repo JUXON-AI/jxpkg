@@ -123,7 +123,7 @@ snapshot, err := client.Snapshot(ctx, organizationID, userIDs, logtodirectory.Op
 })
 ```
 
-`Snapshot` 不缓存成员、角色、资料或部门，只缓存有界 M2M access token；默认超时 10 秒，显式范围 1..30 秒。同一 client 的冷 token 刷新会合并等待者，目录数据请求仍可并行；现有 request ID 会透传到 token 和每个目录请求。`Options.IncludeMembershipEpoch` 要求每个成员返回 canonical 正整数 decimal string，SDK 不把 epoch 解码为浮点数。错误通过 `ErrDenied`、`ErrUnavailable`、`ErrProtocol` 分类；固定目录 403 仅在严格精确的 `organization_access_denied` JSON 下返回包装 `ErrDenied` 的 `ErrOrganizationDenied`。调用方仍可用 `errors.Is` 检查 context cancellation。响应正文、token、Client Secret 和配置不会被写入错误。
+`Snapshot` 不缓存成员、角色、资料或部门，只缓存有界 M2M access token；默认超时 10 秒，显式范围 1..30 秒。同一 client 的冷 token 刷新会合并等待者，目录数据请求仍可并行；现有 request ID 会透传到 token 和每个目录请求。`Options.IncludeMembershipEpoch` 要求每个成员返回 canonical 正整数 decimal string，SDK 不把 epoch 解码为浮点数。`Options.IncludeWorkspaceKind` 采用显式 opt-in：默认请求不发送 `include_workspace_kind`，默认响应保持旧组织字段形状并返回 `WorkspaceKindUnknown`；启用后 provider 必须返回 `company` 或 `personal`，缺字段、其他值或在未启用时返回该字段均为 `ErrProtocol`。`Snapshot` 与 `ListPage` 共用该协议，`SearchOrganizations` 不新增 opt-in。错误通过 `ErrDenied`、`ErrUnavailable`、`ErrProtocol` 分类；固定目录 403 仅在严格精确的 `organization_access_denied` JSON 下返回包装 `ErrDenied` 的 `ErrOrganizationDenied`。调用方仍可用 `errors.Is` 检查 context cancellation。响应正文、token、Client Secret 和配置不会被写入错误。
 
 `ListPage` 使用同一 snapshot path 的单页列出契约；SDK 与配套 Logto handler 已通过本地 HTTPS、数据库联合测试及独立复审。使用前仍须部署配套 provider，并在 provider registry 为该 workload 显式启用 `allowMemberListing`；省略时禁止列出。SDK 不提供 capability 覆盖或跨页聚合，调用方须自行设置完整性、人数、页数和总时限。
 

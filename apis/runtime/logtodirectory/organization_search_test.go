@@ -196,6 +196,8 @@ func TestSearchOrganizationsResponseValidation(t *testing.T) {
 		{name: "wrong array type", body: `{"organizations":{}}`, limit: 1, wantErr: true},
 		{name: "unknown top-level field", body: `{"organizations":[],"extra":true}`, limit: 1, wantErr: true},
 		{name: "unknown organization field", body: `{"organizations":[{"id":"org-1","name":"Company","extra":true}]}`, limit: 1, wantErr: true},
+		{name: "workspace kind company", body: `{"organizations":[{"id":"org-1","name":"Company","workspace_kind":"company"}]}`, limit: 1, wantErr: true},
+		{name: "workspace kind null", body: `{"organizations":[{"id":"org-1","name":"Company","workspace_kind":null}]}`, limit: 1, wantErr: true},
 		{name: "missing id", body: `{"organizations":[{"name":"Company"}]}`, limit: 1, wantErr: true},
 		{name: "missing name", body: `{"organizations":[{"id":"org-1"}]}`, limit: 1, wantErr: true},
 		{name: "null name", body: `{"organizations":[{"id":"org-1","name":null}]}`, limit: 1, wantErr: true},
