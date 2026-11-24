@@ -173,7 +173,7 @@ func TestLogtoCreditsExecutionAndBalanceIntegration(t *testing.T) {
 		}
 		body := `{"base_url":"https://models.invalid/v1","api_key":"synthetic-key"}`
 		if r.URL.Path == credits.BalancePath {
-			body = `{"state":"ready","quota":6500,"used_quota":3500}`
+			body = `{"state":"ready","monthly_remaining_percent":73.25,"next_reset_at":1767225600,"subscription_ends_at":1798761600,"points_balance":"745.90"}`
 		}
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
 	}))
@@ -210,8 +210,8 @@ func TestLogtoCreditsExecutionAndBalanceIntegration(t *testing.T) {
 	}
 	balance := request("/v1/jxagent.GetMyModelBalance", "org-one", info.CSRF)
 	var result browsercredits.GetMyModelBalanceResponse
-	if balance.Code != 200 || json.Unmarshal(balance.Body.Bytes(), &result) != nil || result.Code != 0 || result.Response.Quota != 6500 || result.Response.UserID != "user-one" || result.Response.OrganizationID != "org-one" || calls != 2 {
-		t.Fatal("verified balance response lost membership or wallet")
+	if balance.Code != 200 || json.Unmarshal(balance.Body.Bytes(), &result) != nil || result.Code != 0 || result.Response.State != "ready" || result.Response.MonthlyRemainingPercent == nil || *result.Response.MonthlyRemainingPercent != 73.25 || result.Response.UserID != "user-one" || result.Response.OrganizationID != "org-one" || calls != 2 {
+		t.Fatal("verified balance response lost membership or summary")
 	}
 	for _, tc := range []struct {
 		name, org, csrf string
