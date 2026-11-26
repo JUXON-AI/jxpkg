@@ -566,9 +566,16 @@ func (a *Runtime) verifyClaims(ctx context.Context, raw, org, clientID string, g
 	if json.Unmarshal(payload, &claims) != nil {
 		return nil, errors.New("invalid claims")
 	}
-	validator := jwt.NewValidator(jwt.WithIssuer(a.config.Endpoint+"/oidc"), jwt.WithAudience(a.config.APIResource), jwt.WithExpirationRequired(), jwt.WithIssuedAt())
+	now := time.Now()
+	validator := jwt.NewValidator(jwt.WithIssuer(a.config.Endpoint+"/oidc"), jwt.WithAudience(a.config.APIResource), jwt.WithExpirationRequired(), jwt.WithTimeFunc(func() time.Time { return now }))
 	if validator.Validate(&claims) != nil || claims.Subject == "" || claims.ClientID != clientID || claims.OrganizationID != org {
 		return nil, errors.New("invalid API claims")
+	}
+	// The issuer records iat at whole-second precision. Allow a verifier
+	// just behind the issuer to accept a fresh token, without extending exp
+	// or accepting an explicitly future nbf.
+	if claims.IssuedAt != nil && claims.IssuedAt.Time.After(now.Add(time.Second)) {
+		return nil, errors.New("API credential issued in the future")
 	}
 	return &claims, nil
 }
