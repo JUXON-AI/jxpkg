@@ -1,9 +1,35 @@
 package logtobff
 
 import (
+	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/coreos/go-oidc/v3/oidc"
 )
+
+func TestResourceReadKeepsBrowserSessionDuringJWKSOutage(t *testing.T) {
+	a, authority := fixtureRuntime(t)
+	cookie := loginFixture(t, a, authority)
+	workingKeys := a.keys
+	unavailable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(unavailable.Close)
+	a.keys = oidc.NewRemoteKeySet(oidc.ClientContext(context.Background(), unavailable.Client()), unavailable.URL)
+
+	response := callAuth(a, http.MethodGet, "/auth/session", "", cookie, "")
+	if response.Code != http.StatusServiceUnavailable || len(response.Result().Cookies()) != 0 {
+		t.Fatalf("JWKS outage returned HTTP %d or changed browser cookies", response.Code)
+	}
+
+	a.keys = workingKeys
+	response = callAuth(a, http.MethodGet, "/auth/session", "", cookie, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("existing session after JWKS recovery returned HTTP %d, want 200", response.Code)
+	}
+}
 
 // TestResourceReadIssuerFailureHasOneSafeDiagnostic checks the final response
 // boundary retains dependency metadata without exposing private state.
