@@ -75,8 +75,7 @@ jobs:
         run: |
           test -x /home/zoe/actions-runner/_toolcache/go/1.25.0/x64/bin/go
           printf '%s\n' /home/zoe/actions-runner/_toolcache/go/1.25.0/x64/bin >> "$GITHUB_PATH"
-          mkdir -p "$RUNNER_TEMP/go-tmp"
-          printf 'GOMODCACHE=%s\nGOCACHE=%s\nGOTMPDIR=%s\n' "$RUNNER_TEMP/go-mod" "$RUNNER_TEMP/go-build" "$RUNNER_TEMP/go-tmp" >> "$GITHUB_ENV"
+          printf 'GOMODCACHE=%s\nGOCACHE=%s\n' "$RUNNER_TEMP/go-mod" "$RUNNER_TEMP/go-build" >> "$GITHUB_ENV"
       - name: Verify source and dependencies
         run: make check
       - name: Test and compile
