@@ -2,12 +2,52 @@ package logtobff
 
 import (
 	"context"
+	"crypto"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/golang-jwt/jwt/v5"
 )
+
+func TestResourceVerificationAcceptsIssuerClockSkewOnlyForIssuedAt(t *testing.T) {
+	authority, endpoint := fixtureAuthority(t)
+	runtime := &Runtime{
+		config: Config{Endpoint: endpoint, APIResource: "https://resource.invalid"},
+		keys:   &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{&authority.key.PublicKey}},
+	}
+	for _, test := range []struct {
+		name      string
+		iat       int64
+		exp       int64
+		nbf       int64
+		wantValid bool
+	}{
+		{name: "fresh", iat: 1, exp: 60, nbf: -1, wantValid: true},
+		{name: "future issue time", iat: 3, exp: 60, nbf: -1},
+		{name: "expired", iat: -60, exp: 0, nbf: -60},
+		{name: "future not before", iat: 0, exp: 60, nbf: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			next := time.Now().Truncate(time.Second).Add(time.Second)
+			if remaining := time.Until(next); remaining < 300*time.Millisecond {
+				time.Sleep(remaining)
+			}
+			now := time.Now().Unix()
+			raw := authority.signed(jwt.MapClaims{
+				"iss": endpoint + "/oidc", "aud": runtime.config.APIResource, "sub": "user-one",
+				"client_id": "client-one", "organization_id": "org-one",
+				"iat": now + test.iat, "exp": now + test.exp, "nbf": now + test.nbf,
+			})
+			_, err := runtime.verify(t.Context(), raw, "org-one", "client-one")
+			if (err == nil) != test.wantValid {
+				t.Fatalf("credential accepted = %t, want %t", err == nil, test.wantValid)
+			}
+		})
+	}
+}
 
 func TestResourceReadKeepsBrowserSessionDuringJWKSOutage(t *testing.T) {
 	a, authority := fixtureRuntime(t)
