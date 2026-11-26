@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   verify:
-    uses: JUXON-AI/jxpkg/.github/workflows/ci-runner.yml@f675cee2a78fb9d0a737b37a32a11415afc4e83e
+    uses: JUXON-AI/jxpkg/.github/workflows/ci-runner.yml@cc6e0f29c25a16735545305ae90e8f1ecef95361
     with:
       ref: ${{ inputs.ref || github.sha }}
     secrets:
