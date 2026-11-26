@@ -556,7 +556,9 @@ func (a *Runtime) verifyClaims(ctx context.Context, raw, org, clientID string, g
 	}
 	payload, err := a.keys.VerifySignature(ctx, raw)
 	if err != nil {
-		if global {
+		// RemoteKeySet wraps key retrieval failures and reports an unmatched
+		// signature directly. A failed fetch supplies no verdict on the token.
+		if global || errors.Unwrap(err) != nil || errors.Is(err, ErrUnavailable) {
 			return nil, ErrUnavailable
 		}
 		return nil, err
@@ -584,6 +586,9 @@ func (a *Runtime) organizationClaims(ctx context.Context, value *session, org st
 		return nil, err
 	}
 	claims, err := a.verify(ctx, raw, org, a.config.ClientID)
+	if errors.Is(err, ErrUnavailable) {
+		return nil, err
+	}
 	if err != nil || claims.Subject != value.Subject {
 		return nil, &accessError{status: 401, code: "api_credential_invalid"}
 	}
