@@ -233,6 +233,7 @@ func (a *Runtime) Handler() http.Handler {
 	mux.HandleFunc("POST /auth/logout", a.withSession(a.logout))
 	if a.globalAuthority == nil {
 		mux.HandleFunc("GET /auth/account-center", a.withSession(a.accountCenter))
+		mux.HandleFunc("GET /auth/change-password", a.withReadSession(a.changePassword))
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -488,6 +489,9 @@ func (a *Runtime) authorizedContext(ctx context.Context, id string, principal Pr
 		ctx = displayContext
 	}
 	ctx = context.WithValue(ctx, principalKey{}, principal)
+	ctx = context.WithValue(ctx, passwordVerifierKey{}, func(ctx context.Context, password string) error {
+		return a.verifyCurrentPassword(ctx, id, principal, password)
+	})
 	ctx = context.WithValue(ctx, revalidationKey{}, func(ctx context.Context) error {
 		return a.revalidate(ctx, id, principal, principal.Permissions)
 	})
